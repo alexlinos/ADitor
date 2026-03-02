@@ -1,6 +1,7 @@
 """User management tools for Active Directory."""
 
 import hashlib
+import json
 import secrets
 import string
 from typing import List, Dict, Any, Optional
@@ -66,12 +67,12 @@ class UserTools(BaseTool):
             for entry in results:
                 user_info = {
                     'dn': entry['dn'],
-                    'sAMAccountName': entry['attributes'].get('sAMAccountName', [''])[0],
-                    'displayName': entry['attributes'].get('displayName', [''])[0],
-                    'mail': entry['attributes'].get('mail', [''])[0],
-                    'enabled': self._is_user_enabled(entry['attributes'].get('userAccountControl', [0])[0])
+                    'sAMAccountName': self._get_attr_value(entry['attributes'], 'sAMAccountName', ''),
+                    'displayName': self._get_attr_value(entry['attributes'], 'displayName', ''),
+                    'mail': self._get_attr_value(entry['attributes'], 'mail', ''),
+                    'enabled': self._is_user_enabled(self._get_attr_value(entry['attributes'], 'userAccountControl', 0))
                 }
-                
+
                 # Add additional attributes if present
                 for attr in attributes:
                     if attr not in ['sAMAccountName', 'displayName', 'mail'] and attr in entry['attributes']:
@@ -80,7 +81,7 @@ class UserTools(BaseTool):
                             user_info[attr] = value[0]
                         else:
                             user_info[attr] = value
-                
+
                 users.append(user_info)
             
             log_ldap_operation("list_users", search_base, True, f"Found {len(users)} users")
@@ -145,9 +146,9 @@ class UserTools(BaseTool):
                 'dn': user_entry['dn'],
                 'attributes': user_entry['attributes']
             }
-            
+
             # Add computed fields
-            uac = user_entry['attributes'].get('userAccountControl', [0])[0]
+            uac = self._get_attr_value(user_entry['attributes'], 'userAccountControl', 0)
             user_info['computed'] = {
                 'enabled': self._is_user_enabled(uac),
                 'locked': self._is_user_locked(uac),
@@ -266,31 +267,35 @@ class UserTools(BaseTool):
     def modify_user(self, username: str, attributes: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Modify user attributes.
-        
+
         Args:
             username: Username to modify
             attributes: Dictionary of attributes to modify
-            
+
         Returns:
             List of MCP content objects with modification result
         """
         try:
+            # Handle case where attributes might be passed as a JSON string
+            if isinstance(attributes, str):
+                attributes = json.loads(attributes)
+
             # Find user DN
             user_results = self.ldap.search(
                 search_base=self.ldap.ad_config.base_dn,
                 search_filter=f"(&(objectClass=user)(sAMAccountName={self._escape_ldap_filter(username)}))",
-                attributes=['dn']
+                attributes=['sAMAccountName']  # DN is always returned separately, not as an attribute
             )
-            
+
             if not user_results:
                 return self._format_response({
                     "success": False,
                     "error": f"User '{username}' not found",
                     "username": username
                 }, "modify_user")
-            
+
             user_dn = user_results[0]['dn']
-            
+
             # Prepare modifications
             modifications = {}
             for attr, value in attributes.items():
@@ -343,9 +348,9 @@ class UserTools(BaseTool):
             user_results = self.ldap.search(
                 search_base=self.ldap.ad_config.base_dn,
                 search_filter=f"(&(objectClass=user)(sAMAccountName={self._escape_ldap_filter(username)}))",
-                attributes=['dn']
+                attributes=['sAMAccountName']  # DN is always returned separately, not as an attribute
             )
-            
+
             if not user_results:
                 return self._format_response({
                     "success": False,
@@ -418,9 +423,9 @@ class UserTools(BaseTool):
             user_results = self.ldap.search(
                 search_base=self.ldap.ad_config.base_dn,
                 search_filter=f"(&(objectClass=user)(sAMAccountName={self._escape_ldap_filter(username)}))",
-                attributes=['dn']
+                attributes=['sAMAccountName']  # DN is always returned separately, not as an attribute
             )
-            
+
             if not user_results:
                 return self._format_response({
                     "success": False,
@@ -486,8 +491,8 @@ class UserTools(BaseTool):
                 }, "get_user_groups")
             
             user_dn = user_results[0]['dn']
-            member_of = user_results[0]['attributes'].get('memberOf', [])
-            
+            member_of = self._get_attr_list(user_results[0]['attributes'], 'memberOf')
+
             # Get detailed group information
             groups = []
             for group_dn in member_of:
@@ -498,15 +503,15 @@ class UserTools(BaseTool):
                         attributes=['sAMAccountName', 'displayName', 'description', 'groupType'],
                         search_scope=ldap3.BASE
                     )
-                    
+
                     if group_info:
                         group_data = group_info[0]['attributes']
                         groups.append({
                             'dn': group_dn,
-                            'sAMAccountName': group_data.get('sAMAccountName', [''])[0],
-                            'displayName': group_data.get('displayName', [''])[0],
-                            'description': group_data.get('description', [''])[0],
-                            'groupType': group_data.get('groupType', [0])[0]
+                            'sAMAccountName': self._get_attr_value(group_data, 'sAMAccountName', ''),
+                            'displayName': self._get_attr_value(group_data, 'displayName', ''),
+                            'description': self._get_attr_value(group_data, 'description', ''),
+                            'groupType': self._get_attr_value(group_data, 'groupType', 0)
                         })
                 except:
                     # Skip if group info cannot be retrieved
@@ -531,9 +536,9 @@ class UserTools(BaseTool):
             user_results = self.ldap.search(
                 search_base=self.ldap.ad_config.base_dn,
                 search_filter=f"(&(objectClass=user)(sAMAccountName={self._escape_ldap_filter(username)}))",
-                attributes=['dn']
+                attributes=['sAMAccountName']  # DN is always returned separately, not as an attribute
             )
-            
+
             if not user_results:
                 return self._format_response({
                     "success": False,
@@ -614,15 +619,15 @@ class UserTools(BaseTool):
     
     def _is_password_expired(self, attributes: Dict[str, Any]) -> bool:
         """Check if user password is expired."""
-        pwd_last_set = attributes.get('pwdLastSet', [0])[0]
+        pwd_last_set = self._get_attr_value(attributes, 'pwdLastSet', 0)
         return pwd_last_set == 0
-    
+
     def _is_account_expired(self, attributes: Dict[str, Any]) -> bool:
         """Check if user account is expired."""
-        account_expires = attributes.get('accountExpires', [0])[0]
+        account_expires = self._get_attr_value(attributes, 'accountExpires', 0)
         if account_expires == 0 or account_expires == 9223372036854775807:  # Never expires
             return False
-        
+
         # Convert Windows timestamp to datetime
         try:
             expire_date = datetime(1601, 1, 1) + timedelta(microseconds=account_expires / 10)

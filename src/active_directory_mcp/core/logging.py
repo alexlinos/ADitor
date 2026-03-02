@@ -29,8 +29,8 @@ def setup_logging(config: LoggingConfig) -> logging.Logger:
     # Create formatter
     formatter = logging.Formatter(config.format)
     
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
+    # Console handler - use stderr to avoid interfering with MCP stdio protocol
+    console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(getattr(logging, config.level))
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
