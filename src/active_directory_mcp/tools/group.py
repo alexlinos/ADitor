@@ -61,15 +61,15 @@ class GroupTools(BaseTool):
             for entry in results:
                 group_info = {
                     'dn': entry['dn'],
-                    'sAMAccountName': entry['attributes'].get('sAMAccountName', [''])[0],
-                    'displayName': entry['attributes'].get('displayName', [''])[0],
-                    'description': entry['attributes'].get('description', [''])[0],
-                    'groupType': entry['attributes'].get('groupType', [0])[0],
-                    'memberCount': len(entry['attributes'].get('member', []))
+                    'sAMAccountName': self._get_attr_value(entry['attributes'], 'sAMAccountName', ''),
+                    'displayName': self._get_attr_value(entry['attributes'], 'displayName', ''),
+                    'description': self._get_attr_value(entry['attributes'], 'description', ''),
+                    'groupType': self._get_attr_value(entry['attributes'], 'groupType', 0),
+                    'memberCount': len(self._get_attr_list(entry['attributes'], 'member'))
                 }
-                
+
                 # Add group scope information
-                group_type = entry['attributes'].get('groupType', [0])[0]
+                group_type = self._get_attr_value(entry['attributes'], 'groupType', 0)
                 group_info['scope'] = self._get_group_scope(group_type)
                 group_info['type'] = self._get_group_type(group_type)
                 
@@ -144,14 +144,14 @@ class GroupTools(BaseTool):
                 'dn': group_entry['dn'],
                 'attributes': group_entry['attributes']
             }
-            
+
             # Add computed fields
-            group_type = group_entry['attributes'].get('groupType', [0])[0]
+            group_type = self._get_attr_value(group_entry['attributes'], 'groupType', 0)
             group_info['computed'] = {
                 'scope': self._get_group_scope(group_type),
                 'type': self._get_group_type(group_type),
-                'member_count': len(group_entry['attributes'].get('member', [])),
-                'parent_groups_count': len(group_entry['attributes'].get('memberOf', []))
+                'member_count': len(self._get_attr_list(group_entry['attributes'], 'member')),
+                'parent_groups_count': len(self._get_attr_list(group_entry['attributes'], 'memberOf'))
             }
             
             log_ldap_operation("get_group", group_name, True, f"Retrieved group: {group_entry['dn']}")
@@ -266,7 +266,7 @@ class GroupTools(BaseTool):
             group_results = self.ldap.search(
                 search_base=self.ldap.ad_config.base_dn,
                 search_filter=f"(&(objectClass=group)(sAMAccountName={self._escape_ldap_filter(group_name)}))",
-                attributes=['dn']
+                attributes=['sAMAccountName']  # DN is always returned separately, not as an attribute
             )
             
             if not group_results:
@@ -323,9 +323,9 @@ class GroupTools(BaseTool):
             group_results = self.ldap.search(
                 search_base=self.ldap.ad_config.base_dn,
                 search_filter=f"(&(objectClass=group)(sAMAccountName={self._escape_ldap_filter(group_name)}))",
-                attributes=['dn']
+                attributes=['sAMAccountName']  # DN is always returned separately, not as an attribute
             )
-            
+
             if not group_results:
                 return self._format_response({
                     "success": False,
@@ -525,22 +525,22 @@ class GroupTools(BaseTool):
                         
                         if member_info:
                             member_data = member_info[0]['attributes']
-                            object_classes = member_data.get('objectClass', [])
-                            
+                            object_classes = self._get_attr_list(member_data, 'objectClass')
+
                             member_entry = {
                                 'dn': member_dn,
-                                'sAMAccountName': member_data.get('sAMAccountName', [''])[0],
-                                'displayName': member_data.get('displayName', [''])[0],
+                                'sAMAccountName': self._get_attr_value(member_data, 'sAMAccountName', ''),
+                                'displayName': self._get_attr_value(member_data, 'displayName', ''),
                                 'type': 'group' if 'group' in object_classes else 'user',
                                 'level': level
                             }
-                            
+
                             members.append(member_entry)
-                            
+
                             # If recursive and this is a group, process its members
                             if recursive and 'group' in object_classes and member_dn not in processed_groups:
                                 processed_groups.add(member_dn)
-                                nested_members = member_data.get('member', [])
+                                nested_members = self._get_attr_list(member_data, 'member')
                                 if nested_members:
                                     process_members(nested_members, level + 1)
                         

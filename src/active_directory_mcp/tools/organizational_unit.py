@@ -65,15 +65,15 @@ class OrganizationalUnitTools(BaseTool):
             for entry in results:
                 ou_info = {
                     'dn': entry['dn'],
-                    'name': entry['attributes'].get('name', [''])[0],
-                    'description': entry['attributes'].get('description', [''])[0],
+                    'name': self._get_attr_value(entry['attributes'], 'name', ''),
+                    'description': self._get_attr_value(entry['attributes'], 'description', ''),
                     'level': self._calculate_ou_level(entry['dn'], search_base)
                 }
-                
+
                 # Add managed by information
-                managed_by = entry['attributes'].get('managedBy', [])
+                managed_by = self._get_attr_value(entry['attributes'], 'managedBy')
                 if managed_by:
-                    ou_info['managedBy'] = managed_by[0]
+                    ou_info['managedBy'] = managed_by
                 
                 # Add GP Link information if present
                 gp_link = entry['attributes'].get('gPLink', [])
@@ -545,9 +545,9 @@ class OrganizationalUnitTools(BaseTool):
                 content_info = {
                     'dn': entry['dn'],
                     'type': obj_type,
-                    'name': entry['attributes'].get('name', [''])[0] or entry['attributes'].get('sAMAccountName', [''])[0],
-                    'displayName': entry['attributes'].get('displayName', [''])[0],
-                    'description': entry['attributes'].get('description', [''])[0]
+                    'name': self._get_attr_value(entry['attributes'], 'name', '') or self._get_attr_value(entry['attributes'], 'sAMAccountName', ''),
+                    'displayName': self._get_attr_value(entry['attributes'], 'displayName', ''),
+                    'description': self._get_attr_value(entry['attributes'], 'description', '')
                 }
                 
                 contents.append(content_info)
@@ -594,20 +594,20 @@ class OrganizationalUnitTools(BaseTool):
             results = self.ldap.search(
                 search_base=ou_dn,
                 search_filter="(objectClass=*)",
-                attributes=['dn'],
+                attributes=['objectClass'],  # DN is always returned separately, not as an attribute
                 search_scope=1  # ONELEVEL equivalent
             )
             return len(results)
         except:
             return 0
-    
+
     def _count_sub_ous(self, ou_dn: str) -> int:
         """Count sub-OUs in an OU."""
         try:
             results = self.ldap.search(
                 search_base=ou_dn,
                 search_filter="(objectClass=organizationalUnit)",
-                attributes=['dn'],
+                attributes=['objectClass'],  # DN is always returned separately, not as an attribute
                 search_scope=1  # ONELEVEL equivalent
             )
             return len(results)

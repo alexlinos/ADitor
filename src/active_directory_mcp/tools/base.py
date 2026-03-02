@@ -166,10 +166,10 @@ class BaseTool(ABC):
     def _escape_ldap_filter(self, value: str) -> str:
         """
         Escape special characters in LDAP filter values.
-        
+
         Args:
             value: Value to escape
-            
+
         Returns:
             Escaped value
         """
@@ -181,12 +181,74 @@ class BaseTool(ABC):
             '\\': r'\5c',
             '\x00': r'\00'
         }
-        
+
         for char, escaped in escape_chars.items():
             value = value.replace(char, escaped)
-        
+
         return value
-    
+
+    def _get_attr_value(self, attributes: Dict[str, Any], attr_name: str, default: Any = None) -> Any:
+        """
+        Safely get an attribute value from LDAP attributes dict.
+
+        LDAP attributes can be returned as:
+        - A single value (int, str, bytes, datetime)
+        - A list of values
+        - None if not present
+
+        This method normalizes access to always return a single value (first element if list).
+
+        Args:
+            attributes: Dictionary of LDAP attributes
+            attr_name: Name of attribute to get
+            default: Default value if attribute not found
+
+        Returns:
+            Single attribute value or default
+        """
+        value = attributes.get(attr_name)
+
+        if value is None:
+            return default
+
+        # If it's a list, return the first element
+        if isinstance(value, (list, tuple)):
+            return value[0] if value else default
+
+        # Otherwise return the value directly
+        return value
+
+    def _get_attr_list(self, attributes: Dict[str, Any], attr_name: str, default: Any = None) -> list:
+        """
+        Safely get an attribute value as a list from LDAP attributes dict.
+
+        LDAP attributes can be returned as:
+        - A single value (int, str, bytes, datetime)
+        - A list of values
+        - None if not present
+
+        This method normalizes access to always return a list.
+
+        Args:
+            attributes: Dictionary of LDAP attributes
+            attr_name: Name of attribute to get
+            default: Default value if attribute not found (will be wrapped in list)
+
+        Returns:
+            List of attribute values
+        """
+        value = attributes.get(attr_name)
+
+        if value is None:
+            return [default] if default is not None else []
+
+        # If it's already a list, return it
+        if isinstance(value, (list, tuple)):
+            return list(value)
+
+        # Otherwise wrap in a list
+        return [value]
+
     @abstractmethod
     def get_schema_info(self) -> Dict[str, Any]:
         """
