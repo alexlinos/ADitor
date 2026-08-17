@@ -37,6 +37,7 @@ from .tools.group import GroupTools
 from .tools.computer import ComputerTools
 from .tools.organizational_unit import OrganizationalUnitTools
 from .tools.security import SecurityTools
+from .tools.gpo import GPOTools
 
 
 class ActiveDirectoryMCPServer:
@@ -80,6 +81,7 @@ class ActiveDirectoryMCPServer:
         self.computer_tools = ComputerTools(self.ldap_manager)
         self.ou_tools = OrganizationalUnitTools(self.ldap_manager)
         self.security_tools = SecurityTools(self.ldap_manager)
+        self.gpo_tools = GPOTools(self.ldap_manager)
 
         # Initialize MCP server (using low-level API)
         self.mcp = Server("ActiveDirectoryMCP")
@@ -681,6 +683,45 @@ class ActiveDirectoryMCPServer:
             lambda args: self.security_tools.audit_admin_accounts()
         )
 
+        # Group Policy (read-only) Tools
+        self._add_tool(
+            "get_gpos",
+            "List all Group Policy Objects in the domain (read-only)",
+            {
+                "type": "object",
+                "properties": {
+                    "name_filter": {"type": "string", "description": "Optional substring to match against GPO display name"}
+                }
+            },
+            lambda args: self.gpo_tools.get_gpos(args.get("name_filter"))
+        )
+
+        self._add_tool(
+            "get_gpo",
+            "Get detailed metadata for a single GPO by GUID or display name (read-only)",
+            {
+                "type": "object",
+                "properties": {
+                    "identifier": {"type": "string", "description": "GPO GUID (with or without braces) or exact display name"}
+                },
+                "required": ["identifier"]
+            },
+            lambda args: self.gpo_tools.get_gpo(args["identifier"])
+        )
+
+        self._add_tool(
+            "get_linked_gpos",
+            "Get the GPOs linked to an OU, domain, or site DN (read-only)",
+            {
+                "type": "object",
+                "properties": {
+                    "target_dn": {"type": "string", "description": "DN of the OU/domain/site to inspect"}
+                },
+                "required": ["target_dn"]
+            },
+            lambda args: self.gpo_tools.get_linked_gpos(args["target_dn"])
+        )
+
         # System Tools
         self._add_tool(
             "test_connection",
@@ -749,7 +790,8 @@ class ActiveDirectoryMCPServer:
                 "group_tools": self.group_tools.get_schema_info(),
                 "computer_tools": self.computer_tools.get_schema_info(),
                 "ou_tools": self.ou_tools.get_schema_info(),
-                "security_tools": self.security_tools.get_schema_info()
+                "security_tools": self.security_tools.get_schema_info(),
+                "gpo_tools": self.gpo_tools.get_schema_info()
             }
         }
 

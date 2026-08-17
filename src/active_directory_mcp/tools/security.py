@@ -6,6 +6,7 @@ import base64
 
 import ldap3
 from ldap3 import MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE
+from ldap3.core.exceptions import LDAPException
 
 from .base import BaseTool
 from ..core.logging import log_ldap_operation
@@ -30,7 +31,7 @@ class SecurityTools(BaseTool):
                     'name', 'dc', 'objectSid', 'whenCreated', 'whenChanged',
                     'lockoutThreshold', 'lockoutDuration', 'maxPwdAge', 'minPwdAge',
                     'minPwdLength', 'pwdHistoryLength', 'forceLogoff',
-                    'functionalLevel', 'gPLink'
+                    'msDS-Behavior-Version', 'gPLink'
                 ],
                 search_scope=ldap3.BASE
             )
@@ -64,6 +65,9 @@ class SecurityTools(BaseTool):
             }
             
             domain_info['password_policy'] = password_policy
+            domain_info['domain_functional_level'] = self._get_attr_value(
+                domain_entry['attributes'], 'msDS-Behavior-Version', 'unknown'
+            )
             
             log_ldap_operation("get_domain_info", self.ldap.ad_config.base_dn, True, "Retrieved domain information")
             
@@ -123,6 +127,10 @@ class SecurityTools(BaseTool):
                         
                         groups_info.append(group_info)
                         
+                except LDAPException:
+                    # Bind/connection failures must surface as errors, not an
+                    # empty-success payload — re-raise to the outer handler.
+                    raise
                 except Exception as group_error:
                     # Continue with other groups if one fails
                     self.logger.warning(f"Failed to get info for group {group_name}: {group_error}")
@@ -266,9 +274,10 @@ class SecurityTools(BaseTool):
             inactive_users = []
             for entry in results:
                 last_logon = self._get_attr_value(entry['attributes'], 'lastLogon', 0)
+                last_logon_dt = self._normalize_filetime(last_logon)
 
-                # Check if user is inactive
-                if last_logon == 0 or last_logon < cutoff_filetime:
+                # Check if user is inactive (never logged on, or before cutoff)
+                if last_logon_dt is None or last_logon_dt < cutoff_date:
                     uac = self._get_attr_value(entry['attributes'], 'userAccountControl', 0)
                     member_of = self._get_attr_list(entry['attributes'], 'memberOf')
 
@@ -277,8 +286,8 @@ class SecurityTools(BaseTool):
                         'sam_account_name': self._get_attr_value(entry['attributes'], 'sAMAccountName', ''),
                         'display_name': self._get_attr_value(entry['attributes'], 'displayName', ''),
                         'mail': self._get_attr_value(entry['attributes'], 'mail', ''),
-                        'last_logon': self._convert_filetime_to_datetime(last_logon) if last_logon > 0 else 'Never',
-                        'days_inactive': self._get_days_since_last_logon({'lastLogon': last_logon}),
+                        'last_logon': last_logon_dt.isoformat() if last_logon_dt else 'Never',
+                        'days_inactive': (datetime.now() - last_logon_dt).days if last_logon_dt else None,
                         'enabled': not bool(uac & 0x0002),
                         'group_count': len(member_of),
                         'has_privileged_groups': self._has_privileged_groups(member_of)
@@ -427,8 +436,8 @@ class SecurityTools(BaseTool):
                     )
                     
                     if group_results:
-                        members = group_results[0]['attributes'].get('member', [])
-                        
+                        members = self._get_attr_list(group_results[0]['attributes'], 'member')
+
                         for member_dn in members:
                             # Get user details
                             user_results = self.ldap.search(
@@ -461,9 +470,10 @@ class SecurityTools(BaseTool):
                                 if bool(uac & 0x0020):  # PASSWD_NOTREQD
                                     security_issues.append("Password not required")
 
-                                # Check last logon
+                                # Check last logon (may be datetime or FILETIME int)
                                 last_logon = self._get_attr_value(user_entry['attributes'], 'lastLogon', 0)
-                                days_since_logon = self._get_days_since_last_logon({'lastLogon': last_logon})
+                                last_logon_dt = self._normalize_filetime(last_logon)
+                                days_since_logon = max(0, (datetime.now() - last_logon_dt).days) if last_logon_dt else None
                                 if days_since_logon and days_since_logon > 90:
                                     security_issues.append(f"No logon for {days_since_logon} days")
 
@@ -474,7 +484,7 @@ class SecurityTools(BaseTool):
                                     'mail': self._get_attr_value(user_entry['attributes'], 'mail', ''),
                                     'privileged_group': group_name,
                                     'enabled': not bool(uac & 0x0002),
-                                    'last_logon': self._convert_filetime_to_datetime(last_logon) if last_logon > 0 else 'Never',
+                                    'last_logon': last_logon_dt.isoformat() if last_logon_dt else 'Never',
                                     'days_since_logon': days_since_logon,
                                     'logon_count': self._get_attr_value(user_entry['attributes'], 'logonCount', 0),
                                     'bad_pwd_count': self._get_attr_value(user_entry['attributes'], 'badPwdCount', 0),
@@ -486,6 +496,10 @@ class SecurityTools(BaseTool):
                                 if not any(acc['sam_account_name'] == admin_info['sam_account_name'] for acc in admin_accounts):
                                     admin_accounts.append(admin_info)
                                 
+                except LDAPException:
+                    # Bind/connection failures must surface as errors, not an
+                    # empty-success payload — re-raise to the outer handler.
+                    raise
                 except Exception as group_error:
                     self.logger.warning(f"Failed to audit group {group_name}: {group_error}")
                     continue
@@ -498,19 +512,28 @@ class SecurityTools(BaseTool):
             return self._format_response({
                 "admin_accounts": admin_accounts,
                 "total_admin_accounts": len(admin_accounts),
-                "high_risk_count": len([acc for acc in admin_accounts if acc['risk_level'] == 'high']),
-                "medium_risk_count": len([acc for acc in admin_accounts if acc['risk_level'] == 'medium']),
-                "low_risk_count": len([acc for acc in admin_accounts if acc['risk_level'] == 'low'])
+                "high_risk_count": len([acc for acc in admin_accounts if acc['risk_level'].lower() == 'high']),
+                "medium_risk_count": len([acc for acc in admin_accounts if acc['risk_level'].lower() == 'medium']),
+                "low_risk_count": len([acc for acc in admin_accounts if acc['risk_level'].lower() == 'low'])
             }, "audit_admin_accounts")
             
         except Exception as e:
             return self._handle_ldap_error(e, "audit_admin_accounts", self.ldap.ad_config.base_dn)
     
-    def _convert_time_interval(self, value: int) -> Dict[str, Any]:
-        """Convert AD time interval to human readable format."""
-        if value == 0:
+    def _convert_time_interval(self, value: Any) -> Dict[str, Any]:
+        """Convert AD time interval to human readable format.
+
+        ldap3 may return Integer8 interval attributes (maxPwdAge, minPwdAge,
+        lockoutDuration) as a timedelta when the schema is loaded, or as a raw
+        100-nanosecond count (negative for intervals). Normalize to int first.
+        """
+        if isinstance(value, timedelta):
+            value = int(value.total_seconds() * 10000000)
+
+        if not value or abs(value) >= 0x7FFFFFFFFFFFFFF8:
+            # 0 or the 0x8000000000000000 sentinel both mean "never"
             return {"raw": 0, "description": "Never"}
-        
+
         # AD time intervals are in 100-nanosecond units (negative for intervals)
         seconds = abs(value) / 10000000
         
@@ -627,21 +650,38 @@ class SecurityTools(BaseTool):
         delta = dt - epoch
         return int(delta.total_seconds() * 10000000)
     
+    def _normalize_filetime(self, value: Any) -> Optional[datetime]:
+        """Normalize a lastLogon/pwdLastSet value to a naive-UTC datetime, or None if unset.
+
+        ldap3 may return these Integer8 timestamp attributes either as a
+        (timezone-aware) datetime when the schema is loaded, or as a raw
+        Windows FILETIME integer. Handle both, plus the 0/never sentinel.
+        """
+        from datetime import timezone
+        if value in (0, None, ''):
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            try:
+                ft = int(value)
+            except (TypeError, ValueError):
+                return None
+            if ft <= 0 or ft >= 0x7FFFFFFFFFFFFFFF:
+                return None
+            dt = self._convert_filetime_to_datetime(ft)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
     def _get_days_since_last_logon(self, attributes: Dict[str, Any]) -> Optional[int]:
         """Get number of days since last logon."""
-        # Support both dict with 'lastLogon' key and raw value
-        if isinstance(attributes.get('lastLogon'), (int, float)):
-            last_logon = attributes.get('lastLogon', 0)
-        else:
-            last_logon = self._get_attr_value(attributes, 'lastLogon', 0)
-        if last_logon == 0:
+        last_logon = attributes.get('lastLogon') if 'lastLogon' in attributes \
+            else self._get_attr_value(attributes, 'lastLogon', 0)
+        last_logon_date = self._normalize_filetime(last_logon)
+        if last_logon_date is None:
             return None
-
-        try:
-            last_logon_date = self._convert_filetime_to_datetime(last_logon)
-            return (datetime.now() - last_logon_date).days
-        except:
-            return None
+        return (datetime.now() - last_logon_date).days
     
     # Additional methods for security testing
     def check_password_policy(self) -> Dict[str, Any]:

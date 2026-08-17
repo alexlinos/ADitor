@@ -391,6 +391,41 @@ Example:
 
 Critical for administrative account security."""
 
+# Group Policy (read-only) Tool Descriptions
+GET_GPOS_DESC = """List all Group Policy Objects in the domain (read-only).
+
+Enumerates groupPolicyContainer objects under CN=Policies,CN=System and
+returns metadata: display name, GUID, SYSVOL path, version numbers, and
+which configuration halves (user/computer) are enabled or hold settings.
+
+Example:
+- get_gpos()
+- get_gpos(name_filter="password")
+
+Reads LDAP metadata only; policy settings in SYSVOL are not parsed."""
+
+GET_GPO_DESC = """Get detailed metadata for a single GPO (read-only).
+
+Looks up one GPO by GUID (with or without braces) or exact display name,
+and lists the OUs/domain that link it.
+
+Example:
+- get_gpo(identifier="Default Domain Policy")
+- get_gpo(identifier="31B2F340-016D-11D2-945F-00C04FB984F9")
+
+Returns the GPO's version, status flags, and link locations."""
+
+GET_LINKED_GPOS_DESC = """Get GPOs linked to an OU, domain, or site (read-only).
+
+Reads the gPLink attribute on the target object, resolves each linked GPO
+GUID to its display name, and reports link enabled/enforced status plus
+whether the target blocks inheritance.
+
+Example:
+- get_linked_gpos(target_dn="OU=Sales,DC=company,DC=com")
+
+Useful for tracing which policies apply where."""
+
 # System Tool Descriptions
 TEST_CONNECTION_DESC = """Test LDAP connection and get server information.
 

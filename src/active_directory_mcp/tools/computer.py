@@ -493,16 +493,17 @@ class ComputerTools(BaseTool):
             stale_computers = []
             for entry in results:
                 last_logon = self._get_attr_value(entry['attributes'], 'lastLogon', 0)
+                last_logon_dt = self._normalize_filetime(last_logon)
 
-                # Check if computer is stale
-                if last_logon == 0 or last_logon < cutoff_filetime:
+                # Check if computer is stale (never logged on, or before cutoff)
+                if last_logon_dt is None or last_logon_dt < cutoff_date:
                     computer_info = {
                         'dn': entry['dn'],
                         'sAMAccountName': self._get_attr_value(entry['attributes'], 'sAMAccountName', ''),
                         'dNSHostName': self._get_attr_value(entry['attributes'], 'dNSHostName', ''),
                         'operatingSystem': self._get_attr_value(entry['attributes'], 'operatingSystem', ''),
                         'description': self._get_attr_value(entry['attributes'], 'description', ''),
-                        'lastLogon': self._convert_filetime_to_datetime(last_logon) if last_logon > 0 else 'Never',
+                        'lastLogon': last_logon_dt.isoformat() if last_logon_dt else 'Never',
                         'daysSinceLastLogon': self._get_days_since_last_logon(entry['attributes'])
                     }
                     stale_computers.append(computer_info)
@@ -572,17 +573,37 @@ class ComputerTools(BaseTool):
         """Check if computer is trusted for delegation."""
         return bool(uac_value & 0x80000)  # Check TRUSTED_FOR_DELEGATION flag
     
+    def _normalize_filetime(self, value) -> Optional[datetime]:
+        """Normalize a lastLogon/pwdLastSet value to a naive-UTC datetime, or None if unset.
+
+        ldap3 may return these Integer8 timestamp attributes either as a
+        (timezone-aware) datetime when the schema is loaded, or as a raw
+        Windows FILETIME integer.
+        """
+        from datetime import timezone
+        if value in (0, None, ''):
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            try:
+                ft = int(value)
+            except (TypeError, ValueError):
+                return None
+            if ft <= 0 or ft >= 0x7FFFFFFFFFFFFFFF:
+                return None
+            dt = datetime(1601, 1, 1) + timedelta(microseconds=ft / 10)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
     def _get_days_since_last_logon(self, attributes: Dict[str, Any]) -> Optional[int]:
         """Get number of days since last logon."""
         last_logon = self._get_attr_value(attributes, 'lastLogon', 0)
-        if last_logon == 0 or last_logon is None:
+        last_logon_date = self._normalize_filetime(last_logon)
+        if last_logon_date is None:
             return None
-
-        try:
-            last_logon_date = self._convert_filetime_to_datetime(last_logon)
-            return (datetime.now() - last_logon_date).days
-        except:
-            return None
+        return (datetime.now() - last_logon_date).days
 
     def _get_password_age_days(self, attributes: Dict[str, Any]) -> Optional[int]:
         """Get number of days since password was last set."""

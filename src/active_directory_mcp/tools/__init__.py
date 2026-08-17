@@ -6,12 +6,14 @@ from .group import GroupTools
 from .computer import ComputerTools
 from .organizational_unit import OrganizationalUnitTools
 from .security import SecurityTools
+from .gpo import GPOTools
 
 __all__ = [
     "BaseTool",
-    "UserTools", 
+    "UserTools",
     "GroupTools",
     "ComputerTools",
     "OrganizationalUnitTools",
     "SecurityTools",
+    "GPOTools",
 ]
