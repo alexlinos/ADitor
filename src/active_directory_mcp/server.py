@@ -722,6 +722,23 @@ class ActiveDirectoryMCPServer:
             lambda args: self.gpo_tools.get_linked_gpos(args["target_dn"])
         )
 
+        self._add_tool(
+            "get_gpo_contents",
+            "Read a GPO's actual settings from SYSVOL over SMB (read-only): Registry.pol, GptTmpl.inf, scripts, and AppLocker rules",
+            {
+                "type": "object",
+                "properties": {
+                    "identifier": {"type": "string", "description": "GPO GUID (with or without braces) or exact display name"},
+                    "include_registry": {"type": "boolean", "description": "Parse Registry.pol files", "default": True},
+                    "max_value_chars": {"type": "integer", "description": "Truncate values longer than this", "default": 6000}
+                },
+                "required": ["identifier"]
+            },
+            lambda args: self.gpo_tools.get_gpo_contents(
+                args["identifier"], args.get("include_registry", True), args.get("max_value_chars", 6000)
+            )
+        )
+
         # System Tools
         self._add_tool(
             "test_connection",

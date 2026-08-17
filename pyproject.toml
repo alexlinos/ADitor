@@ -53,6 +53,10 @@ django = [
     "djangorestframework>=3.14.0",
     "pyjwt>=2.8.0",
 ]
+# Optional: enables get_gpo_contents to read GPO settings from SYSVOL over SMB.
+smb = [
+    "smbprotocol>=1.10.0,<2.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/alpadalar/ActiveDirectoryMCP"

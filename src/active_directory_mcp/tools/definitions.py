@@ -426,6 +426,21 @@ Example:
 
 Useful for tracing which policies apply where."""
 
+GET_GPO_CONTENTS_DESC = """Read a GPO's actual settings from SYSVOL (read-only).
+
+Unlike the other GPO tools (LDAP metadata only), this reads the GPO's files
+from the SYSVOL share over SMB and parses the common policy formats:
+GPT.INI, Machine/User Registry.pol (admin templates), GptTmpl.inf security
+templates, script registrations, and AppLocker rules.
+
+Example:
+- get_gpo_contents(identifier="Default Domain Policy")
+- get_gpo_contents(identifier="31B2F340-016D-11D2-945F-00C04FB984F9")
+
+Requires the optional 'smbprotocol' package and SYSVOL read access for the
+bind account. Registry.pol/GptTmpl.inf hold most settings; AppLocker rules
+are surfaced as parsed collections with enforcement mode."""
+
 # System Tool Descriptions
 TEST_CONNECTION_DESC = """Test LDAP connection and get server information.
 
