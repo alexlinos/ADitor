@@ -524,15 +524,20 @@ class GPOTools(BaseTool):
         }
 
     def _decode_version(self, version: Any) -> Dict[str, Any]:
-        """Split the packed versionNumber into user/computer revisions."""
+        """Split the packed versionNumber into user/computer revisions.
+
+        AD packs this as versionNumber = user * 65536 + computer, i.e. the
+        computer revision is the low word and the user revision is the high
+        word.
+        """
         try:
             v = int(version)
         except (TypeError, ValueError):
             v = 0
         return {
             'raw': v,
-            'computer_version': (v >> 16) & 0xFFFF,
-            'user_version': v & 0xFFFF
+            'computer_version': v & 0xFFFF,
+            'user_version': (v >> 16) & 0xFFFF
         }
 
     def _decode_gpo_status(self, flags: Any) -> Dict[str, Any]:
