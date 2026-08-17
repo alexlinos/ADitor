@@ -43,8 +43,13 @@ def load_config(config_path: Optional[str] = None) -> Config:
     
     try:
         with open(config_file, 'r', encoding='utf-8') as f:
-            config_data = json.load(f)
-        
+            raw = f.read()
+
+        # Expand ${VAR} / $VAR references from the environment (e.g. for secrets
+        # kept out of the config file such as the bind password).
+        raw = os.path.expandvars(raw)
+        config_data = json.loads(raw)
+
         # Validate and create config object
         config = Config(**config_data)
         logger.info("Configuration loaded successfully")

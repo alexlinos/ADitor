@@ -207,7 +207,10 @@ class LDAPManager:
                     paged_cookie=cookie
                 )
                 
-                if not success:
+                # ldap3's Connection.search returns False for a successful
+                # search with zero entries, so check the LDAP result code
+                # (0 = success) instead of the boolean to detect failure.
+                if not success and connection.result.get('result') != 0:
                     logger.error(f"Search failed: {connection.result}")
                     raise LDAPException(f"Search failed: {connection.result}")
                 

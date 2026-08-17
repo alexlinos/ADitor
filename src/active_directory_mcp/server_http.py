@@ -31,6 +31,7 @@ from .tools.group import GroupTools
 from .tools.computer import ComputerTools
 from .tools.organizational_unit import OrganizationalUnitTools
 from .tools.security import SecurityTools
+from .tools.gpo import GPOTools
 
 
 logger = logging.getLogger("active-directory-mcp.http")
@@ -90,9 +91,19 @@ class ActiveDirectoryMCPHTTPServer:
         self.computer_tools = ComputerTools(self.ldap_manager)
         self.ou_tools = OrganizationalUnitTools(self.ldap_manager)
         self.security_tools = SecurityTools(self.ldap_manager)
+        self.gpo_tools = GPOTools(self.ldap_manager)
         
-        # Initialize FastMCP
-        self.mcp = FastMCP("ActiveDirectoryMCP-HTTP")
+        # Initialize FastMCP. Newer FastMCP takes host/port/path via run(),
+        # while the mcp-SDK bundled FastMCP takes them as constructor settings.
+        try:
+            self.mcp = FastMCP(
+                "ActiveDirectoryMCP-HTTP",
+                host=self.host,
+                port=self.port,
+                streamable_http_path=self.path,
+            )
+        except TypeError:
+            self.mcp = FastMCP("ActiveDirectoryMCP-HTTP")
         
         # Setup tools
         self._setup_tools()
@@ -281,6 +292,19 @@ class ActiveDirectoryMCPHTTPServer:
         def audit_admin_accounts():
             return self.security_tools.audit_admin_accounts()
 
+        # Group Policy (read-only) Tools
+        @self.mcp.tool(description="List all Group Policy Objects in the domain (read-only). Optional name_filter matches a substring of the display name.")
+        def get_gpos(name_filter: Optional[str] = None):
+            return self.gpo_tools.get_gpos(name_filter)
+
+        @self.mcp.tool(description="Get detailed metadata for a single GPO by GUID or display name (read-only).")
+        def get_gpo(identifier: str):
+            return self.gpo_tools.get_gpo(identifier)
+
+        @self.mcp.tool(description="Get the GPOs linked to an OU, domain, or site DN, with enforcement and inheritance status (read-only).")
+        def get_linked_gpos(target_dn: str):
+            return self.gpo_tools.get_linked_gpos(target_dn)
+
         # System Tools
         @self.mcp.tool(description="Test LDAP connection")
         def test_connection():
@@ -325,7 +349,8 @@ class ActiveDirectoryMCPHTTPServer:
                     "group_tools": self.group_tools.get_schema_info(),
                     "computer_tools": self.computer_tools.get_schema_info(),
                     "ou_tools": self.ou_tools.get_schema_info(),
-                    "security_tools": self.security_tools.get_schema_info()
+                    "security_tools": self.security_tools.get_schema_info(),
+                    "gpo_tools": self.gpo_tools.get_schema_info()
                 }
             }
             return self._format_response(schema_info, "get_schema_info")
@@ -372,12 +397,17 @@ class ActiveDirectoryMCPHTTPServer:
             self.logger.info(f"Domain: {self.config.active_directory.domain}")
             
             # Run with FastMCP's built-in HTTP transport
-            self.mcp.run(
-                transport="http",
-                host=self.host,
-                port=self.port,
-                path=self.path
-            )
+            # Newer FastMCP accepts host/port/path kwargs; the mcp-SDK bundled
+            # FastMCP uses transport "streamable-http" with settings from init.
+            try:
+                self.mcp.run(
+                    transport="http",
+                    host=self.host,
+                    port=self.port,
+                    path=self.path
+                )
+            except TypeError:
+                self.mcp.run(transport="streamable-http")
         except Exception as e:
             self.logger.error(f"HTTP server error: {e}")
             self.ldap_manager.disconnect()
