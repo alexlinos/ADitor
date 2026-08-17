@@ -305,6 +305,10 @@ class ActiveDirectoryMCPHTTPServer:
         def get_linked_gpos(target_dn: str):
             return self.gpo_tools.get_linked_gpos(target_dn)
 
+        @self.mcp.tool(description="Read a GPO's actual settings from SYSVOL over SMB (read-only): Registry.pol, GptTmpl.inf, scripts, and AppLocker rules. Accepts a GPO GUID or display name.")
+        def get_gpo_contents(identifier: str, include_registry: bool = True, max_value_chars: int = 6000):
+            return self.gpo_tools.get_gpo_contents(identifier, include_registry, max_value_chars)
+
         # System Tools
         @self.mcp.tool(description="Test LDAP connection")
         def test_connection():
