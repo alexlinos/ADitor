@@ -163,7 +163,7 @@ class TestUserTools:
         response_data = json.loads(result[0].text)
         assert response_data['success'] == True
         assert response_data['username'] == 'newuser'
-        assert response_data['dn'] == 'CN=New User,CN=Users,DC=test,DC=local'
+        assert response_data['dn'] == 'CN=New User,OU=Users,DC=test,DC=local'
         
         # Verify LDAP operations were called
         mock_ldap_manager.search.assert_called()  # Check for existing user

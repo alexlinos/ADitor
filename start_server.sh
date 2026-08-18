@@ -34,4 +34,4 @@ export PYTHONPATH="$PWD/src:$PYTHONPATH"
 
 # Start the server
 echo "Starting ActiveDirectoryMCP server in stdio mode..."
-python -m aditor.server
+python -m aditor.server --transport stdio

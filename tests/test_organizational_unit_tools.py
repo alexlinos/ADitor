@@ -170,12 +170,12 @@ class TestOrganizationalUnitTools:
         # Mock successful LDAP add operation
         mock_ldap_manager.add.return_value = True
         
-        # Test create_organizational_unit
-        result = ou_tools.create_organizational_unit(
+        # Test create_ou (the registered create_organizational_unit tool)
+        result = ou_tools.create_ou(
             name='Marketing',
-            parent_dn='OU=Departments,DC=test,DC=local',
+            parent_ou='OU=Departments,DC=test,DC=local',
             description='Marketing department OU',
-            manager_dn='CN=Marketing Manager,OU=Users,DC=test,DC=local'
+            managed_by='CN=Marketing Manager,OU=Users,DC=test,DC=local'
         )
         
         # Verify result
@@ -208,10 +208,10 @@ class TestOrganizationalUnitTools:
             {'dn': 'OU=Existing,OU=Departments,DC=test,DC=local'}
         ]
         
-        # Test create_organizational_unit
-        result = ou_tools.create_organizational_unit(
+        # Test create_ou (the registered create_organizational_unit tool)
+        result = ou_tools.create_ou(
             name='Existing',
-            parent_dn='OU=Departments,DC=test,DC=local'
+            parent_ou='OU=Departments,DC=test,DC=local'
         )
         
         # Verify result
@@ -243,7 +243,7 @@ class TestOrganizationalUnitTools:
             'street': '456 New Address',
             'l': 'New City'
         }
-        result = ou_tools.modify_organizational_unit('OU=TestOU,DC=test,DC=local', attributes)
+        result = ou_tools.modify_ou('OU=TestOU,DC=test,DC=local', attributes)
         
         # Verify result
         assert len(result) == 1
@@ -269,8 +269,8 @@ class TestOrganizationalUnitTools:
         # Mock successful delete operation
         mock_ldap_manager.delete.return_value = True
         
-        # Test delete_organizational_unit
-        result = ou_tools.delete_organizational_unit('OU=EmptyOU,DC=test,DC=local')
+        # Test delete_ou (the registered delete_organizational_unit tool)
+        result = ou_tools.delete_ou('OU=EmptyOU,DC=test,DC=local')
         
         # Verify result
         assert len(result) == 1
@@ -296,8 +296,8 @@ class TestOrganizationalUnitTools:
             ]
         ]
         
-        # Test delete_organizational_unit
-        result = ou_tools.delete_organizational_unit('OU=NotEmptyOU,DC=test,DC=local')
+        # Test delete_ou (the registered delete_organizational_unit tool)
+        result = ou_tools.delete_ou('OU=NotEmptyOU,DC=test,DC=local')
         
         # Verify result
         assert len(result) == 1
@@ -323,10 +323,10 @@ class TestOrganizationalUnitTools:
         # Mock successful move operation
         mock_ldap_manager.move.return_value = True
         
-        # Test move_organizational_unit
-        result = ou_tools.move_organizational_unit(
-            source_dn='OU=MoveMe,OU=OldParent,DC=test,DC=local',
-            target_parent_dn='OU=NewParent,DC=test,DC=local'
+        # Test move_ou (the registered move_organizational_unit tool)
+        result = ou_tools.move_ou(
+            'OU=MoveMe,OU=OldParent,DC=test,DC=local',
+            'OU=NewParent,DC=test,DC=local'
         )
         
         # Verify result

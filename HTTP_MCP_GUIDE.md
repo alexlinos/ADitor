@@ -32,7 +32,7 @@ uv pip install -e ".[dev]"
 ./start_http_server.sh
 
 # Veya özelleştirilmiş ayarlarla
-python -m aditor.server_http --host 0.0.0.0 --port 8813 --path /activedirectory-mcp
+python -m aditor.server --transport http --host 0.0.0.0 --port 8813 --path /activedirectory-mcp
 ```
 
 ## 🔧 Cursor/VS Code Entegrasyonu
@@ -78,7 +78,7 @@ python -m aditor.server_http --host 0.0.0.0 --port 8813 --path /activedirectory-
     "mcpServers": {
         "ActiveDirectoryMCP-Stdio": {
             "command": "/absolute/path/to/ActiveDirectoryMCP/.venv/bin/python",
-            "args": ["-m", "aditor.server"],
+            "args": ["-m", "aditor.server", "--transport", "stdio"],
             "cwd": "/absolute/path/to/ActiveDirectoryMCP",
             "env": {
                 "PYTHONPATH": "/absolute/path/to/ActiveDirectoryMCP/src",

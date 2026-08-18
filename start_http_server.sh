@@ -39,4 +39,4 @@ export PYTHONPATH="$PWD/src:$PYTHONPATH"
 
 # Start the HTTP server
 echo "Starting ActiveDirectoryMCP HTTP server on $HOST:$PORT$PATH"
-python -m aditor.server_http --host $HOST --port $PORT --path $PATH
+python -m aditor.server --transport http --host $HOST --port $PORT --path $PATH

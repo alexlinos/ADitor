@@ -46,4 +46,4 @@ ENV AD_MCP_CONFIG=/app/ad-config/config.json
 EXPOSE 8813
 
 # Default command (can be overridden)
-CMD ["/bin/bash", "-c", ". .venv/bin/activate && python -m active_directory_mcp.server_http --host 0.0.0.0 --port 8813 --path /activedirectory-mcp"]
+CMD ["/bin/bash", "-c", ". .venv/bin/activate && python -m aditor.server --transport http --host 0.0.0.0 --port 8813 --path /activedirectory-mcp"]

@@ -430,7 +430,7 @@ class TestComputerTools:
         assert 'enable_computer' in operations
         assert 'disable_computer' in operations
         assert 'reset_computer_password' in operations
-        assert 'search_stale_computers' in operations
+        assert 'get_stale_computers' in operations
         
         # Check computer types
         assert 'workstation' in schema['computer_types']
