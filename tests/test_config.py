@@ -6,8 +6,8 @@ import json
 import os
 from pathlib import Path
 
-from active_directory_mcp.config.loader import load_config, validate_config
-from active_directory_mcp.config.models import Config, ActiveDirectoryConfig
+from aditor.config.loader import load_config, validate_config
+from aditor.config.models import Config, ActiveDirectoryConfig
 
 
 def test_load_config_from_file():

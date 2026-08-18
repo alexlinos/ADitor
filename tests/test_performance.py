@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from unittest.mock import Mock, patch
 from datetime import datetime, timedelta
 
-from active_directory_mcp.server import ActiveDirectoryMCPServer
+from aditor.server import ActiveDirectoryMCPServer
 
 pytestmark = pytest.mark.skip(reason="perf/stress tests: need psutil + test_config.json fixture; not correctness guards — revive if perf testing is wanted later")
 
@@ -43,12 +43,12 @@ def performance_config():
 @pytest.fixture
 def mock_server_with_performance_config(performance_config):
     """Mock server configured for performance testing."""
-    with patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection') as mock_test_conn, \
-         patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect') as mock_connect, \
-         patch('active_directory_mcp.config.loader.load_config') as mock_load_config:
+    with patch('aditor.core.ldap_manager.LDAPManager.test_connection') as mock_test_conn, \
+         patch('aditor.core.ldap_manager.LDAPManager.connect') as mock_connect, \
+         patch('aditor.config.loader.load_config') as mock_load_config:
         
         # Return mock config object with proper structure
-        from active_directory_mcp.config.models import Config, ActiveDirectoryConfig, OrganizationalUnitsConfig, SecurityConfig, LoggingConfig, PerformanceConfig
+        from aditor.config.models import Config, ActiveDirectoryConfig, OrganizationalUnitsConfig, SecurityConfig, LoggingConfig, PerformanceConfig
         
         config_obj = Config(
             active_directory=ActiveDirectoryConfig(**performance_config["active_directory"]),
@@ -71,7 +71,7 @@ def mock_server_with_performance_config(performance_config):
 class TestLargeDatasetPerformance:
     """Test performance with large datasets."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_large_user_list_performance(self, mock_search, mock_server_with_performance_config):
         """Test performance when listing large numbers of users."""
         server = mock_server_with_performance_config
@@ -114,7 +114,7 @@ class TestLargeDatasetPerformance:
         
         print(f"✅ Large user list (10K users) completed in {execution_time:.3f}s")
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_complex_group_membership_performance(self, mock_search, mock_server_with_performance_config):
         """Test performance with complex group membership hierarchies."""
         server = mock_server_with_performance_config
@@ -181,7 +181,7 @@ class TestLargeDatasetPerformance:
         
         print(f"✅ Complex group membership (1050 members) completed in {execution_time:.3f}s")
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_security_audit_performance(self, mock_search, mock_server_with_performance_config):
         """Test performance of comprehensive security audit."""
         server = mock_server_with_performance_config
@@ -266,7 +266,7 @@ class TestLargeDatasetPerformance:
 class TestConcurrentOperations:
     """Test performance under concurrent load."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_concurrent_user_queries(self, mock_search, mock_server_with_performance_config):
         """Test concurrent user query performance."""
         server = mock_server_with_performance_config
@@ -330,9 +330,9 @@ class TestConcurrentOperations:
         print(f"✅ {num_concurrent_ops} concurrent user queries completed in {total_execution_time:.3f}s")
         print(f"   Average: {avg_duration:.3f}s, Max: {max_duration:.3f}s")
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.add')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.modify')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.add')
+    @patch('aditor.core.ldap_manager.LDAPManager.modify')
     def test_concurrent_mixed_operations(self, mock_modify, mock_add, mock_search, 
                                        mock_server_with_performance_config):
         """Test performance with mixed concurrent operations."""
@@ -415,7 +415,7 @@ class TestConcurrentOperations:
 class TestMemoryAndResourceUsage:
     """Test memory usage and resource management."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_memory_usage_with_large_datasets(self, mock_search, mock_server_with_performance_config):
         """Test memory usage when processing large datasets."""
         server = mock_server_with_performance_config
@@ -477,8 +477,8 @@ class TestMemoryAndResourceUsage:
         
         print(f"✅ Memory/performance scaling test passed for datasets up to {max(dataset_sizes):,} users")
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.disconnect')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.disconnect')
     def test_connection_pooling_behavior(self, mock_disconnect, mock_connect, 
                                        mock_server_with_performance_config):
         """Test connection pooling and resource cleanup."""
@@ -522,7 +522,7 @@ class TestMemoryAndResourceUsage:
 class TestStressScenarios:
     """Stress testing scenarios."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_rapid_sequential_operations(self, mock_search, mock_server_with_performance_config):
         """Test performance under rapid sequential operations."""
         server = mock_server_with_performance_config
@@ -570,7 +570,7 @@ class TestStressScenarios:
         
         print(f"✅ {num_operations} rapid sequential operations: {overall_ops_per_sec:.1f} ops/sec")
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_sustained_load_stability(self, mock_search, mock_server_with_performance_config):
         """Test system stability under sustained load."""
         server = mock_server_with_performance_config

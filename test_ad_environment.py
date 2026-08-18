@@ -13,10 +13,10 @@ import requests
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from active_directory_mcp.config.loader import load_config
-from active_directory_mcp.core.ldap_manager import LDAPManager
-from active_directory_mcp.tools.user import UserTools
-from active_directory_mcp.tools.group import GroupTools
+from aditor.config.loader import load_config
+from aditor.core.ldap_manager import LDAPManager
+from aditor.tools.user import UserTools
+from aditor.tools.group import GroupTools
 
 def wait_for_ad_ready(max_wait=120):
     """Wait for Samba AD to be ready."""

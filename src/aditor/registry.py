@@ -1,0 +1,903 @@
+"""Single source of truth for the Active Directory MCP tool set.
+
+Every tool the server exposes is declared exactly once here as a
+:class:`ToolSpec`. The server (``aditor.server``) builds its ``list_tools`` and
+``call_tool`` handlers directly from :data:`TOOLS`, so adding, removing or
+renaming a tool means editing this file and nothing else.
+
+Each spec carries:
+
+* ``name`` -- the MCP tool name (stable public API).
+* ``description`` -- human/agent-facing help text.
+* ``input_schema`` -- JSON Schema for the tool arguments.
+* ``handler`` -- ``(tools, args) -> result`` where ``tools`` is the
+  :class:`Tools` bundle and ``result`` is either a list of MCP content objects
+  (as the tool classes already return) or a plain dict/list that the server
+  serialises to JSON text.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Callable, Dict, List
+
+from .core.ldap_manager import LDAPManager
+from .tools.user import UserTools
+from .tools.group import GroupTools
+from .tools.computer import ComputerTools
+from .tools.organizational_unit import OrganizationalUnitTools
+from .tools.security import SecurityTools
+from .tools.gpo import GPOTools
+
+
+@dataclass
+class Tools:
+    """Container bundling the instantiated tool classes over one LDAP manager."""
+
+    ldap: LDAPManager
+    user: UserTools
+    group: GroupTools
+    computer: ComputerTools
+    ou: OrganizationalUnitTools
+    security: SecurityTools
+    gpo: GPOTools
+
+    @classmethod
+    def from_ldap(cls, ldap: LDAPManager) -> "Tools":
+        """Build the full tool bundle around a single LDAP manager."""
+        return cls(
+            ldap=ldap,
+            user=UserTools(ldap),
+            group=GroupTools(ldap),
+            computer=ComputerTools(ldap),
+            ou=OrganizationalUnitTools(ldap),
+            security=SecurityTools(ldap),
+            gpo=GPOTools(ldap),
+        )
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    """Declarative description of a single MCP tool."""
+
+    name: str
+    description: str
+    input_schema: Dict[str, Any]
+    handler: Callable[["Tools", Dict[str, Any]], Any]
+
+
+# --------------------------------------------------------------------------- #
+# Descriptions (folded in from the former tools/definitions.py, keeping the
+# richer multi-line help text over the terse inline strings).
+# --------------------------------------------------------------------------- #
+
+LIST_USERS_DESC = """List users in Active Directory with optional filtering.
+
+Retrieves users from the specified organizational unit or the entire domain.
+Supports custom LDAP filters and attribute selection for targeted queries.
+
+Examples:
+- list_users()
+- list_users(ou="OU=Sales,DC=company,DC=com")
+- list_users(filter_criteria="(department=IT)")"""
+
+GET_USER_DESC = """Get detailed information about a specific user.
+
+Retrieves comprehensive user information including attributes, group
+memberships, account status, and computed security fields."""
+
+CREATE_USER_DESC = """Create a new user account in Active Directory.
+
+Creates a user with the specified attributes in the designated organizational
+unit (defaults to the configured users OU, else CN=Users). Sets the user
+principal name and applies initial account settings."""
+
+MODIFY_USER_DESC = """Modify user attributes and properties.
+
+Updates existing user attributes including personal information, security
+settings, and organizational data."""
+
+DELETE_USER_DESC = """Delete a user account from Active Directory.
+
+Permanently removes the user account and associated data. Validates existence
+before deletion."""
+
+ENABLE_USER_DESC = """Enable a user account.
+
+Activates a disabled user account by clearing the disabled flag in
+userAccountControl."""
+
+DISABLE_USER_DESC = """Disable a user account.
+
+Deactivates a user account, preventing login while preserving account data."""
+
+RESET_USER_PASSWORD_DESC = """Reset a user password, optionally auto-generating one.
+
+Resets the password to a supplied value or a generated complex password, and
+can force a change at next logon."""
+
+GET_USER_GROUPS_DESC = """Get the groups a user is a member of.
+
+Returns group membership detail including group types, scopes, and
+descriptions."""
+
+LIST_GROUPS_DESC = """List groups in Active Directory with optional filtering.
+
+Retrieves security and distribution groups with detail about scope, type, and
+membership counts."""
+
+GET_GROUP_DESC = """Get detailed information about a specific group.
+
+Returns group configuration, members, parent groups, and management settings."""
+
+CREATE_GROUP_DESC = """Create a new group in Active Directory.
+
+Creates a security or distribution group with the specified scope and
+attributes (Global, DomainLocal, or Universal). Defaults to the configured
+groups OU when no OU is supplied."""
+
+MODIFY_GROUP_DESC = """Modify group attributes and properties.
+
+Updates group information such as description and managedBy while preserving
+membership."""
+
+DELETE_GROUP_DESC = """Delete a group from Active Directory.
+
+Permanently removes the group and its membership associations."""
+
+ADD_GROUP_MEMBER_DESC = """Add a member to a group.
+
+Adds a user, computer, or group as a member of the specified group by DN.
+Supports nested memberships."""
+
+REMOVE_GROUP_MEMBER_DESC = """Remove a member from a group.
+
+Removes the specified member (by DN) from the group after validating
+membership."""
+
+GET_GROUP_MEMBERS_DESC = """Get the members of a group, optionally recursively.
+
+Lists all members with an option to include members of nested groups."""
+
+LIST_COMPUTERS_DESC = """List computer objects in Active Directory.
+
+Retrieves computer accounts with operating-system information, last logon, and
+security status."""
+
+GET_COMPUTER_DESC = """Get detailed information about a specific computer.
+
+Returns OS details, last logon, group memberships, and security settings."""
+
+CREATE_COMPUTER_DESC = """Create a new computer object in Active Directory.
+
+Creates a computer account with appropriate attributes. Defaults to the
+configured computers OU when no OU is supplied."""
+
+MODIFY_COMPUTER_DESC = """Modify computer attributes and properties.
+
+Updates computer information such as description and location while preserving
+critical account settings."""
+
+DELETE_COMPUTER_DESC = """Delete a computer object from Active Directory.
+
+Permanently removes the computer account and its trust relationship."""
+
+ENABLE_COMPUTER_DESC = """Enable a computer account.
+
+Activates a disabled computer account, allowing domain authentication."""
+
+DISABLE_COMPUTER_DESC = """Disable a computer account.
+
+Deactivates a computer account, preventing domain authentication."""
+
+RESET_COMPUTER_PASSWORD_DESC = """Reset a computer account password.
+
+Forces the computer to re-establish its trust relationship with the domain."""
+
+GET_STALE_COMPUTERS_DESC = """Get computers that have not logged in for a number of days.
+
+Identifies inactive computer accounts that may need cleanup."""
+
+LIST_ORGANIZATIONAL_UNITS_DESC = """List Organizational Units in Active Directory.
+
+Returns the OU hierarchy with management information and policy links."""
+
+GET_ORGANIZATIONAL_UNIT_DESC = """Get detailed information about a specific OU.
+
+Returns child objects, group-policy links, and management settings."""
+
+CREATE_ORGANIZATIONAL_UNIT_DESC = """Create a new Organizational Unit.
+
+Creates an OU with the specified attributes and management settings under the
+given parent (defaults to the base DN)."""
+
+MODIFY_ORGANIZATIONAL_UNIT_DESC = """Modify OU attributes and properties.
+
+Updates OU information such as description, managedBy, and location while
+preserving structure."""
+
+DELETE_ORGANIZATIONAL_UNIT_DESC = """Delete an Organizational Unit.
+
+Removes an OU, optionally with its contained objects. Validates emptiness
+unless force deletion is requested."""
+
+MOVE_ORGANIZATIONAL_UNIT_DESC = """Move an OU to a new parent.
+
+Relocates an OU within the domain hierarchy while preserving its contents."""
+
+GET_ORGANIZATIONAL_UNIT_CONTENTS_DESC = """Get the contents of an OU.
+
+Lists the users, groups, computers, and sub-OUs contained in an OU, optionally
+filtered by object type."""
+
+GET_DOMAIN_INFO_DESC = """Get domain information and security settings.
+
+Returns domain configuration including password policies, lockout settings, and
+security parameters."""
+
+GET_PRIVILEGED_GROUPS_DESC = """Get information about privileged groups.
+
+Identifies and analyses high-privilege groups such as Domain Admins and
+Enterprise Admins."""
+
+GET_USER_PERMISSIONS_DESC = """Get effective permissions for a user.
+
+Analyses a user's effective permissions through group memberships and flags
+potential security risks."""
+
+GET_INACTIVE_USERS_DESC = """Get users who have not logged in for a number of days.
+
+Identifies inactive user accounts, optionally including disabled accounts."""
+
+GET_PASSWORD_POLICY_VIOLATIONS_DESC = """Get users with password policy violations.
+
+Identifies accounts with expired passwords, never-expiring passwords, and other
+policy non-compliance."""
+
+AUDIT_ADMIN_ACCOUNTS_DESC = """Audit administrative accounts for security compliance.
+
+Reviews privileged accounts for policy compliance and risk."""
+
+GET_GPOS_DESC = """List all Group Policy Objects in the domain (read-only).
+
+Enumerates groupPolicyContainer objects under CN=Policies,CN=System and returns
+metadata: display name, GUID, SYSVOL path, version numbers, and which
+configuration halves (user/computer) are enabled. Optional name_filter matches
+a substring of the display name. Reads LDAP metadata only; SYSVOL settings are
+not parsed here."""
+
+GET_GPO_DESC = """Get detailed metadata for a single GPO by GUID or display name (read-only).
+
+Looks up one GPO by GUID (with or without braces) or exact display name and
+lists the OUs/domain that link it, along with version and status flags."""
+
+GET_LINKED_GPOS_DESC = """Get the GPOs linked to an OU, domain, or site DN (read-only).
+
+Reads the gPLink attribute on the target object, resolves each linked GPO GUID
+to its display name, and reports link enabled/enforced status plus whether the
+target blocks inheritance."""
+
+GET_GPO_CONTENTS_DESC = """Read a GPO's actual settings from SYSVOL over SMB (read-only).
+
+Unlike the other GPO tools (LDAP metadata only), this reads the GPO's files from
+the SYSVOL share over SMB and parses the common policy formats: GPT.INI,
+Machine/User Registry.pol (admin templates), GptTmpl.inf security templates,
+script registrations, and AppLocker rules. Requires the optional 'smbprotocol'
+package and SYSVOL read access for the bind account."""
+
+TEST_CONNECTION_DESC = """Test the LDAP connection and return server information.
+
+Validates Active Directory connectivity and reports server status."""
+
+HEALTH_DESC = """Health check for the Active Directory MCP server.
+
+Returns server status and LDAP connectivity information."""
+
+GET_SCHEMA_INFO_DESC = """Get schema information for all available tools.
+
+Returns the operation catalogue and attribute/permission metadata for each tool
+group."""
+
+
+# --------------------------------------------------------------------------- #
+# System-tool handlers (formerly hand-written on the two server classes).
+# --------------------------------------------------------------------------- #
+
+def _handle_test_connection(tools: "Tools", args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return tools.ldap.test_connection()
+    except Exception as e:  # pragma: no cover - defensive
+        return {"success": False, "error": str(e)}
+
+
+def _handle_health(tools: "Tools", args: Dict[str, Any]) -> Dict[str, Any]:
+    health_info: Dict[str, Any] = {
+        "status": "ok",
+        "server": "ActiveDirectoryMCP",
+        "timestamp": datetime.now().isoformat(),
+        "ldap_connection": "unknown",
+    }
+    try:
+        connection_info = tools.ldap.test_connection()
+        health_info["ldap_connection"] = (
+            "connected" if connection_info.get("connected") else "disconnected"
+        )
+        health_info["ldap_server"] = connection_info.get("server", "unknown")
+    except Exception as e:
+        health_info["ldap_connection"] = "error"
+        health_info["ldap_error"] = str(e)
+        health_info["status"] = "degraded"
+    return health_info
+
+
+def _handle_schema_info(tools: "Tools", args: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "server": "ActiveDirectoryMCP",
+        "version": "0.1.0",
+        "tools": {
+            "user_tools": tools.user.get_schema_info(),
+            "group_tools": tools.group.get_schema_info(),
+            "computer_tools": tools.computer.get_schema_info(),
+            "ou_tools": tools.ou.get_schema_info(),
+            "security_tools": tools.security.get_schema_info(),
+            "gpo_tools": tools.gpo.get_schema_info(),
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The single tool registry.
+# --------------------------------------------------------------------------- #
+
+TOOLS: List[ToolSpec] = [
+    # ----- User management -----
+    ToolSpec(
+        "list_users",
+        LIST_USERS_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "ou": {"type": "string", "description": "Organizational Unit DN to search in"},
+                "filter_criteria": {"type": "string", "description": "Additional LDAP filter criteria"},
+                "attributes": {"type": "array", "items": {"type": "string"}, "description": "Specific attributes to retrieve"},
+            },
+        },
+        lambda t, a: t.user.list_users(a.get("ou"), a.get("filter_criteria"), a.get("attributes")),
+    ),
+    ToolSpec(
+        "get_user",
+        GET_USER_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "Username (sAMAccountName) to search for"},
+                "attributes": {"type": "array", "items": {"type": "string"}, "description": "Specific attributes to retrieve"},
+            },
+            "required": ["username"],
+        },
+        lambda t, a: t.user.get_user(a["username"], a.get("attributes")),
+    ),
+    ToolSpec(
+        "create_user",
+        CREATE_USER_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "Username (sAMAccountName)"},
+                "password": {"type": "string", "description": "User password"},
+                "first_name": {"type": "string", "description": "User's first name"},
+                "last_name": {"type": "string", "description": "User's last name"},
+                "email": {"type": "string", "description": "User's email address"},
+                "ou": {"type": "string", "description": "Organizational Unit DN to create user in"},
+                "additional_attributes": {"type": "object", "description": "Additional attributes to set"},
+            },
+            "required": ["username", "password", "first_name", "last_name"],
+        },
+        lambda t, a: t.user.create_user(
+            a["username"], a["password"], a["first_name"], a["last_name"],
+            a.get("email"), a.get("ou"), a.get("additional_attributes"),
+        ),
+    ),
+    ToolSpec(
+        "modify_user",
+        MODIFY_USER_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "Username to modify"},
+                "attributes": {"type": "object", "description": "Dictionary of attributes to modify"},
+            },
+            "required": ["username", "attributes"],
+        },
+        lambda t, a: t.user.modify_user(a["username"], a["attributes"]),
+    ),
+    ToolSpec(
+        "delete_user",
+        DELETE_USER_DESC,
+        {
+            "type": "object",
+            "properties": {"username": {"type": "string", "description": "Username to delete"}},
+            "required": ["username"],
+        },
+        lambda t, a: t.user.delete_user(a["username"]),
+    ),
+    ToolSpec(
+        "enable_user",
+        ENABLE_USER_DESC,
+        {
+            "type": "object",
+            "properties": {"username": {"type": "string", "description": "Username to enable"}},
+            "required": ["username"],
+        },
+        lambda t, a: t.user.enable_user(a["username"]),
+    ),
+    ToolSpec(
+        "disable_user",
+        DISABLE_USER_DESC,
+        {
+            "type": "object",
+            "properties": {"username": {"type": "string", "description": "Username to disable"}},
+            "required": ["username"],
+        },
+        lambda t, a: t.user.disable_user(a["username"]),
+    ),
+    ToolSpec(
+        "reset_user_password",
+        RESET_USER_PASSWORD_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "Username to reset password for"},
+                "new_password": {"type": "string", "description": "New password (auto-generated if not provided)"},
+                "force_change": {"type": "boolean", "description": "Force user to change password at next logon", "default": True},
+            },
+            "required": ["username"],
+        },
+        lambda t, a: t.user.reset_password(a["username"], a.get("new_password"), a.get("force_change", True)),
+    ),
+    ToolSpec(
+        "get_user_groups",
+        GET_USER_GROUPS_DESC,
+        {
+            "type": "object",
+            "properties": {"username": {"type": "string", "description": "Username to get groups for"}},
+            "required": ["username"],
+        },
+        lambda t, a: t.user.get_user_groups(a["username"]),
+    ),
+    # ----- Group management -----
+    ToolSpec(
+        "list_groups",
+        LIST_GROUPS_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "ou": {"type": "string", "description": "Organizational Unit DN to search in"},
+                "filter_criteria": {"type": "string", "description": "Additional LDAP filter criteria"},
+                "attributes": {"type": "array", "items": {"type": "string"}, "description": "Specific attributes to retrieve"},
+            },
+        },
+        lambda t, a: t.group.list_groups(a.get("ou"), a.get("filter_criteria"), a.get("attributes")),
+    ),
+    ToolSpec(
+        "get_group",
+        GET_GROUP_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "group_name": {"type": "string", "description": "Group name (sAMAccountName) to search for"},
+                "attributes": {"type": "array", "items": {"type": "string"}, "description": "Specific attributes to retrieve"},
+            },
+            "required": ["group_name"],
+        },
+        lambda t, a: t.group.get_group(a["group_name"], a.get("attributes")),
+    ),
+    ToolSpec(
+        "create_group",
+        CREATE_GROUP_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "group_name": {"type": "string", "description": "Group name (sAMAccountName)"},
+                "display_name": {"type": "string", "description": "Display name for the group"},
+                "description": {"type": "string", "description": "Group description"},
+                "ou": {"type": "string", "description": "Organizational Unit DN to create group in"},
+                "group_scope": {"type": "string", "description": "Group scope (Global, DomainLocal, Universal)", "default": "Global"},
+                "group_type": {"type": "string", "description": "Group type (Security, Distribution)", "default": "Security"},
+                "additional_attributes": {"type": "object", "description": "Additional attributes to set"},
+            },
+            "required": ["group_name"],
+        },
+        lambda t, a: t.group.create_group(
+            a["group_name"], a.get("display_name"), a.get("description"), a.get("ou"),
+            a.get("group_scope", "Global"), a.get("group_type", "Security"), a.get("additional_attributes"),
+        ),
+    ),
+    ToolSpec(
+        "modify_group",
+        MODIFY_GROUP_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "group_name": {"type": "string", "description": "Group name to modify"},
+                "attributes": {"type": "object", "description": "Dictionary of attributes to modify"},
+            },
+            "required": ["group_name", "attributes"],
+        },
+        lambda t, a: t.group.modify_group(a["group_name"], a["attributes"]),
+    ),
+    ToolSpec(
+        "delete_group",
+        DELETE_GROUP_DESC,
+        {
+            "type": "object",
+            "properties": {"group_name": {"type": "string", "description": "Group name to delete"}},
+            "required": ["group_name"],
+        },
+        lambda t, a: t.group.delete_group(a["group_name"]),
+    ),
+    ToolSpec(
+        "add_group_member",
+        ADD_GROUP_MEMBER_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "group_name": {"type": "string", "description": "Group name to add member to"},
+                "member_dn": {"type": "string", "description": "Distinguished name of member to add"},
+            },
+            "required": ["group_name", "member_dn"],
+        },
+        lambda t, a: t.group.add_member(a["group_name"], a["member_dn"]),
+    ),
+    ToolSpec(
+        "remove_group_member",
+        REMOVE_GROUP_MEMBER_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "group_name": {"type": "string", "description": "Group name to remove member from"},
+                "member_dn": {"type": "string", "description": "Distinguished name of member to remove"},
+            },
+            "required": ["group_name", "member_dn"],
+        },
+        lambda t, a: t.group.remove_member(a["group_name"], a["member_dn"]),
+    ),
+    ToolSpec(
+        "get_group_members",
+        GET_GROUP_MEMBERS_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "group_name": {"type": "string", "description": "Group name to get members for"},
+                "recursive": {"type": "boolean", "description": "Include members of nested groups", "default": False},
+            },
+            "required": ["group_name"],
+        },
+        lambda t, a: t.group.get_members(a["group_name"], a.get("recursive", False)),
+    ),
+    # ----- Computer management -----
+    ToolSpec(
+        "list_computers",
+        LIST_COMPUTERS_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "ou": {"type": "string", "description": "Organizational Unit DN to search in"},
+                "filter_criteria": {"type": "string", "description": "Additional LDAP filter criteria"},
+                "attributes": {"type": "array", "items": {"type": "string"}, "description": "Specific attributes to retrieve"},
+            },
+        },
+        lambda t, a: t.computer.list_computers(a.get("ou"), a.get("filter_criteria"), a.get("attributes")),
+    ),
+    ToolSpec(
+        "get_computer",
+        GET_COMPUTER_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "computer_name": {"type": "string", "description": "Computer name (sAMAccountName) to search for"},
+                "attributes": {"type": "array", "items": {"type": "string"}, "description": "Specific attributes to retrieve"},
+            },
+            "required": ["computer_name"],
+        },
+        lambda t, a: t.computer.get_computer(a["computer_name"], a.get("attributes")),
+    ),
+    ToolSpec(
+        "create_computer",
+        CREATE_COMPUTER_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "computer_name": {"type": "string", "description": "Computer name (without $ suffix)"},
+                "description": {"type": "string", "description": "Computer description"},
+                "ou": {"type": "string", "description": "Organizational Unit DN to create computer in"},
+                "dns_hostname": {"type": "string", "description": "DNS hostname"},
+                "additional_attributes": {"type": "object", "description": "Additional attributes to set"},
+            },
+            "required": ["computer_name"],
+        },
+        lambda t, a: t.computer.create_computer(
+            a["computer_name"], a.get("description"), a.get("ou"),
+            a.get("dns_hostname"), a.get("additional_attributes"),
+        ),
+    ),
+    ToolSpec(
+        "modify_computer",
+        MODIFY_COMPUTER_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "computer_name": {"type": "string", "description": "Computer name to modify"},
+                "attributes": {"type": "object", "description": "Dictionary of attributes to modify"},
+            },
+            "required": ["computer_name", "attributes"],
+        },
+        lambda t, a: t.computer.modify_computer(a["computer_name"], a["attributes"]),
+    ),
+    ToolSpec(
+        "delete_computer",
+        DELETE_COMPUTER_DESC,
+        {
+            "type": "object",
+            "properties": {"computer_name": {"type": "string", "description": "Computer name to delete"}},
+            "required": ["computer_name"],
+        },
+        lambda t, a: t.computer.delete_computer(a["computer_name"]),
+    ),
+    ToolSpec(
+        "enable_computer",
+        ENABLE_COMPUTER_DESC,
+        {
+            "type": "object",
+            "properties": {"computer_name": {"type": "string", "description": "Computer name to enable"}},
+            "required": ["computer_name"],
+        },
+        lambda t, a: t.computer.enable_computer(a["computer_name"]),
+    ),
+    ToolSpec(
+        "disable_computer",
+        DISABLE_COMPUTER_DESC,
+        {
+            "type": "object",
+            "properties": {"computer_name": {"type": "string", "description": "Computer name to disable"}},
+            "required": ["computer_name"],
+        },
+        lambda t, a: t.computer.disable_computer(a["computer_name"]),
+    ),
+    ToolSpec(
+        "reset_computer_password",
+        RESET_COMPUTER_PASSWORD_DESC,
+        {
+            "type": "object",
+            "properties": {"computer_name": {"type": "string", "description": "Computer name to reset password for"}},
+            "required": ["computer_name"],
+        },
+        lambda t, a: t.computer.reset_computer_password(a["computer_name"]),
+    ),
+    ToolSpec(
+        "get_stale_computers",
+        GET_STALE_COMPUTERS_DESC,
+        {
+            "type": "object",
+            "properties": {"days": {"type": "integer", "description": "Number of days to consider stale", "default": 90}},
+        },
+        lambda t, a: t.computer.get_stale_computers(a.get("days", 90)),
+    ),
+    # ----- Organizational Unit management -----
+    ToolSpec(
+        "list_organizational_units",
+        LIST_ORGANIZATIONAL_UNITS_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "parent_ou": {"type": "string", "description": "Parent OU DN to search in"},
+                "filter_criteria": {"type": "string", "description": "Additional LDAP filter criteria"},
+                "attributes": {"type": "array", "items": {"type": "string"}, "description": "Specific attributes to retrieve"},
+                "recursive": {"type": "boolean", "description": "Search recursively in sub-OUs", "default": True},
+            },
+        },
+        lambda t, a: t.ou.list_ous(a.get("parent_ou"), a.get("filter_criteria"), a.get("attributes"), a.get("recursive", True)),
+    ),
+    ToolSpec(
+        "get_organizational_unit",
+        GET_ORGANIZATIONAL_UNIT_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "ou_dn": {"type": "string", "description": "Distinguished name of the OU"},
+                "attributes": {"type": "array", "items": {"type": "string"}, "description": "Specific attributes to retrieve"},
+            },
+            "required": ["ou_dn"],
+        },
+        lambda t, a: t.ou.get_ou(a["ou_dn"], a.get("attributes")),
+    ),
+    ToolSpec(
+        "create_organizational_unit",
+        CREATE_ORGANIZATIONAL_UNIT_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name of the OU"},
+                "parent_ou": {"type": "string", "description": "Parent OU DN"},
+                "description": {"type": "string", "description": "OU description"},
+                "managed_by": {"type": "string", "description": "DN of user/group managing this OU"},
+                "additional_attributes": {"type": "object", "description": "Additional attributes to set"},
+            },
+            "required": ["name"],
+        },
+        lambda t, a: t.ou.create_ou(
+            a["name"], a.get("parent_ou"), a.get("description"),
+            a.get("managed_by"), a.get("additional_attributes"),
+        ),
+    ),
+    ToolSpec(
+        "modify_organizational_unit",
+        MODIFY_ORGANIZATIONAL_UNIT_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "ou_dn": {"type": "string", "description": "OU distinguished name to modify"},
+                "attributes": {"type": "object", "description": "Dictionary of attributes to modify"},
+            },
+            "required": ["ou_dn", "attributes"],
+        },
+        lambda t, a: t.ou.modify_ou(a["ou_dn"], a["attributes"]),
+    ),
+    ToolSpec(
+        "delete_organizational_unit",
+        DELETE_ORGANIZATIONAL_UNIT_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "ou_dn": {"type": "string", "description": "OU distinguished name to delete"},
+                "force": {"type": "boolean", "description": "Force deletion even if OU contains objects", "default": False},
+            },
+            "required": ["ou_dn"],
+        },
+        lambda t, a: t.ou.delete_ou(a["ou_dn"], a.get("force", False)),
+    ),
+    ToolSpec(
+        "move_organizational_unit",
+        MOVE_ORGANIZATIONAL_UNIT_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "ou_dn": {"type": "string", "description": "OU distinguished name to move"},
+                "new_parent_dn": {"type": "string", "description": "New parent OU distinguished name"},
+            },
+            "required": ["ou_dn", "new_parent_dn"],
+        },
+        lambda t, a: t.ou.move_ou(a["ou_dn"], a["new_parent_dn"]),
+    ),
+    ToolSpec(
+        "get_organizational_unit_contents",
+        GET_ORGANIZATIONAL_UNIT_CONTENTS_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "ou_dn": {"type": "string", "description": "OU distinguished name"},
+                "object_types": {"type": "array", "items": {"type": "string"}, "description": "Types of objects to include"},
+            },
+            "required": ["ou_dn"],
+        },
+        lambda t, a: t.ou.get_ou_contents(a["ou_dn"], a.get("object_types")),
+    ),
+    # ----- Security and audit (read-only reporting) -----
+    ToolSpec(
+        "get_domain_info",
+        GET_DOMAIN_INFO_DESC,
+        {"type": "object", "properties": {}},
+        lambda t, a: t.security.get_domain_info(),
+    ),
+    ToolSpec(
+        "get_privileged_groups",
+        GET_PRIVILEGED_GROUPS_DESC,
+        {"type": "object", "properties": {}},
+        lambda t, a: t.security.get_privileged_groups(),
+    ),
+    ToolSpec(
+        "get_user_permissions",
+        GET_USER_PERMISSIONS_DESC,
+        {
+            "type": "object",
+            "properties": {"username": {"type": "string", "description": "Username to analyze permissions for"}},
+            "required": ["username"],
+        },
+        lambda t, a: t.security.get_user_permissions(a["username"]),
+    ),
+    ToolSpec(
+        "get_inactive_users",
+        GET_INACTIVE_USERS_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Number of days to consider inactive", "default": 90},
+                "include_disabled": {"type": "boolean", "description": "Include disabled accounts in results", "default": False},
+            },
+        },
+        lambda t, a: t.security.get_inactive_users(a.get("days", 90), a.get("include_disabled", False)),
+    ),
+    ToolSpec(
+        "get_password_policy_violations",
+        GET_PASSWORD_POLICY_VIOLATIONS_DESC,
+        {"type": "object", "properties": {}},
+        lambda t, a: t.security.get_password_policy_violations(),
+    ),
+    ToolSpec(
+        "audit_admin_accounts",
+        AUDIT_ADMIN_ACCOUNTS_DESC,
+        {"type": "object", "properties": {}},
+        lambda t, a: t.security.audit_admin_accounts(),
+    ),
+    # ----- Group Policy (read-only) -----
+    ToolSpec(
+        "get_gpos",
+        GET_GPOS_DESC,
+        {
+            "type": "object",
+            "properties": {"name_filter": {"type": "string", "description": "Optional substring to match against GPO display name"}},
+        },
+        lambda t, a: t.gpo.get_gpos(a.get("name_filter")),
+    ),
+    ToolSpec(
+        "get_gpo",
+        GET_GPO_DESC,
+        {
+            "type": "object",
+            "properties": {"identifier": {"type": "string", "description": "GPO GUID (with or without braces) or exact display name"}},
+            "required": ["identifier"],
+        },
+        lambda t, a: t.gpo.get_gpo(a["identifier"]),
+    ),
+    ToolSpec(
+        "get_linked_gpos",
+        GET_LINKED_GPOS_DESC,
+        {
+            "type": "object",
+            "properties": {"target_dn": {"type": "string", "description": "DN of the OU/domain/site to inspect"}},
+            "required": ["target_dn"],
+        },
+        lambda t, a: t.gpo.get_linked_gpos(a["target_dn"]),
+    ),
+    ToolSpec(
+        "get_gpo_contents",
+        GET_GPO_CONTENTS_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "identifier": {"type": "string", "description": "GPO GUID (with or without braces) or exact display name"},
+                "include_registry": {"type": "boolean", "description": "Parse Registry.pol files", "default": True},
+                "max_value_chars": {"type": "integer", "description": "Truncate values longer than this", "default": 6000},
+            },
+            "required": ["identifier"],
+        },
+        lambda t, a: t.gpo.get_gpo_contents(
+            a["identifier"], a.get("include_registry", True), a.get("max_value_chars", 6000),
+        ),
+    ),
+    # ----- System -----
+    ToolSpec(
+        "test_connection",
+        TEST_CONNECTION_DESC,
+        {"type": "object", "properties": {}},
+        _handle_test_connection,
+    ),
+    ToolSpec(
+        "health",
+        HEALTH_DESC,
+        {"type": "object", "properties": {}},
+        _handle_health,
+    ),
+    ToolSpec(
+        "get_schema_info",
+        GET_SCHEMA_INFO_DESC,
+        {"type": "object", "properties": {}},
+        _handle_schema_info,
+    ),
+]
+
+
+def tool_names() -> List[str]:
+    """Return the list of tool names in registry order."""
+    return [spec.name for spec in TOOLS]

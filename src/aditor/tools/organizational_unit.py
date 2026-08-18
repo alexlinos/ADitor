@@ -681,39 +681,7 @@ class OrganizationalUnitTools(BaseTool):
     def get_organizational_unit(self, ou_dn: str, attributes: Optional[List[str]] = None) -> Dict[str, Any]:
         """Alias for get_ou method."""
         return self.get_ou(ou_dn, attributes)
-    
-    def create_organizational_unit(self, name: str, parent_ou: Optional[str] = None, 
-                                 parent_dn: Optional[str] = None, description: Optional[str] = None, 
-                                 manager_dn: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Alias for create_ou method."""
-        # Handle both parameter names for backward compatibility
-        if parent_dn is not None:
-            parent_ou = parent_dn
-        if manager_dn is not None:
-            kwargs['managed_by'] = manager_dn
-        return self.create_ou(name, parent_ou, description, **kwargs)
-    
-    def modify_organizational_unit(self, ou_dn: str, attributes: Dict[str, Any]) -> Dict[str, Any]:
-        """Alias for modify_ou method."""
-        return self.modify_ou(ou_dn, attributes)
-    
-    def delete_organizational_unit(self, ou_dn: str, force: bool = False) -> Dict[str, Any]:
-        """Alias for delete_ou method."""
-        return self.delete_ou(ou_dn, force)
-    
-    def move_organizational_unit(self, ou_dn: str = None, source_dn: str = None, 
-                                new_parent_dn: str = None, destination_parent_dn: str = None, 
-                                target_parent_dn: str = None) -> Dict[str, Any]:
-        """Alias for move_ou method."""
-        # Handle both parameter names for backward compatibility
-        if source_dn is not None:
-            ou_dn = source_dn
-        if destination_parent_dn is not None:
-            new_parent_dn = destination_parent_dn
-        if target_parent_dn is not None:
-            new_parent_dn = target_parent_dn
-        return self.move_ou(ou_dn, new_parent_dn)
-        
+
     # Additional methods that tests expect
     def get_ou_children(self, ou_dn: str) -> Dict[str, Any]:
         """Get child objects of an OU."""
