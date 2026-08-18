@@ -847,20 +847,30 @@ class SecurityTools(BaseTool):
         except:
             return -1  # Test expects -1 for errors
 
-    def generate_security_report(self) -> List[Dict[str, Any]]:
-        """Generate comprehensive security report."""
+    def generate_security_report(self) -> List[Content]:
+        """
+        Generate a comprehensive security report.
+
+        PROTOTYPE -- deliberately not registered as an MCP tool. This is the seed
+        of ADitor's Phase-2 report pipeline (see docs/HARDENING_CATALOG.md) and is
+        superseded by it; its shape is not committed to. It aggregates the real
+        get_domain_info, audit_admin_accounts, get_privileged_groups and
+        check_password_policy results. Findings are pass/fail evidence: there is
+        deliberately no aggregate score.
+
+        Returns:
+            List of MCP content objects with the aggregated report
+        """
         try:
-            from datetime import datetime
             report_timestamp = datetime.now().isoformat()
-            
+
             # Collect data from various security methods
             domain_info_response = self.get_domain_info()
             admin_audit_response = self.audit_admin_accounts()
             privileged_groups_response = self.get_privileged_groups()
             password_policy_response = self.check_password_policy()
-            
+
             # Parse responses (they are List[Content])
-            import json
             domain_info = json.loads(domain_info_response[0].text) if domain_info_response else {}
             admin_audit = json.loads(admin_audit_response[0].text) if admin_audit_response else {}
             privileged_groups = json.loads(privileged_groups_response[0].text) if privileged_groups_response else {}
@@ -876,8 +886,7 @@ class SecurityTools(BaseTool):
                 'total_admin_accounts': total_admins,
                 'high_risk_admin_accounts': high_risk_admins,
                 'total_privileged_groups': total_privileged_groups,
-                'password_policy_compliant': policy_compliant,
-                'overall_security_score': max(0, 100 - (high_risk_admins * 10) - (0 if policy_compliant else 20))
+                'password_policy_compliant': policy_compliant
             }
             
             # Detailed findings
@@ -909,10 +918,7 @@ class SecurityTools(BaseTool):
             
         if not summary.get('password_policy_compliant', True):
             recommendations.append("Update password policy to meet security standards")
-            
-        if summary.get('overall_security_score', 100) < 80:
-            recommendations.append("Conduct comprehensive security hardening review")
-            
+
         return recommendations or ["Security posture appears satisfactory - continue regular monitoring"]
 
     def get_schema_info(self) -> Dict[str, Any]:

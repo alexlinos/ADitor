@@ -473,6 +473,39 @@ class TestCheckPasswordPolicy:
         assert 'policy_compliant' not in report
 
 
+class TestGenerateSecurityReport:
+    """Prototype aggregator: kept, unregistered, and score-free."""
+
+    def _content(self, payload):
+        return [TextContent(type="text", text=json.dumps(payload))]
+
+    def test_report_aggregates_without_a_score(self, security_tools):
+        """Reports are pass/fail evidence: no invented aggregate score."""
+        with patch.object(security_tools, 'get_domain_info',
+                          return_value=self._content({'name': 'test'})), \
+             patch.object(security_tools, 'audit_admin_accounts',
+                          return_value=self._content({'total_admin_accounts': 3,
+                                                      'high_risk_count': 1})), \
+             patch.object(security_tools, 'get_privileged_groups',
+                          return_value=self._content({'total_groups': 6})), \
+             patch.object(security_tools, 'check_password_policy',
+                          return_value=self._content({'policy_compliant': False})):
+            result = security_tools.generate_security_report()
+
+        assert len(result) == 1
+        assert isinstance(result[0], TextContent)
+
+        report = json.loads(result[0].text)
+        summary = report['executive_summary']
+        assert 'overall_security_score' not in summary
+        assert summary['total_admin_accounts'] == 3
+        assert summary['high_risk_admin_accounts'] == 1
+        assert summary['total_privileged_groups'] == 6
+        assert summary['password_policy_compliant'] is False
+        assert 'password_policy_assessment' in report['detailed_findings']
+        assert report['recommendations']
+
+
 # Methods deleted in WP2 because they returned hardcoded sample findings with no
 # LDAP query behind them. Real equivalents (ACL analysis via nTSecurityDescriptor,
 # a service-account audit via SPN/encryption types/password age) are Phase-2
