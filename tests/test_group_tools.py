@@ -503,7 +503,7 @@ class TestGroupTools:
         assert group_tools._get_group_scope(0x00000002) == "Global"  # Global group
         assert group_tools._get_group_scope(0x00000004) == "DomainLocal"  # Domain Local
         assert group_tools._get_group_scope(0x00000008) == "Universal"  # Universal
-        assert group_tools._get_group_scope(0x12345678) == "Unknown"  # Unknown type
+        assert group_tools._get_group_scope(0x00000010) == "Unknown"  # No scope bits set (groupType is a bitfield)
     
     def test_group_type_calculation(self, group_tools):
         """Test group type calculation from groupType value."""
