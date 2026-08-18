@@ -3,10 +3,12 @@
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import base64
+import json
 
 import ldap3
 from ldap3 import MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE
 from ldap3.core.exceptions import LDAPException
+from mcp.types import TextContent as Content
 
 from .base import BaseTool
 from ..core.logging import log_ldap_operation
@@ -683,45 +685,119 @@ class SecurityTools(BaseTool):
             return None
         return (datetime.now() - last_logon_date).days
     
-    # Additional methods for security testing
-    def check_password_policy(self) -> Dict[str, Any]:
-        """Check password policy compliance."""
+    # Baseline thresholds the domain password policy is evaluated against.
+    # Kept explicit (and asserted in tests) so the judgement is auditable.
+    MIN_PASSWORD_LENGTH = 8
+    MIN_PASSWORD_HISTORY = 5
+
+    def check_password_policy(self) -> List[Content]:
+        """
+        Evaluate the domain password policy against ADitor's baseline.
+
+        Reads the real domain policy through :meth:`get_domain_info` and compares
+        the keys that method actually emits inside ``password_policy``
+        (``min_password_length`` and ``password_history_length``) against
+        :attr:`MIN_PASSWORD_LENGTH` / :attr:`MIN_PASSWORD_HISTORY`.
+
+        Lockout settings are reported for context but not scored: lockout
+        thresholds are a Phase-2 hardening-catalog decision.
+
+        Returns:
+            List of MCP content objects with the compliance assessment
+        """
         try:
             # get_domain_info returns List[Content], parse the JSON response
             domain_response = self.get_domain_info()
-            if not domain_response or len(domain_response) == 0:
-                return {'success': False, 'error': 'Domain info not found'}
-                
-            import json
+            if not domain_response:
+                return self._format_response(
+                    {
+                        'success': False,
+                        'error': 'Domain info not found',
+                        'operation': 'check_password_policy',
+                    },
+                    'check_password_policy'
+                )
+
             domain_info = json.loads(domain_response[0].text)
-            
+
+            # get_domain_info only sets 'success' when it failed.
             if not domain_info.get('success', True):
-                return {'success': False, 'error': domain_info.get('error', 'Unknown error')}
-                
-            policy_data = domain_info
-            
+                return self._format_response(
+                    {
+                        'success': False,
+                        'error': domain_info.get('error', 'Unknown error'),
+                        'operation': 'check_password_policy',
+                    },
+                    'check_password_policy'
+                )
+
+            pwd_policy = domain_info.get('password_policy', {})
+            min_length = self._as_int(pwd_policy.get('min_password_length'))
+            history_length = self._as_int(pwd_policy.get('password_history_length'))
+
+            checks = [
+                {
+                    'check': 'minimum_password_length',
+                    'attribute': 'min_password_length',
+                    'required_minimum': self.MIN_PASSWORD_LENGTH,
+                    'actual': min_length,
+                    'passed': min_length >= self.MIN_PASSWORD_LENGTH
+                },
+                {
+                    'check': 'password_history_length',
+                    'attribute': 'password_history_length',
+                    'required_minimum': self.MIN_PASSWORD_HISTORY,
+                    'actual': history_length,
+                    'passed': history_length >= self.MIN_PASSWORD_HISTORY
+                }
+            ]
+
+            recommendations = []
+            if not checks[0]['passed']:
+                recommendations.append(
+                    f'Increase minimum password length to at least '
+                    f'{self.MIN_PASSWORD_LENGTH} characters'
+                )
+            if not checks[1]['passed']:
+                recommendations.append(
+                    f'Increase password history to at least '
+                    f'{self.MIN_PASSWORD_HISTORY} passwords'
+                )
+
             compliance = {
-                'policy_compliant': True,
-                'recommendations': [],
-                'password_policy': policy_data.get('password_policy', {}),
-                'lockout_policy': policy_data.get('lockout_policy', {})
+                'policy_compliant': all(check['passed'] for check in checks),
+                'checks': checks,
+                'recommendations': recommendations,
+                'password_policy': pwd_policy,
+                # get_domain_info reports lockout settings inside password_policy;
+                # surface them here for context (reported, not scored).
+                'lockout_policy': {
+                    'lockout_threshold': pwd_policy.get('lockout_threshold'),
+                    'lockout_duration': pwd_policy.get('lockout_duration')
+                }
             }
-            
-            # Check policy strength
-            pwd_policy = policy_data.get('password_policy', {})
-            if pwd_policy.get('min_length', 0) < 8:
-                compliance['policy_compliant'] = False
-                compliance['recommendations'].append('Increase minimum password length to at least 8 characters')
-            
-            if pwd_policy.get('history_length', 0) < 5:
-                compliance['policy_compliant'] = False
-                compliance['recommendations'].append('Increase password history to at least 5 passwords')
-                
-            return self._format_response(True, compliance)
-            
+
+            log_ldap_operation(
+                'check_password_policy',
+                self.ldap.ad_config.base_dn,
+                True,
+                f"Password policy compliant: {compliance['policy_compliant']}"
+            )
+
+            return self._format_response(compliance, 'check_password_policy')
+
         except Exception as e:
             return self._handle_ldap_error(e, 'check_password_policy', 'domain')
-    
+
+    @staticmethod
+    def _as_int(value: Any, default: int = 0) -> int:
+        """Coerce an LDAP-sourced policy value to int, defaulting on junk."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+
     def _assess_account_risk(self, account_data: Dict[str, Any]) -> str:
         """Assess risk level of an account."""
         risk_score = 0
