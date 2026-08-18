@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import json
 from datetime import datetime, timedelta
 
-from active_directory_mcp.tools.organizational_unit import OrganizationalUnitTools
+from aditor.tools.organizational_unit import OrganizationalUnitTools
 from mcp.types import TextContent
 
 

@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import json
 from datetime import datetime, timedelta
 
-from active_directory_mcp.tools.computer import ComputerTools
+from aditor.tools.computer import ComputerTools
 from mcp.types import TextContent
 
 

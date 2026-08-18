@@ -11,9 +11,9 @@ import json
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from active_directory_mcp.config.loader import load_config
-from active_directory_mcp.core.ldap_manager import LDAPManager
-from active_directory_mcp.tools.user import UserTools
+from aditor.config.loader import load_config
+from aditor.core.ldap_manager import LDAPManager
+from aditor.tools.user import UserTools
 
 def test_real_ad_connection():
     """Test with real AD connection."""
