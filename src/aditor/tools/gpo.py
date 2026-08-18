@@ -31,6 +31,7 @@ from ..gpo.parsers import (
     parse_gp_link,
     parse_ini,
     parse_registry_pol,
+    summarize_gpo_contents,
 )
 
 
@@ -192,7 +193,8 @@ class GPOTools(BaseTool):
             return self._handle_ldap_error(e, "get_linked_gpos", target_dn)
 
     def get_gpo_contents(self, identifier: str, include_registry: bool = True,
-                         max_value_chars: int = 6000) -> List[Dict[str, Any]]:
+                         max_value_chars: int = 6000,
+                         summary: bool = False) -> List[Dict[str, Any]]:
         """
         Read a GPO's actual settings from its SYSVOL folder (read-only).
 
@@ -207,6 +209,14 @@ class GPOTools(BaseTool):
             include_registry: Parse Registry.pol files (default True).
             max_value_chars: Truncate individual registry/rule values longer
                 than this (default 6000).
+            summary: Return the same top-level shape with the heavy bodies
+                dropped (default False). Registry ``entries[]`` are omitted
+                (their ``entry_count``/``entries_truncated`` are kept), each
+                AppLocker rule's full XML becomes a
+                ``{type, id, name, action, sid}`` digest, and security
+                template / script sections are reduced to section names. The
+                response gains ``"detail": "summary"``. Rules-heavy GPOs (e.g.
+                72 AppLocker rules) otherwise run to tens of KB.
 
         Returns:
             List of MCP content objects with the parsed GPO contents.
@@ -260,7 +270,14 @@ class GPOTools(BaseTool):
                 "display_name": display_name,
                 "sysvol_path": sysvol_path,
             }
-            result.update(contents)
+            result.update(summarize_gpo_contents(contents) if summary else contents)
+            if summary:
+                result["detail"] = "summary"
+                result["note"] = (
+                    "Heavy bodies omitted: registry entries, full AppLocker rule "
+                    "XML, and template/script section bodies. Call again with "
+                    "summary=false for the complete contents."
+                )
 
             log_ldap_operation("get_gpo_contents", results[0]['dn'], True,
                                f"Read SYSVOL contents for GPO {identifier}")
@@ -463,6 +480,9 @@ class GPOTools(BaseTool):
                 "Registry.pol (PReg), GptTmpl.inf, scripts.ini, and AppLocker "
                 "rules; requires the optional 'smbprotocol' package plus SYSVOL "
                 "read access.",
+                "get_gpo_contents(summary=True) keeps the same shape but drops "
+                "registry entries, digests AppLocker rule XML, and reduces "
+                "template/script sections to section names.",
                 "flags: 0=all enabled, 1=user disabled, 2=computer disabled, "
                 "3=all disabled.",
                 "gPLink option bitmask: bit 0=link disabled, bit 1=enforced."

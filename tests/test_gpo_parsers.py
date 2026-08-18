@@ -18,6 +18,7 @@ import struct
 import pytest
 
 from aditor.gpo.parsers import (
+    applocker_rule_digest,
     decode_gpo_status,
     decode_version,
     extract_applocker,
@@ -25,6 +26,8 @@ from aditor.gpo.parsers import (
     parse_gp_link,
     parse_ini,
     parse_registry_pol,
+    summarize_applocker,
+    summarize_gpo_contents,
 )
 
 # Registry value type codes, spelled out here rather than imported from the
@@ -400,6 +403,240 @@ class TestExtractApplocker:
         ])
 
         assert result["collections"]["Unknown"]["enforcement_mode"] == "Enabled"
+
+
+class TestApplockerRuleDigest:
+    """applocker_rule_digest must read attributes as XML, order-independently."""
+
+    def test_publisher_rule_digest(self):
+        rule = (
+            '<FilePublisherRule Id="' + FAKE_RULE_ID_1 + '" '
+            'Name="Signed vendor apps" Description="" '
+            'UserOrGroupSid="S-1-1-0" Action="Allow">'
+            '<Conditions><FilePublisherCondition PublisherName="O=EXAMPLE VENDOR" '
+            'ProductName="*" BinaryName="*"><BinaryVersionRange LowSection="*" '
+            'HighSection="*" /></FilePublisherCondition></Conditions>'
+            '</FilePublisherRule>'
+        )
+
+        assert applocker_rule_digest(rule) == {
+            "type": "FilePublisherRule",
+            "id": FAKE_RULE_ID_1,
+            "name": "Signed vendor apps",
+            "action": "Allow",
+            "sid": "S-1-1-0",
+        }
+
+    def test_path_rule_digest(self):
+        digest = applocker_rule_digest(EXE_PATH_RULE.format(id=FAKE_RULE_ID_1))
+
+        assert digest["type"] == "FilePathRule"
+        assert digest["name"] == "Allow Program Files"
+        assert digest["action"] == "Allow"
+        assert digest["sid"] == "S-1-1-0"
+
+    def test_hash_rule_digest(self):
+        digest = applocker_rule_digest(EXE_HASH_RULE.format(id=FAKE_RULE_ID_2))
+
+        assert digest["type"] == "FileHashRule"
+        assert digest["action"] == "Deny"
+        assert digest["sid"] == "S-1-5-32-544"
+        assert digest["id"] == FAKE_RULE_ID_2
+
+    def test_attribute_order_does_not_matter(self):
+        """The whole point: live rules do not agree on attribute order."""
+        canonical = (
+            '<FilePathRule Id="' + FAKE_RULE_ID_1 + '" Name="Rule" '
+            'Description="" UserOrGroupSid="S-1-1-0" Action="Deny" />'
+        )
+        shuffled = (
+            '<FilePathRule Action="Deny" UserOrGroupSid="S-1-1-0" '
+            'Name="Rule" Description="" Id="' + FAKE_RULE_ID_1 + '" />'
+        )
+
+        assert applocker_rule_digest(shuffled) == applocker_rule_digest(canonical)
+        assert applocker_rule_digest(shuffled)["action"] == "Deny"
+
+    def test_multiline_and_whitespace_formatting(self):
+        rule = (
+            '<FilePathRule\n'
+            '    Action="Allow"\n'
+            '    Name="Wrapped"\n'
+            '    Id="' + FAKE_RULE_ID_1 + '"\n'
+            '    UserOrGroupSid="S-1-1-0">\n'
+            '  <Conditions />\n'
+            '</FilePathRule>\n'
+        )
+
+        digest = applocker_rule_digest(rule)
+
+        assert digest["name"] == "Wrapped"
+        assert digest["action"] == "Allow"
+
+    def test_namespaced_xml_is_handled(self):
+        rule = (
+            '<FilePathRule xmlns="urn:example:applocker" Id="' + FAKE_RULE_ID_1
+            + '" Name="Namespaced" Action="Allow" UserOrGroupSid="S-1-1-0" />'
+        )
+
+        digest = applocker_rule_digest(rule)
+
+        assert digest["type"] == "FilePathRule"
+        assert digest["name"] == "Namespaced"
+
+    def test_missing_attributes_become_empty_strings(self):
+        digest = applocker_rule_digest('<FilePathRule Name="Only a name" />')
+
+        assert digest == {"type": "FilePathRule", "id": "",
+                          "name": "Only a name", "action": "", "sid": ""}
+
+    def test_truncated_xml_falls_back_to_the_registry_rule_id(self):
+        truncated = ('<FilePathRule Id="' + FAKE_RULE_ID_1
+                     + '" Name="Cut off" Act...[truncated]')
+
+        digest = applocker_rule_digest(truncated, fallback_id=FAKE_RULE_ID_1)
+
+        assert digest == {"type": "", "id": FAKE_RULE_ID_1,
+                          "name": "", "action": "", "sid": ""}
+
+    @pytest.mark.parametrize("empty", [None, "", "   ", 42, [], {}])
+    def test_non_xml_input_yields_a_blank_digest(self, empty):
+        assert applocker_rule_digest(empty, fallback_id="x") == {
+            "type": "", "id": "x", "name": "", "action": "", "sid": ""}
+
+    def test_digest_has_exactly_the_five_summary_fields(self):
+        digest = applocker_rule_digest(EXE_PATH_RULE.format(id=FAKE_RULE_ID_1))
+
+        assert set(digest) == {"type", "id", "name", "action", "sid"}
+
+
+class TestSummarizeApplocker:
+    """summarize_applocker keeps enforcement/counts, drops rule XML."""
+
+    def _applocker(self):
+        return extract_applocker([
+            enforcement_entry("Exe", 1),
+            applocker_entry("Exe", FAKE_RULE_ID_1, EXE_PATH_RULE.format(id=FAKE_RULE_ID_1)),
+            applocker_entry("Exe", FAKE_RULE_ID_2, EXE_HASH_RULE.format(id=FAKE_RULE_ID_2)),
+        ])
+
+    def test_rules_become_digests(self):
+        summarized = summarize_applocker(self._applocker())
+
+        exe = summarized["collections"]["Exe"]
+        assert exe["enforcement_mode"] == "Enabled"
+        assert exe["rule_count"] == 2
+        assert all("xml" not in rule for rule in exe["rules"])
+        assert [rule["type"] for rule in exe["rules"]] == [
+            "FilePathRule", "FileHashRule"]
+        assert [rule["name"] for rule in exe["rules"]] == [
+            "Allow Program Files", "Block sample tool"]
+
+    def test_source_is_not_mutated(self):
+        applocker = self._applocker()
+
+        summarize_applocker(applocker)
+
+        assert applocker["collections"]["Exe"]["rules"][0]["xml"].startswith(
+            "<FilePathRule")
+
+    def test_none_passes_through(self):
+        assert summarize_applocker(None) is None
+
+
+class TestSummarizeGpoContents:
+    """summarize_gpo_contents drops the heavy bodies, keeps the shape."""
+
+    def _contents(self):
+        return {
+            "smb_source": r"\\dc.test.local\SYSVOL\test.local\Policies\{" + GUID_A + "}",
+            "files": [{"path": "GPT.INI", "size": 59}],
+            "gpt_ini": {"General": ["Version=3"]},
+            "machine_registry_pol": {
+                "entry_count": 2,
+                "entries_truncated": True,
+                "entries": [
+                    {"key": r"Software\Policies\Test", "value": "A",
+                     "type": "REG_DWORD", "data": 1},
+                    {"key": r"Software\Policies\Test", "value": "B",
+                     "type": "REG_SZ", "data": "x"},
+                ],
+            },
+            "user_registry_pol": {
+                "entry_count": 0, "entries_truncated": False, "entries": []},
+            "applocker": extract_applocker([
+                enforcement_entry("Exe", 1),
+                applocker_entry("Exe", FAKE_RULE_ID_1,
+                                EXE_PATH_RULE.format(id=FAKE_RULE_ID_1)),
+            ]),
+            "security_templates": [{
+                "path": r"Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf",
+                "sections": {"Version": ["Revision=1"],
+                             "System Access": ["MinimumPasswordLength = 14"]},
+            }],
+            "scripts": [{
+                "path": r"Machine\Scripts\scripts.ini",
+                "sections": {"Startup": ["0CmdLine=setup.cmd"]},
+            }],
+        }
+
+    def test_identity_and_light_fields_are_kept(self):
+        contents = self._contents()
+
+        summarized = summarize_gpo_contents(contents)
+
+        assert summarized["smb_source"] == contents["smb_source"]
+        assert summarized["files"] == contents["files"]
+        assert summarized["gpt_ini"] == contents["gpt_ini"]
+        assert set(summarized) == set(contents), "top-level shape must not change"
+
+    def test_registry_entries_are_omitted_but_counts_kept(self):
+        summarized = summarize_gpo_contents(self._contents())
+
+        assert summarized["machine_registry_pol"] == {
+            "entry_count": 2, "entries_truncated": True}
+        assert summarized["user_registry_pol"] == {
+            "entry_count": 0, "entries_truncated": False}
+
+    def test_applocker_rules_become_digests(self):
+        summarized = summarize_gpo_contents(self._contents())
+
+        exe = summarized["applocker"]["collections"]["Exe"]
+        assert exe["enforcement_mode"] == "Enabled"
+        assert exe["rule_count"] == 1
+        assert exe["rules"][0]["name"] == "Allow Program Files"
+        assert "xml" not in exe["rules"][0]
+
+    def test_templates_and_scripts_reduce_to_section_names(self):
+        summarized = summarize_gpo_contents(self._contents())
+
+        template = summarized["security_templates"][0]
+        assert template["path"].endswith("GptTmpl.inf")
+        assert template["sections"] == ["Version", "System Access"]
+        assert summarized["scripts"][0]["sections"] == ["Startup"]
+
+    def test_input_is_not_mutated(self):
+        contents = self._contents()
+
+        summarize_gpo_contents(contents)
+
+        assert len(contents["machine_registry_pol"]["entries"]) == 2
+        assert isinstance(contents["security_templates"][0]["sections"], dict)
+
+    def test_missing_and_none_sections_are_tolerated(self):
+        summarized = summarize_gpo_contents({
+            "files": [],
+            "gpt_ini": {},
+            "machine_registry_pol": None,
+            "user_registry_pol": None,
+            "applocker": None,
+            "security_templates": [],
+            "scripts": [],
+        })
+
+        assert summarized["machine_registry_pol"] is None
+        assert summarized["applocker"] is None
+        assert summarized["security_templates"] == []
 
 
 class TestDecodeVersion:
