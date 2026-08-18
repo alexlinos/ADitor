@@ -34,7 +34,7 @@ from .tools.security import SecurityTools
 from .tools.gpo import GPOTools
 
 
-logger = logging.getLogger("active-directory-mcp.http")
+logger = logging.getLogger("aditor.http")
 
 
 class ActiveDirectoryMCPHTTPServer:

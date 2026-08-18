@@ -71,12 +71,12 @@ ADitor runs as an HTTP MCP server:
 
 ```bash
 AD_MCP_PASSWORD='…' PYTHONPATH=src \
-  .venv/bin/python -m active_directory_mcp.server_http \
+  .venv/bin/python -m aditor.server_http \
   --config ad-config/config.json
 ```
 
 It serves on `http://localhost:8813/activedirectory-mcp/` by default. A stdio
-transport is also available via `active_directory_mcp.server`.
+transport is also available via `aditor.server`.
 
 ### MCP client
 
@@ -133,7 +133,7 @@ pytest
 Layout:
 
 ```
-src/active_directory_mcp/
+src/aditor/
   server.py            # stdio MCP server
   server_http.py       # HTTP MCP server
   config/              # configuration models and loader

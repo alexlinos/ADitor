@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import Mock, patch
 import json
 
-from active_directory_mcp.tools.user import UserTools
+from aditor.tools.user import UserTools
 from mcp.types import TextContent
 
 

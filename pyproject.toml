@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "active-directory-mcp"
+name = "aditor"
 version = "0.1.0"
 description = "A Model Context Protocol server for interacting with Active Directory"
 requires-python = ">=3.9"
@@ -65,7 +65,7 @@ Repository = "https://github.com/alpadalar/ActiveDirectoryMCP.git"
 Issues = "https://github.com/alpadalar/ActiveDirectoryMCP/issues"
 
 [project.scripts]
-activedirectory-mcp = "active_directory_mcp.server:main"
+activedirectory-mcp = "aditor.server:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
