@@ -344,3 +344,195 @@ class TestSecurityTools:
         assert 'high' in schema['risk_levels']
         assert 'critical' in schema['risk_levels']
 
+
+def _domain_entry(min_pwd_length, pwd_history_length):
+    """One mock domain object with the given password-policy attributes.
+
+    Everything flows through the real get_domain_info(), so these tests exercise
+    the produce/consume contract between the two methods rather than a
+    hand-written policy dict.
+    """
+    return [
+        {
+            'dn': 'DC=test,DC=local',
+            'attributes': {
+                'name': ['test'],
+                'dc': ['test'],
+                'objectSid': [b'\x01\x05\x00\x00\x00\x00\x00\x05'],
+                'whenCreated': [datetime.now() - timedelta(days=365)],
+                'whenChanged': [datetime.now() - timedelta(days=1)],
+                'lockoutThreshold': [5],
+                'lockoutDuration': [-18000000000],
+                'maxPwdAge': [-36288000000000],
+                'minPwdAge': [-864000000000],
+                'minPwdLength': [min_pwd_length],
+                'pwdHistoryLength': [pwd_history_length],
+            }
+        }
+    ]
+
+
+class TestCheckPasswordPolicy:
+    """check_password_policy must evaluate the keys get_domain_info emits.
+
+    The historical bug: it read 'min_length' / 'history_length' (never emitted)
+    and 'lockout_policy' at the top level (never emitted), so every policy came
+    back non-compliant, and it passed a bool as the response payload.
+    """
+
+    def test_produced_and_consumed_key_names_match(self, security_tools, mock_ldap_manager):
+        """get_domain_info's password_policy keys are the ones checked."""
+        mock_ldap_manager.search.return_value = _domain_entry(14, 24)
+
+        policy = json.loads(security_tools.get_domain_info()[0].text)['password_policy']
+        assert 'min_password_length' in policy
+        assert 'password_history_length' in policy
+        # The keys the old implementation read do not exist.
+        assert 'min_length' not in policy
+        assert 'history_length' not in policy
+
+        report = json.loads(security_tools.check_password_policy()[0].text)
+        checked = {check['attribute'] for check in report['checks']}
+        assert checked == {'min_password_length', 'password_history_length'}
+
+    def test_compliant_policy(self, security_tools, mock_ldap_manager):
+        """A policy meeting both thresholds reports compliant with no advice."""
+        mock_ldap_manager.search.return_value = _domain_entry(14, 24)
+
+        result = security_tools.check_password_policy()
+
+        # Consistent with every other tool: List[Content], JSON payload.
+        assert len(result) == 1
+        assert isinstance(result[0], TextContent)
+
+        report = json.loads(result[0].text)
+        assert report['policy_compliant'] is True
+        assert report['recommendations'] == []
+        assert all(check['passed'] for check in report['checks'])
+        assert report['password_policy']['min_password_length'] == 14
+        assert report['password_policy']['password_history_length'] == 24
+        # Lockout settings are reported for context, sourced from the real keys.
+        assert report['lockout_policy']['lockout_threshold'] == 5
+
+    def test_non_compliant_policy(self, security_tools, mock_ldap_manager):
+        """A policy failing both thresholds reports both failures."""
+        mock_ldap_manager.search.return_value = _domain_entry(6, 2)
+
+        report = json.loads(security_tools.check_password_policy()[0].text)
+
+        assert report['policy_compliant'] is False
+        checks = {check['check']: check for check in report['checks']}
+        assert checks['minimum_password_length']['passed'] is False
+        assert checks['minimum_password_length']['actual'] == 6
+        assert checks['password_history_length']['passed'] is False
+        assert checks['password_history_length']['actual'] == 2
+        assert len(report['recommendations']) == 2
+
+    def test_mixed_policy_length_passes_history_fails(self, security_tools, mock_ldap_manager):
+        """Each threshold is judged independently, not as one blanket verdict."""
+        mock_ldap_manager.search.return_value = _domain_entry(12, 3)
+
+        report = json.loads(security_tools.check_password_policy()[0].text)
+
+        checks = {check['check']: check for check in report['checks']}
+        assert checks['minimum_password_length']['passed'] is True
+        assert checks['password_history_length']['passed'] is False
+        assert report['policy_compliant'] is False
+        assert len(report['recommendations']) == 1
+        assert 'history' in report['recommendations'][0].lower()
+
+    def test_boundary_values_are_compliant(self, security_tools, mock_ldap_manager):
+        """The thresholds are inclusive minimums (>= 8 characters, >= 5 remembered)."""
+        mock_ldap_manager.search.return_value = _domain_entry(
+            SecurityTools.MIN_PASSWORD_LENGTH, SecurityTools.MIN_PASSWORD_HISTORY
+        )
+
+        report = json.loads(security_tools.check_password_policy()[0].text)
+
+        assert report['policy_compliant'] is True
+
+    def test_payload_is_the_report_not_a_bool(self, security_tools, mock_ldap_manager):
+        """Regression: the payload used to be the literal string 'True'."""
+        mock_ldap_manager.search.return_value = _domain_entry(14, 24)
+
+        text = security_tools.check_password_policy()[0].text
+
+        assert text.strip() not in ('True', 'False')
+        assert isinstance(json.loads(text), dict)
+
+    def test_error_from_domain_info_is_propagated(self, security_tools, mock_ldap_manager):
+        """An LDAP failure surfaces as an error payload, not a fake verdict."""
+        from ldap3.core.exceptions import LDAPException
+        mock_ldap_manager.search.side_effect = LDAPException("Connection failed")
+
+        result = security_tools.check_password_policy()
+
+        assert len(result) == 1
+        report = json.loads(result[0].text)
+        assert report['success'] is False
+        assert 'policy_compliant' not in report
+
+
+class TestGenerateSecurityReport:
+    """Prototype aggregator: kept, unregistered, and score-free."""
+
+    def _content(self, payload):
+        return [TextContent(type="text", text=json.dumps(payload))]
+
+    def test_report_aggregates_without_a_score(self, security_tools):
+        """Reports are pass/fail evidence: no invented aggregate score."""
+        with patch.object(security_tools, 'get_domain_info',
+                          return_value=self._content({'name': 'test'})), \
+             patch.object(security_tools, 'audit_admin_accounts',
+                          return_value=self._content({'total_admin_accounts': 3,
+                                                      'high_risk_count': 1})), \
+             patch.object(security_tools, 'get_privileged_groups',
+                          return_value=self._content({'total_groups': 6})), \
+             patch.object(security_tools, 'check_password_policy',
+                          return_value=self._content({'policy_compliant': False})):
+            result = security_tools.generate_security_report()
+
+        assert len(result) == 1
+        assert isinstance(result[0], TextContent)
+
+        report = json.loads(result[0].text)
+        summary = report['executive_summary']
+        assert 'overall_security_score' not in summary
+        assert summary['total_admin_accounts'] == 3
+        assert summary['high_risk_admin_accounts'] == 1
+        assert summary['total_privileged_groups'] == 6
+        assert summary['password_policy_compliant'] is False
+        assert 'password_policy_assessment' in report['detailed_findings']
+        assert report['recommendations']
+
+
+# Methods deleted in WP2 because they returned hardcoded sample findings with no
+# LDAP query behind them. Real equivalents (ACL analysis via nTSecurityDescriptor,
+# a service-account audit via SPN/encryption types/password age) are Phase-2
+# directory-state controls and must be built deliberately, not resurrected here.
+DELETED_FABRICATED_METHODS = [
+    'find_weak_passwords',
+    'analyze_permissions',
+    'detect_privilege_escalation',
+    'check_service_accounts',
+]
+
+
+@pytest.mark.parametrize('method_name', DELETED_FABRICATED_METHODS)
+def test_fabricating_methods_stay_deleted(method_name):
+    """The fabricating stubs must not come back, and must not be in the schema."""
+    assert not hasattr(SecurityTools, method_name), (
+        f"{method_name} was deleted in WP2 as a fabrication; do not reintroduce it"
+    )
+
+
+def test_schema_operations_list_has_no_deleted_methods(security_tools):
+    """get_schema_info must advertise only methods that actually exist."""
+    operations = security_tools.get_schema_info()['operations']
+    for method_name in DELETED_FABRICATED_METHODS:
+        assert method_name not in operations
+    for operation in operations:
+        assert hasattr(security_tools, operation), (
+            f"schema advertises {operation}, which SecurityTools does not implement"
+        )
+
