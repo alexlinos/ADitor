@@ -18,13 +18,11 @@ from aditor.registry import TOOLS, tool_names
 from aditor.server import ActiveDirectoryMCPServer
 
 
-# Security tools that are deliberately NOT registered yet (WP2 mock stubs).
+# Security methods that exist on SecurityTools but are deliberately NOT exposed
+# as MCP tools. ``generate_security_report`` is the prototype of the Phase-2
+# report pipeline: real logic, but its shape is not committed to yet.
+# (WP2 deleted the four fabricating stubs outright.)
 UNREGISTERED_SECURITY_STUBS = {
-    "find_weak_passwords",
-    "analyze_permissions",
-    "detect_privilege_escalation",
-    "check_service_accounts",
-    "check_password_policy",
     "generate_security_report",
 }
 

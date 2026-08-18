@@ -344,3 +344,34 @@ class TestSecurityTools:
         assert 'high' in schema['risk_levels']
         assert 'critical' in schema['risk_levels']
 
+
+# Methods deleted in WP2 because they returned hardcoded sample findings with no
+# LDAP query behind them. Real equivalents (ACL analysis via nTSecurityDescriptor,
+# a service-account audit via SPN/encryption types/password age) are Phase-2
+# directory-state controls and must be built deliberately, not resurrected here.
+DELETED_FABRICATED_METHODS = [
+    'find_weak_passwords',
+    'analyze_permissions',
+    'detect_privilege_escalation',
+    'check_service_accounts',
+]
+
+
+@pytest.mark.parametrize('method_name', DELETED_FABRICATED_METHODS)
+def test_fabricating_methods_stay_deleted(method_name):
+    """The fabricating stubs must not come back, and must not be in the schema."""
+    assert not hasattr(SecurityTools, method_name), (
+        f"{method_name} was deleted in WP2 as a fabrication; do not reintroduce it"
+    )
+
+
+def test_schema_operations_list_has_no_deleted_methods(security_tools):
+    """get_schema_info must advertise only methods that actually exist."""
+    operations = security_tools.get_schema_info()['operations']
+    for method_name in DELETED_FABRICATED_METHODS:
+        assert method_name not in operations
+    for operation in operations:
+        assert hasattr(security_tools, operation), (
+            f"schema advertises {operation}, which SecurityTools does not implement"
+        )
+
