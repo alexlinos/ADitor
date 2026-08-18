@@ -16,10 +16,10 @@ Covered formats:
 - the ``gPLink`` attribute found on OUs, domains and sites (``parse_gp_link``)
 """
 
-from typing import Any, Dict, List, Optional, Tuple
-from xml.etree import ElementTree
 import base64
 import struct
+from typing import Any, Dict, List, Optional, Tuple
+from xml.etree import ElementTree
 
 # Windows registry value types found in Registry.pol (PReg) records.
 REG_TYPES = {
