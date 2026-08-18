@@ -259,6 +259,14 @@ AUDIT_ADMIN_ACCOUNTS_DESC = """Audit administrative accounts for security compli
 
 Reviews privileged accounts for policy compliance and risk."""
 
+CHECK_PASSWORD_POLICY_DESC = """Check the domain password policy against a baseline (read-only).
+
+Reads the domain-wide policy and evaluates the minimum password length (>= 8) and
+password history length (>= 5), returning a per-check pass/fail result plus
+recommendations for the checks that failed. Domain lockout settings are reported
+for context but not scored. This is the domain policy itself; use
+get_password_policy_violations for per-account non-compliance."""
+
 GET_GPOS_DESC = """List all Group Policy Objects in the domain (read-only).
 
 Enumerates groupPolicyContainer objects under CN=Policies,CN=System and returns
@@ -829,6 +837,12 @@ TOOLS: List[ToolSpec] = [
         AUDIT_ADMIN_ACCOUNTS_DESC,
         {"type": "object", "properties": {}},
         lambda t, a: t.security.audit_admin_accounts(),
+    ),
+    ToolSpec(
+        "check_password_policy",
+        CHECK_PASSWORD_POLICY_DESC,
+        {"type": "object", "properties": {}},
+        lambda t, a: t.security.check_password_policy(),
     ),
     # ----- Group Policy (read-only) -----
     ToolSpec(

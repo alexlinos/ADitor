@@ -103,7 +103,23 @@ def test_security_stubs_are_not_registered():
     assert registry_names.isdisjoint(UNREGISTERED_SECURITY_STUBS)
 
 
+def test_expected_security_tools_are_registered(server):
+    """The security tools ADitor commits to exposing (WP2 added the last one)."""
+    expected = {
+        "get_domain_info",
+        "get_privileged_groups",
+        "get_user_permissions",
+        "get_inactive_users",
+        "get_password_policy_violations",
+        "audit_admin_accounts",
+        "check_password_policy",
+    }
+    registry_names = {spec.name for spec in TOOLS}
+    assert expected <= registry_names
+    assert expected <= set(server._tool_handlers)
+
+
 def test_expected_tool_count(server):
-    # 9 user + 8 group + 9 computer + 7 OU + 6 security + 4 GPO + 3 system = 46
-    assert len(TOOLS) == 46
-    assert len(server._tools) == 46
+    # 9 user + 8 group + 9 computer + 7 OU + 7 security + 4 GPO + 3 system = 47
+    assert len(TOOLS) == 47
+    assert len(server._tools) == 47

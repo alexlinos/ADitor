@@ -98,7 +98,8 @@ redirects):
 
 **Auditing and security**
 `get_domain_info`, `get_privileged_groups`, `audit_admin_accounts`,
-`get_user_permissions`, `get_inactive_users`, `get_password_policy_violations`
+`get_user_permissions`, `get_inactive_users`, `get_password_policy_violations`,
+`check_password_policy`
 
 **Group Policy**
 `get_gpos`, `get_gpo`, `get_linked_gpos` (enforcement and inheritance),
