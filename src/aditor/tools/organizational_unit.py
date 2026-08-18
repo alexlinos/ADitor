@@ -7,6 +7,7 @@ from ldap3 import MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE, SUBTREE, BASE
 
 from .base import BaseTool
 from ..core.logging import log_ldap_operation
+from ..gpo.parsers import parse_gp_link
 
 
 class OrganizationalUnitTools(BaseTool):
@@ -75,10 +76,12 @@ class OrganizationalUnitTools(BaseTool):
                 if managed_by:
                     ou_info['managedBy'] = managed_by
                 
-                # Add GP Link information if present
-                gp_link = entry['attributes'].get('gPLink', [])
+                # Add GP Link information if present. ldap3 hands gPLink back as
+                # a plain str, so it must be read with _get_attr_value, never
+                # indexed with [0] (that yields the character '[').
+                gp_link = self._get_attr_value(entry['attributes'], 'gPLink', '')
                 if gp_link:
-                    ou_info['linkedGPOs'] = self._parse_gp_link(gp_link[0])
+                    ou_info['linkedGPOs'] = parse_gp_link(gp_link)
                 
                 # Add additional attributes if present
                 for attr in attributes:
@@ -168,10 +171,11 @@ class OrganizationalUnitTools(BaseTool):
                 'level': self._calculate_ou_level(ou_dn, self.ldap.ad_config.base_dn)
             }
             
-            # Parse GP Links if present
-            gp_link = ou_entry['attributes'].get('gPLink', [])
+            # Parse GP Links if present (see the note in list_ous: gPLink is a
+            # str, and the shared parser decodes the option bitmask correctly).
+            gp_link = self._get_attr_value(ou_entry['attributes'], 'gPLink', '')
             if gp_link:
-                ou_info['computed']['linked_gpos'] = self._parse_gp_link(gp_link[0])
+                ou_info['computed']['linked_gpos'] = parse_gp_link(gp_link)
             
             log_ldap_operation("get_ou", ou_dn, True, f"Retrieved OU: {ou_dn}")
             
@@ -613,35 +617,6 @@ class OrganizationalUnitTools(BaseTool):
             return len(results)
         except:
             return 0
-    
-    def _parse_gp_link(self, gp_link: str) -> List[Dict[str, Any]]:
-        """Parse GP Link attribute to extract linked GPOs."""
-        try:
-            gpos = []
-            # GP Link format: [LDAP://cn={GUID},cn=policies,cn=system,DC=domain;0]
-            parts = gp_link.split('[')
-            for part in parts[1:]:  # Skip first empty part
-                if ';' in part:
-                    gpo_path, options = part.split(';', 1)
-                    options = options.rstrip(']')
-                    
-                    # Extract GUID from path
-                    gpo_guid = ""
-                    if 'cn={' in gpo_path and '}' in gpo_path:
-                        start = gpo_path.find('{') + 1
-                        end = gpo_path.find('}')
-                        gpo_guid = gpo_path[start:end]
-                    
-                    gpos.append({
-                        'path': gpo_path,
-                        'guid': gpo_guid,
-                        'options': int(options) if options.isdigit() else 0,
-                        'enabled': int(options) == 0 if options.isdigit() else True
-                    })
-            
-            return gpos
-        except:
-            return []
     
     def _delete_ou_contents(self, ou_dn: str) -> None:
         """Recursively delete all contents of an OU."""
