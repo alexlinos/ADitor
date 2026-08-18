@@ -512,3 +512,145 @@ class TestOrganizationalUnitTools:
         assert 'Read' in delegation_perms
         assert 'Write' in delegation_perms
 
+
+# --- gPLink regressions (WP3) ----------------------------------------------
+#
+# The OU tools carried their own copy of the gPLink parser with two live-
+# confirmed bugs. Both are covered here; the parser itself now lives once, in
+# aditor.gpo.parsers.parse_gp_link, and is unit-tested in test_gpo_parsers.py.
+#
+# Bug 1: the copy computed 'enabled': int(options) == 0. The option is a
+#        bitmask (bit 0 = link disabled, bit 1 = enforced), so an *enforced*
+#        link (options=2) was reported as disabled, and 'enforced' did not
+#        exist as a concept at all.
+# Bug 2: get_ou/list_ous did attributes.get('gPLink', [])[0]. ldap3 returns
+#        gPLink as a str, so [0] was the character '[' and parsing it yielded
+#        [] — every OU in the domain reported linked_gpos: [].
+
+GPO_GUID_PLAIN = '11111111-1111-1111-1111-111111111111'
+GPO_GUID_ENFORCED = '22222222-2222-2222-2222-222222222222'
+GPO_GUID_DISABLED = '33333333-3333-3333-3333-333333333333'
+
+
+def _gp_link(*links):
+    """Build a gPLink value the way AD does: one concatenated string."""
+    return ''.join(
+        f'[LDAP://cn={{{guid}}},cn=policies,cn=system,DC=test,DC=local;{options}]'
+        for guid, options in links
+    )
+
+
+# As returned by ldap3: a single str holding every link. Two links, the second
+# enforced (options=2) and a third disabled (options=1).
+STR_GP_LINK = _gp_link(
+    (GPO_GUID_PLAIN, 0),
+    (GPO_GUID_ENFORCED, 2),
+    (GPO_GUID_DISABLED, 1),
+)
+
+
+class TestGpLinkRegressions:
+    """Both gPLink bugs must stay fixed."""
+
+    def test_get_ou_parses_a_str_gplink(self, ou_tools, mock_ldap_manager):
+        """Bug 2: a str gPLink must yield the real, non-empty link list."""
+        mock_ldap_manager.search.return_value = [{
+            'dn': 'OU=Sales,DC=test,DC=local',
+            'attributes': {'name': 'Sales', 'gPLink': STR_GP_LINK},
+        }]
+
+        response = json.loads(
+            ou_tools.get_ou('OU=Sales,DC=test,DC=local')[0].text)
+
+        linked = response['computed']['linked_gpos']
+        assert len(linked) == 3, "a str gPLink must not parse to an empty list"
+        assert [link['guid'] for link in linked] == [
+            GPO_GUID_PLAIN, GPO_GUID_ENFORCED, GPO_GUID_DISABLED]
+
+    def test_get_ou_reports_enforced_links_as_enabled_and_enforced(
+            self, ou_tools, mock_ldap_manager):
+        """Bug 1: options=2 means enabled AND enforced, not disabled."""
+        mock_ldap_manager.search.return_value = [{
+            'dn': 'OU=Sales,DC=test,DC=local',
+            'attributes': {'name': 'Sales',
+                           'gPLink': _gp_link((GPO_GUID_ENFORCED, 2))},
+        }]
+
+        response = json.loads(
+            ou_tools.get_ou('OU=Sales,DC=test,DC=local')[0].text)
+
+        link = response['computed']['linked_gpos'][0]
+        assert link['link_enabled'] is True
+        assert link['enforced'] is True
+        # The inverted key from the deleted copy must not come back.
+        assert 'enabled' not in link
+
+    def test_get_ou_link_option_bitmask(self, ou_tools, mock_ldap_manager):
+        """The whole bitmask: 0 plain, 1 disabled, 2 enforced."""
+        mock_ldap_manager.search.return_value = [{
+            'dn': 'OU=Sales,DC=test,DC=local',
+            'attributes': {'name': 'Sales', 'gPLink': STR_GP_LINK},
+        }]
+
+        response = json.loads(
+            ou_tools.get_ou('OU=Sales,DC=test,DC=local')[0].text)
+
+        linked = response['computed']['linked_gpos']
+        assert [link['link_enabled'] for link in linked] == [True, True, False]
+        assert [link['enforced'] for link in linked] == [False, True, False]
+
+    def test_list_ous_parses_a_str_gplink(self, ou_tools, mock_ldap_manager):
+        """Bug 2 again, via the list path."""
+        mock_ldap_manager.search.return_value = [{
+            'dn': 'OU=Sales,DC=test,DC=local',
+            'attributes': {'name': 'Sales', 'gPLink': STR_GP_LINK},
+        }]
+
+        response = json.loads(ou_tools.list_ous()[0].text)
+
+        linked = response['organizational_units'][0]['linkedGPOs']
+        assert len(linked) == 3
+        assert linked[1]['guid'] == GPO_GUID_ENFORCED
+        assert linked[1]['enforced'] is True
+        assert linked[1]['link_enabled'] is True
+
+    def test_ou_tools_use_the_shared_parser(self):
+        """The duplicate implementation must not come back."""
+        assert not hasattr(OrganizationalUnitTools, '_parse_gp_link'), (
+            "gPLink parsing lives once, in aditor.gpo.parsers.parse_gp_link"
+        )
+
+
+# delegate_ou_control was deleted in WP3 (the WP2 Bucket-A follow-up): it was
+# self-described as a mock, performed no delegation, and still returned
+# 'success': True with a 'delegated_permissions' list -- an operator could
+# reasonably believe rights had been granted. Real OU delegation means writing
+# nTSecurityDescriptor ACEs, a deliberate future feature rather than a revived
+# shell. It was never registered as an MCP tool.
+DELETED_MOCK_METHODS = [
+    'delegate_ou_control',
+]
+
+
+@pytest.mark.parametrize('method_name', DELETED_MOCK_METHODS)
+def test_mock_methods_stay_deleted(method_name):
+    assert not hasattr(OrganizationalUnitTools, method_name), (
+        f"{method_name} was deleted in WP3 as a fabrication; do not reintroduce it"
+    )
+
+
+@pytest.mark.parametrize('method_name', DELETED_MOCK_METHODS)
+def test_deleted_mock_methods_are_not_registered_as_tools(method_name):
+    from aditor.registry import tool_names
+
+    assert method_name not in tool_names()
+
+
+def test_schema_operations_all_exist(ou_tools):
+    """get_schema_info must advertise only methods that actually exist."""
+    for operation in ou_tools.get_schema_info()['operations']:
+        assert hasattr(ou_tools, operation), (
+            f"schema advertises {operation}, which OrganizationalUnitTools "
+            "does not implement"
+        )
+

@@ -9,27 +9,30 @@ objects. ``get_gpo_contents`` additionally reads the GPO's files from SYSVOL
 over SMB and parses the common policy formats (Registry.pol, GptTmpl.inf,
 scripts.ini, AppLocker rules). SMB support requires the optional
 ``smbprotocol`` dependency.
+
+This module is orchestration only: LDAP queries, SMB reads, and response
+shaping. All parsing/decoding lives in :mod:`aditor.gpo.parsers` as pure,
+offline-testable functions.
 """
 
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
-import struct
 import base64
 
 import ldap3
 
 from .base import BaseTool
 from ..core.logging import log_ldap_operation
-
-# Windows registry value types found in Registry.pol (PReg) records.
-_REG_TYPES = {
-    0: "REG_NONE", 1: "REG_SZ", 2: "REG_EXPAND_SZ", 3: "REG_BINARY",
-    4: "REG_DWORD", 5: "REG_DWORD_BIG_ENDIAN", 7: "REG_MULTI_SZ",
-    11: "REG_QWORD",
-}
-
-# AppLocker per-collection EnforcementMode DWORD values (registry form).
-_APPLOCKER_ENFORCEMENT = {0: "AuditOnly", 1: "Enabled"}
+from ..gpo.parsers import (
+    decode_gpo_status,
+    decode_version,
+    extract_applocker,
+    normalize_guid,
+    parse_gp_link,
+    parse_ini,
+    parse_registry_pol,
+    summarize_gpo_contents,
+)
 
 
 class GPOTools(BaseTool):
@@ -97,7 +100,7 @@ class GPOTools(BaseTool):
             List of MCP content objects with the GPO's metadata.
         """
         try:
-            guid = self._normalize_guid(identifier)
+            guid = normalize_guid(identifier)
             if guid is not None:
                 search_filter = f"(&(objectClass=groupPolicyContainer)(cn={{{self._escape_ldap_filter(guid)}}}))"
             else:
@@ -168,7 +171,7 @@ class GPOTools(BaseTool):
             gp_link = self._get_attr_value(attrs, 'gPLink', '')
             gp_options = self._get_attr_value(attrs, 'gPOptions', 0)
 
-            links = self._parse_gp_link(gp_link)
+            links = parse_gp_link(gp_link)
             for link in links:
                 link['display_name'] = self._resolve_gpo_name(link['guid'])
 
@@ -190,7 +193,8 @@ class GPOTools(BaseTool):
             return self._handle_ldap_error(e, "get_linked_gpos", target_dn)
 
     def get_gpo_contents(self, identifier: str, include_registry: bool = True,
-                         max_value_chars: int = 6000) -> List[Dict[str, Any]]:
+                         max_value_chars: int = 6000,
+                         summary: bool = False) -> List[Dict[str, Any]]:
         """
         Read a GPO's actual settings from its SYSVOL folder (read-only).
 
@@ -205,13 +209,21 @@ class GPOTools(BaseTool):
             include_registry: Parse Registry.pol files (default True).
             max_value_chars: Truncate individual registry/rule values longer
                 than this (default 6000).
+            summary: Return the same top-level shape with the heavy bodies
+                dropped (default False). Registry ``entries[]`` are omitted
+                (their ``entry_count``/``entries_truncated`` are kept), each
+                AppLocker rule's full XML becomes a
+                ``{type, id, name, action, sid}`` digest, and security
+                template / script sections are reduced to section names. The
+                response gains ``"detail": "summary"``. Rules-heavy GPOs (e.g.
+                72 AppLocker rules) otherwise run to tens of KB.
 
         Returns:
             List of MCP content objects with the parsed GPO contents.
         """
         try:
             # Resolve the GPO via LDAP to get its GUID, name, and SYSVOL path.
-            guid = self._normalize_guid(identifier)
+            guid = normalize_guid(identifier)
             if guid is not None:
                 search_filter = f"(&(objectClass=groupPolicyContainer)(cn={{{self._escape_ldap_filter(guid)}}}))"
             else:
@@ -258,7 +270,14 @@ class GPOTools(BaseTool):
                 "display_name": display_name,
                 "sysvol_path": sysvol_path,
             }
-            result.update(contents)
+            result.update(summarize_gpo_contents(contents) if summary else contents)
+            if summary:
+                result["detail"] = "summary"
+                result["note"] = (
+                    "Heavy bodies omitted: registry entries, full AppLocker rule "
+                    "XML, and template/script section bodies. Call again with "
+                    "summary=false for the complete contents."
+                )
 
             log_ldap_operation("get_gpo_contents", results[0]['dn'], True,
                                f"Read SYSVOL contents for GPO {identifier}")
@@ -333,7 +352,7 @@ class GPOTools(BaseTool):
             # GPT.INI (version marker)
             gpt = read_bytes("gpt.ini")
             if gpt is not None:
-                out["gpt_ini"] = self._parse_ini(gpt)
+                out["gpt_ini"] = parse_ini(gpt)
 
             # Registry.pol (machine + user)
             machine_entries: List[Dict[str, Any]] = []
@@ -343,7 +362,7 @@ class GPOTools(BaseTool):
                     data = read_bytes(side)
                     if data is None:
                         continue
-                    entries, truncated = self._parse_registry_pol(data, max_value_chars)
+                    entries, truncated = parse_registry_pol(data, max_value_chars)
                     out[key] = {
                         "entry_count": len(entries),
                         "entries_truncated": truncated,
@@ -353,7 +372,7 @@ class GPOTools(BaseTool):
                         machine_entries = entries
 
             # AppLocker rules (live inside the machine Registry.pol as SrpV2)
-            applocker = self._extract_applocker(machine_entries)
+            applocker = extract_applocker(machine_entries)
             if applocker:
                 out["applocker"] = applocker
 
@@ -364,14 +383,14 @@ class GPOTools(BaseTool):
                     if data is not None:
                         out["security_templates"].append({
                             "path": full[len(base):].lstrip("\\"),
-                            "sections": self._parse_ini(data),
+                            "sections": parse_ini(data),
                         })
                 elif rel_lower.endswith("scripts.ini") or rel_lower.endswith("psscripts.ini"):
                     data = read_bytes(rel_lower)
                     if data is not None:
                         out["scripts"].append({
                             "path": full[len(base):].lstrip("\\"),
-                            "sections": self._parse_ini(data),
+                            "sections": parse_ini(data),
                         })
         finally:
             try:
@@ -380,117 +399,6 @@ class GPOTools(BaseTool):
                 pass
 
         return out
-
-    def _parse_registry_pol(self, data: bytes, max_value_chars: int):
-        """Parse a Registry.pol (PReg) blob into a list of registry entries.
-
-        Format: 4-byte 'PReg' signature, 4-byte version, then repeated
-        ``[key;value;type;size;data]`` records with UTF-16LE, null-terminated
-        strings and little-endian integers.
-        """
-        entries: List[Dict[str, Any]] = []
-        truncated = False
-        if data[:4] != b"PReg":
-            return entries, truncated
-
-        i, n = 8, len(data)
-        while i < n - 1:
-            if data[i:i + 2] != b"[\x00":
-                i += 2
-                continue
-            i += 2
-            try:
-                def read_str():
-                    nonlocal i
-                    start = i
-                    while i < n and data[i:i + 2] != b";\x00":
-                        i += 2
-                    s = data[start:i].decode("utf-16-le", errors="replace").rstrip("\x00")
-                    i += 2
-                    return s
-
-                key = read_str()
-                value = read_str()
-                rtype = struct.unpack("<I", data[i:i + 4])[0]; i += 4
-                i += 2  # ';'
-                size = struct.unpack("<I", data[i:i + 4])[0]; i += 4
-                i += 2  # ';'
-                raw = data[i:i + size]; i += size
-                if data[i:i + 2] == b"]\x00":
-                    i += 2
-            except (struct.error, IndexError):
-                break
-
-            if rtype in (1, 2):
-                val = raw.decode("utf-16-le", errors="replace").rstrip("\x00")
-            elif rtype == 4 and len(raw) == 4:
-                val = struct.unpack("<I", raw)[0]
-            elif rtype == 5 and len(raw) == 4:
-                val = struct.unpack(">I", raw)[0]
-            elif rtype == 11 and len(raw) == 8:
-                val = struct.unpack("<Q", raw)[0]
-            elif rtype == 7:
-                val = [s for s in raw.decode("utf-16-le", errors="replace").split("\x00") if s]
-            else:
-                val = base64.b64encode(raw).decode("ascii") if raw else ""
-
-            if isinstance(val, str) and len(val) > max_value_chars:
-                val = val[:max_value_chars] + "...[truncated]"
-                truncated = True
-
-            entries.append({
-                "key": key,
-                "value": value,
-                "type": _REG_TYPES.get(rtype, rtype),
-                "data": val,
-            })
-        return entries, truncated
-
-    def _extract_applocker(self, machine_entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Pull AppLocker rules/enforcement out of parsed machine registry entries."""
-        collections: Dict[str, Dict[str, Any]] = {}
-        for e in machine_entries:
-            key = e.get("key", "")
-            if "SrpV2" not in key:
-                continue
-            after = key.split("SrpV2", 1)[1].strip("\\")
-            parts = after.split("\\") if after else []
-            collection = parts[0] if parts else "Unknown"
-            col = collections.setdefault(collection, {"enforcement_mode": None, "rules": []})
-
-            if e.get("value") == "EnforcementMode":
-                col["enforcement_mode"] = _APPLOCKER_ENFORCEMENT.get(e.get("data"), e.get("data"))
-            elif e.get("value") == "Value" and len(parts) >= 2:
-                col["rules"].append({"id": parts[1], "xml": e.get("data")})
-
-        if not collections:
-            return None
-        for name, col in collections.items():
-            col["rule_count"] = len(col["rules"])
-        return {"collections": collections}
-
-    def _parse_ini(self, data: bytes) -> Dict[str, Any]:
-        """Parse an INF/INI blob (UTF-16 or UTF-8) into {section: [lines]}."""
-        if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
-            text = data.decode("utf-16", errors="replace")
-        else:
-            try:
-                text = data.decode("utf-8-sig")
-            except UnicodeDecodeError:
-                text = data.decode("latin-1", errors="replace")
-
-        sections: Dict[str, Any] = {}
-        current = "_root"
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                current = line[1:-1]
-                sections.setdefault(current, [])
-            else:
-                sections.setdefault(current, []).append(line)
-        return sections
 
     # --- helpers -----------------------------------------------------------
 
@@ -512,8 +420,8 @@ class GPOTools(BaseTool):
             'guid': guid,
             'display_name': self._get_attr_value(attrs, 'displayName', ''),
             'sysvol_path': self._get_attr_value(attrs, 'gPCFileSysPath', ''),
-            'version': self._decode_version(self._get_attr_value(attrs, 'versionNumber', 0)),
-            'status': self._decode_gpo_status(self._get_attr_value(attrs, 'flags', 0)),
+            'version': decode_version(self._get_attr_value(attrs, 'versionNumber', 0)),
+            'status': decode_gpo_status(self._get_attr_value(attrs, 'flags', 0)),
             'functionality_version': self._get_attr_value(attrs, 'gPCFunctionalityVersion', 0),
             'has_computer_settings': bool(machine_ext),
             'has_user_settings': bool(user_ext),
@@ -522,87 +430,6 @@ class GPOTools(BaseTool):
             'when_changed': self._get_attr_value(attrs, 'whenChanged'),
             'object_guid': object_guid
         }
-
-    def _decode_version(self, version: Any) -> Dict[str, Any]:
-        """Split the packed versionNumber into user/computer revisions.
-
-        AD packs this as versionNumber = user * 65536 + computer, i.e. the
-        computer revision is the low word and the user revision is the high
-        word.
-        """
-        try:
-            v = int(version)
-        except (TypeError, ValueError):
-            v = 0
-        return {
-            'raw': v,
-            'computer_version': v & 0xFFFF,
-            'user_version': (v >> 16) & 0xFFFF
-        }
-
-    def _decode_gpo_status(self, flags: Any) -> Dict[str, Any]:
-        """Decode the GPO ``flags`` attribute into enabled/disabled halves."""
-        try:
-            f = int(flags)
-        except (TypeError, ValueError):
-            f = 0
-        descriptions = {
-            0: "All settings enabled",
-            1: "User settings disabled",
-            2: "Computer settings disabled",
-            3: "All settings disabled"
-        }
-        return {
-            'raw': f,
-            'computer_settings_enabled': not bool(f & 2),
-            'user_settings_enabled': not bool(f & 1),
-            'description': descriptions.get(f & 3, "Unknown")
-        }
-
-    def _normalize_guid(self, value: str) -> Optional[str]:
-        """Return the bare GUID if ``value`` looks like one, else None."""
-        if not isinstance(value, str):
-            return None
-        candidate = value.strip().strip('{}')
-        parts = candidate.split('-')
-        if len(parts) == 5 and all(c in '0123456789abcdefABCDEF-' for c in candidate):
-            return candidate
-        return None
-
-    def _parse_gp_link(self, gp_link: str) -> List[Dict[str, Any]]:
-        """Parse a gPLink attribute into ordered link descriptors.
-
-        gPLink format: ``[LDAP://cn={GUID},cn=policies,cn=system,DC=..;<opt>]``
-        repeated per link, listed in reverse precedence order. The per-link
-        option is a bitmask: bit 0 = link disabled, bit 1 = enforced.
-        """
-        links: List[Dict[str, Any]] = []
-        if not gp_link:
-            return links
-        try:
-            for part in gp_link.split('['):
-                part = part.strip()
-                if not part or ';' not in part:
-                    continue
-                path, options = part.rstrip(']').rsplit(';', 1)
-                try:
-                    opt = int(options)
-                except ValueError:
-                    opt = 0
-
-                guid = ''
-                if '{' in path and '}' in path:
-                    guid = path[path.find('{') + 1:path.find('}')]
-
-                links.append({
-                    'guid': guid,
-                    'path': path,
-                    'link_enabled': not bool(opt & 1),
-                    'enforced': bool(opt & 2)
-                })
-        except Exception:
-            return links
-        return links
 
     def _resolve_gpo_name(self, guid: str) -> str:
         """Look up a GPO's display name by GUID; '' if unresolvable."""
@@ -653,6 +480,9 @@ class GPOTools(BaseTool):
                 "Registry.pol (PReg), GptTmpl.inf, scripts.ini, and AppLocker "
                 "rules; requires the optional 'smbprotocol' package plus SYSVOL "
                 "read access.",
+                "get_gpo_contents(summary=True) keeps the same shape but drops "
+                "registry entries, digests AppLocker rule XML, and reduces "
+                "template/script sections to section names.",
                 "flags: 0=all enabled, 1=user disabled, 2=computer disabled, "
                 "3=all disabled.",
                 "gPLink option bitmask: bit 0=link disabled, bit 1=enforced."
