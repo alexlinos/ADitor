@@ -182,10 +182,12 @@ class UserTools(BaseTool):
             List of MCP content objects with creation result
         """
         try:
-            # Determine OU
+            # Determine OU: use the configured users OU when available, else fall
+            # back to the default CN=Users container under the base DN.
             if ou is None:
-                # Default to CN=Users under base DN if organizational_units not configured
-                ou = f"CN=Users,{self.ldap.ad_config.base_dn}"
+                ou_config = getattr(self.ldap.ad_config, "organizational_units", None)
+                configured_users_ou = getattr(ou_config, "users_ou", None) if ou_config else None
+                ou = configured_users_ou or f"CN=Users,{self.ldap.ad_config.base_dn}"
             
             # Build DN
             user_dn = f"CN={first_name} {last_name},{ou}"

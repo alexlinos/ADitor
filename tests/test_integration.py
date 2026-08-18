@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
 from aditor.server import ActiveDirectoryMCPServer
-from aditor.server_http import ActiveDirectoryMCPHTTPServer
 
 
 @pytest.fixture
@@ -77,27 +76,33 @@ class TestServerIntegration:
     @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
     @patch('aditor.core.ldap_manager.LDAPManager.connect')
     def test_http_server_initialization(self, mock_connect, mock_test_connection, config_file):
-        """Test HTTP server initialization."""
+        """Test the unified server configured for the HTTP transport."""
         # Mock successful connection
         mock_test_connection.return_value = {'connected': True, 'server': 'test.local'}
         mock_connection = Mock()
         mock_connect.return_value = mock_connection
-        
-        # Initialize HTTP server
-        server = ActiveDirectoryMCPHTTPServer(
+
+        # Initialize the unified server on the HTTP transport
+        server = ActiveDirectoryMCPServer(
             config_path=config_file,
+            transport="http",
             host="127.0.0.1",
             port=8814,
-            path="/test-ad-mcp"
+            path="/test-ad-mcp",
         )
-        
+
         # Verify initialization
         assert server.config is not None
         assert server.ldap_manager is not None
+        assert server.transport == "http"
         assert server.host == "127.0.0.1"
         assert server.port == 8814
         assert server.path == "/test-ad-mcp"
-        
+
+        # The HTTP app builds a Starlette app mounting the streamable-HTTP handler
+        app = server.build_http_app()
+        assert app is not None
+
         # Verify tools
         assert server.user_tools is not None
         assert server.group_tools is not None
@@ -355,9 +360,6 @@ class TestEndToEndWorkflows:
         assert mock_add.call_count >= 1  # User creation
         assert mock_modify.call_count >= 3  # Password set, enable, modify attributes, disable
     
-    @pytest.mark.xfail(reason="real bug: create_computer defaults ou via self.ldap.ad_config.organizational_units.computers_ou, "
-                              "but LDAPManager is constructed with only ActiveDirectoryConfig (which has no organizational_units) — "
-                              "the default-OU path raises AttributeError. Same bug in group.py create_group. Fix in WP1/2/3.")
     @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
     @patch('aditor.core.ldap_manager.LDAPManager.connect')
     @patch('aditor.core.ldap_manager.LDAPManager.search')
@@ -549,9 +551,9 @@ class TestMultiToolInteractionScenarios:
         server = ActiveDirectoryMCPServer(config_file)
         
         # 1. Create department OU
-        ou_result = server.ou_tools.create_organizational_unit(
+        ou_result = server.ou_tools.create_ou(
             name='Marketing',
-            parent_dn='OU=Departments,DC=test,DC=local',
+            parent_ou='OU=Departments,DC=test,DC=local',
             description='Marketing department'
         )
         assert len(ou_result) == 1
