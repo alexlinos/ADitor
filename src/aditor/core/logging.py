@@ -20,7 +20,7 @@ def setup_logging(config: LoggingConfig) -> logging.Logger:
         Logger instance
     """
     # Create logger
-    logger = logging.getLogger("active-directory-mcp")
+    logger = logging.getLogger("aditor")
     logger.setLevel(getattr(logging, config.level))
     
     # Clear existing handlers
@@ -76,7 +76,7 @@ def get_logger(name: str) -> logging.Logger:
     Returns:
         Logger instance
     """
-    return logging.getLogger(f"active-directory-mcp.{name}")
+    return logging.getLogger(f"aditor.{name}")
 
 
 def log_ldap_operation(operation: str, dn: str, success: bool, details: Optional[str] = None) -> None:

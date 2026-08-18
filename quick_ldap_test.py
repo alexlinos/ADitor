@@ -59,8 +59,8 @@ def test_with_mcp_config():
         import os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
         
-        from active_directory_mcp.config.loader import load_config
-        from active_directory_mcp.core.ldap_manager import LDAPManager
+        from aditor.config.loader import load_config
+        from aditor.core.ldap_manager import LDAPManager
         
         # Config yükle
         config = load_config('ad-config/samba-ad-config.json')

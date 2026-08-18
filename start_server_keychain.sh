@@ -32,4 +32,4 @@ fi
 export AD_MCP_PASSWORD
 
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-exec .venv/bin/python -m active_directory_mcp.server_http --config ad-config/config.json
+exec .venv/bin/python -m aditor.server --transport http --config ad-config/config.json

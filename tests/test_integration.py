@@ -7,8 +7,7 @@ import os
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
-from active_directory_mcp.server import ActiveDirectoryMCPServer
-from active_directory_mcp.server_http import ActiveDirectoryMCPHTTPServer
+from aditor.server import ActiveDirectoryMCPServer
 
 
 @pytest.fixture
@@ -47,8 +46,8 @@ def config_file(test_config):
 class TestServerIntegration:
     """Integration tests for the main server."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
     def test_server_initialization(self, mock_connect, mock_test_connection, config_file):
         """Test server initialization with config file."""
         # Mock successful connection
@@ -74,30 +73,36 @@ class TestServerIntegration:
         # Test connection was called
         mock_test_connection.assert_called_once()
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
     def test_http_server_initialization(self, mock_connect, mock_test_connection, config_file):
-        """Test HTTP server initialization."""
+        """Test the unified server configured for the HTTP transport."""
         # Mock successful connection
         mock_test_connection.return_value = {'connected': True, 'server': 'test.local'}
         mock_connection = Mock()
         mock_connect.return_value = mock_connection
-        
-        # Initialize HTTP server
-        server = ActiveDirectoryMCPHTTPServer(
+
+        # Initialize the unified server on the HTTP transport
+        server = ActiveDirectoryMCPServer(
             config_path=config_file,
+            transport="http",
             host="127.0.0.1",
             port=8814,
-            path="/test-ad-mcp"
+            path="/test-ad-mcp",
         )
-        
+
         # Verify initialization
         assert server.config is not None
         assert server.ldap_manager is not None
+        assert server.transport == "http"
         assert server.host == "127.0.0.1"
         assert server.port == 8814
         assert server.path == "/test-ad-mcp"
-        
+
+        # The HTTP app builds a Starlette app mounting the streamable-HTTP handler
+        app = server.build_http_app()
+        assert app is not None
+
         # Verify tools
         assert server.user_tools is not None
         assert server.group_tools is not None
@@ -110,8 +115,8 @@ class TestServerIntegration:
         with pytest.raises(FileNotFoundError):
             ActiveDirectoryMCPServer("/nonexistent/config.json")
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
     def test_server_tools_registration(self, mock_connect, mock_test_connection, config_file):
         """Test that all tools are properly registered."""
         # Mock successful connection
@@ -126,7 +131,7 @@ class TestServerIntegration:
         # For now, just verify the server initialized without errors
         assert server.mcp is not None
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
     def test_connection_failure_handling(self, mock_test_connection, config_file):
         """Test handling of connection failures during initialization."""
         # Mock connection failure
@@ -143,9 +148,9 @@ class TestServerIntegration:
 class TestToolIntegration:
     """Integration tests for tool interactions."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_user_tools_integration(self, mock_search, mock_connect, mock_test_connection, config_file):
         """Test user tools integration."""
         # Mock successful connection and search
@@ -173,9 +178,9 @@ class TestToolIntegration:
         # Verify search was called
         mock_search.assert_called()
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_group_tools_integration(self, mock_search, mock_connect, mock_test_connection, config_file):
         """Test group tools integration."""
         # Mock successful connection and search
@@ -203,8 +208,8 @@ class TestToolIntegration:
         # Verify search was called
         mock_search.assert_called()
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
     def test_security_tools_integration(self, mock_connect, mock_test_connection, config_file):
         """Test security tools integration."""
         # Mock successful connection
@@ -225,9 +230,9 @@ class TestToolIntegration:
 class TestErrorHandling:
     """Test error handling in integration scenarios."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_ldap_error_propagation(self, mock_search, mock_connect, mock_test_connection, config_file):
         """Test that LDAP errors are properly handled and propagated."""
         # Mock successful connection but failing operations
@@ -272,11 +277,11 @@ class TestErrorHandling:
 class TestEndToEndWorkflows:
     """Test end-to-end workflow scenarios."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.add')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.modify')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.add')
+    @patch('aditor.core.ldap_manager.LDAPManager.modify')
     def test_complete_user_lifecycle(self, mock_modify, mock_add, mock_search, 
                                    mock_connect, mock_test_connection, config_file):
         """Test complete user lifecycle: Create -> Modify -> Add to Group -> Disable -> Delete."""
@@ -355,14 +360,11 @@ class TestEndToEndWorkflows:
         assert mock_add.call_count >= 1  # User creation
         assert mock_modify.call_count >= 3  # Password set, enable, modify attributes, disable
     
-    @pytest.mark.xfail(reason="real bug: create_computer defaults ou via self.ldap.ad_config.organizational_units.computers_ou, "
-                              "but LDAPManager is constructed with only ActiveDirectoryConfig (which has no organizational_units) — "
-                              "the default-OU path raises AttributeError. Same bug in group.py create_group. Fix in WP1/2/3.")
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.add')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.modify')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.add')
+    @patch('aditor.core.ldap_manager.LDAPManager.modify')
     def test_bulk_computer_management_workflow(self, mock_modify, mock_add, mock_search,
                                              mock_connect, mock_test_connection, config_file):
         """Test bulk computer management workflow."""
@@ -442,9 +444,9 @@ class TestEndToEndWorkflows:
 class TestErrorRecoveryScenarios:
     """Test error recovery and resilience scenarios."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_partial_operation_failure_recovery(self, mock_search, mock_connect, 
                                                mock_test_connection, config_file):
         """Test recovery from partial operation failures."""
@@ -488,8 +490,8 @@ class TestErrorRecoveryScenarios:
         # Verify retry behavior
         assert call_count == 2
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
     def test_connection_failure_scenarios(self, mock_connect, mock_test_connection, config_file):
         """Test various connection failure scenarios."""
         # Test initial connection failure
@@ -507,11 +509,11 @@ class TestErrorRecoveryScenarios:
 class TestMultiToolInteractionScenarios:
     """Test complex scenarios involving multiple tools."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.add')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.modify')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.add')
+    @patch('aditor.core.ldap_manager.LDAPManager.modify')
     def test_department_setup_workflow(self, mock_modify, mock_add, mock_search,
                                       mock_connect, mock_test_connection, config_file):
         """Test complete department setup: OU -> Groups -> Users -> Permissions."""
@@ -549,9 +551,9 @@ class TestMultiToolInteractionScenarios:
         server = ActiveDirectoryMCPServer(config_file)
         
         # 1. Create department OU
-        ou_result = server.ou_tools.create_organizational_unit(
+        ou_result = server.ou_tools.create_ou(
             name='Marketing',
-            parent_dn='OU=Departments,DC=test,DC=local',
+            parent_ou='OU=Departments,DC=test,DC=local',
             description='Marketing department'
         )
         assert len(ou_result) == 1
@@ -598,9 +600,9 @@ class TestMultiToolInteractionScenarios:
 class TestPerformanceAndScalability:
     """Test performance-related scenarios."""
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_large_result_set_handling(self, mock_search, mock_connect, 
                                       mock_test_connection, config_file):
         """Test handling of large result sets."""
@@ -637,9 +639,9 @@ class TestPerformanceAndScalability:
         # Verify search was called
         mock_search.assert_called_once()
     
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.test_connection')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.connect')
-    @patch('active_directory_mcp.core.ldap_manager.LDAPManager.search')
+    @patch('aditor.core.ldap_manager.LDAPManager.test_connection')
+    @patch('aditor.core.ldap_manager.LDAPManager.connect')
+    @patch('aditor.core.ldap_manager.LDAPManager.search')
     def test_concurrent_operations_simulation(self, mock_search, mock_connect, 
                                             mock_test_connection, config_file):
         """Test simulation of concurrent operations."""

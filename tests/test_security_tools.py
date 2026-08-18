@@ -6,7 +6,7 @@ import json
 import base64
 from datetime import datetime, timedelta
 
-from active_directory_mcp.tools.security import SecurityTools
+from aditor.tools.security import SecurityTools
 from mcp.types import TextContent
 
 

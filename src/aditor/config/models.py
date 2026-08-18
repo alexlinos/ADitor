@@ -4,9 +4,18 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
+class OrganizationalUnitsConfig(BaseModel):
+    """Organizational Units configuration."""
+
+    users_ou: str = Field(..., description="Users organizational unit DN")
+    groups_ou: str = Field(..., description="Groups organizational unit DN")
+    computers_ou: str = Field(..., description="Computers organizational unit DN")
+    service_accounts_ou: str = Field(..., description="Service accounts organizational unit DN")
+
+
 class ActiveDirectoryConfig(BaseModel):
     """Active Directory connection configuration."""
-    
+
     server: str = Field(..., description="Primary LDAP server URL")
     server_pool: Optional[List[str]] = Field(default=None, description="Additional LDAP servers for redundancy")
     use_ssl: bool = Field(default=True, description="Use SSL/TLS connection")
@@ -18,7 +27,12 @@ class ActiveDirectoryConfig(BaseModel):
     timeout: int = Field(default=30, description="Connection timeout in seconds")
     auto_bind: bool = Field(default=True, description="Automatically bind on connection")
     receive_timeout: int = Field(default=10, description="Receive timeout in seconds")
-    
+    # Populated at load time from the top-level ``organizational_units`` block so
+    # tools can resolve default OUs via ``ldap_manager.ad_config.organizational_units``.
+    organizational_units: Optional[OrganizationalUnitsConfig] = Field(
+        default=None, description="OU layout (wired in from the top-level config)"
+    )
+
     @field_validator('server')
     @classmethod
     def validate_server(cls, v):
@@ -26,15 +40,6 @@ class ActiveDirectoryConfig(BaseModel):
         if not v.startswith(('ldap://', 'ldaps://')):
             raise ValueError('Server must start with ldap:// or ldaps://')
         return v
-
-
-class OrganizationalUnitsConfig(BaseModel):
-    """Organizational Units configuration."""
-    
-    users_ou: str = Field(..., description="Users organizational unit DN")
-    groups_ou: str = Field(..., description="Groups organizational unit DN")
-    computers_ou: str = Field(..., description="Computers organizational unit DN")
-    service_accounts_ou: str = Field(..., description="Service accounts organizational unit DN")
 
 
 class SecurityConfig(BaseModel):

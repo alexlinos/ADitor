@@ -52,6 +52,13 @@ def load_config(config_path: Optional[str] = None) -> Config:
 
         # Validate and create config object
         config = Config(**config_data)
+
+        # Wire the OU layout onto the AD connection config so tools can resolve
+        # default OUs via ``ldap_manager.ad_config.organizational_units``. The
+        # block lives at the top level of the file but LDAPManager only receives
+        # ``active_directory``.
+        config.active_directory.organizational_units = config.organizational_units
+
         logger.info("Configuration loaded successfully")
         
         # Log configuration summary (without sensitive data)

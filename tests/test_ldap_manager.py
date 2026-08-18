@@ -4,8 +4,8 @@ import pytest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 
-from active_directory_mcp.core.ldap_manager import LDAPManager
-from active_directory_mcp.config.models import ActiveDirectoryConfig, SecurityConfig, PerformanceConfig
+from aditor.core.ldap_manager import LDAPManager
+from aditor.config.models import ActiveDirectoryConfig, SecurityConfig, PerformanceConfig
 
 
 @pytest.fixture
@@ -35,8 +35,8 @@ def performance_config():
 @pytest.fixture
 def ldap_manager(ad_config, security_config, performance_config):
     """Test LDAP manager instance."""
-    with patch('active_directory_mcp.core.ldap_manager.Server'), \
-         patch('active_directory_mcp.core.ldap_manager.Connection'):
+    with patch('aditor.core.ldap_manager.Server'), \
+         patch('aditor.core.ldap_manager.Connection'):
         manager = LDAPManager(ad_config, security_config, performance_config)
         return manager
 
@@ -46,15 +46,15 @@ class TestLDAPManager:
     
     def test_initialization(self, ad_config, security_config, performance_config):
         """Test LDAP manager initialization."""
-        with patch('active_directory_mcp.core.ldap_manager.Server') as mock_server:
+        with patch('aditor.core.ldap_manager.Server') as mock_server:
             manager = LDAPManager(ad_config, security_config, performance_config)
             assert manager.ad_config == ad_config
             assert manager.security_config == security_config
             assert manager.performance_config == performance_config
             mock_server.assert_called()
     
-    @patch('active_directory_mcp.core.ldap_manager.Connection')
-    @patch('active_directory_mcp.core.ldap_manager.Server')
+    @patch('aditor.core.ldap_manager.Connection')
+    @patch('aditor.core.ldap_manager.Server')
     def test_connect_success(self, mock_server, mock_connection, ldap_manager):
         """Test successful LDAP connection."""
         # Setup mocks
@@ -75,8 +75,8 @@ class TestLDAPManager:
         assert ldap_manager._connection == mock_connection_instance
         mock_connection_instance.bind.assert_called_once()
     
-    @patch('active_directory_mcp.core.ldap_manager.Connection')
-    @patch('active_directory_mcp.core.ldap_manager.Server')
+    @patch('aditor.core.ldap_manager.Connection')
+    @patch('aditor.core.ldap_manager.Server')
     def test_connect_failure(self, mock_server, mock_connection, ldap_manager):
         """Test LDAP connection failure."""
         # Setup mocks
@@ -105,7 +105,7 @@ class TestLDAPManager:
         mock_connection.unbind.assert_called_once()
         assert ldap_manager._connection is None
     
-    @patch('active_directory_mcp.core.ldap_manager.Connection')
+    @patch('aditor.core.ldap_manager.Connection')
     def test_search(self, mock_connection, ldap_manager):
         """Test LDAP search operation."""
         # Setup mock connection
@@ -141,7 +141,7 @@ class TestLDAPManager:
         
         mock_connection_instance.search.assert_called()
     
-    @patch('active_directory_mcp.core.ldap_manager.Connection')
+    @patch('aditor.core.ldap_manager.Connection')
     def test_add(self, mock_connection, ldap_manager):
         """Test LDAP add operation."""
         # Setup mock connection
@@ -165,7 +165,7 @@ class TestLDAPManager:
         assert result == True
         mock_connection_instance.add.assert_called_once_with(dn, attributes=attributes)
     
-    @patch('active_directory_mcp.core.ldap_manager.Connection')
+    @patch('aditor.core.ldap_manager.Connection')
     def test_modify(self, mock_connection, ldap_manager):
         """Test LDAP modify operation."""
         # Setup mock connection
@@ -187,7 +187,7 @@ class TestLDAPManager:
         assert result == True
         mock_connection_instance.modify.assert_called_once_with(dn, changes)
     
-    @patch('active_directory_mcp.core.ldap_manager.Connection')
+    @patch('aditor.core.ldap_manager.Connection')
     def test_delete(self, mock_connection, ldap_manager):
         """Test LDAP delete operation."""
         # Setup mock connection
@@ -248,8 +248,8 @@ class TestLDAPManagerRetry:
     """Test LDAP manager retry functionality."""
     
     @patch('time.sleep')  # Mock sleep to speed up tests
-    @patch('active_directory_mcp.core.ldap_manager.Connection')
-    @patch('active_directory_mcp.core.ldap_manager.Server')
+    @patch('aditor.core.ldap_manager.Connection')
+    @patch('aditor.core.ldap_manager.Server')
     def test_connection_retry(self, mock_server, mock_connection, mock_sleep, 
                             ad_config, security_config, performance_config):
         """Test connection retry logic."""
