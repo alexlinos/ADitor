@@ -292,7 +292,12 @@ Unlike the other GPO tools (LDAP metadata only), this reads the GPO's files from
 the SYSVOL share over SMB and parses the common policy formats: GPT.INI,
 Machine/User Registry.pol (admin templates), GptTmpl.inf security templates,
 script registrations, and AppLocker rules. Requires the optional 'smbprotocol'
-package and SYSVOL read access for the bind account."""
+package and SYSVOL read access for the bind account.
+
+Rules-heavy GPOs (e.g. a 72-rule AppLocker policy) can return tens of KB. Pass
+summary=true for the same shape without the heavy bodies: registry entry counts
+instead of every entry, a {type, id, name, action, sid} digest per AppLocker rule
+instead of its XML, and section names instead of template/script bodies."""
 
 TEST_CONNECTION_DESC = """Test the LDAP connection and return server information.
 
@@ -883,11 +888,13 @@ TOOLS: List[ToolSpec] = [
                 "identifier": {"type": "string", "description": "GPO GUID (with or without braces) or exact display name"},
                 "include_registry": {"type": "boolean", "description": "Parse Registry.pol files", "default": True},
                 "max_value_chars": {"type": "integer", "description": "Truncate values longer than this", "default": 6000},
+                "summary": {"type": "boolean", "description": "Omit registry entries and full AppLocker rule XML; return per-rule digests and section names only", "default": False},
             },
             "required": ["identifier"],
         },
         lambda t, a: t.gpo.get_gpo_contents(
             a["identifier"], a.get("include_registry", True), a.get("max_value_chars", 6000),
+            a.get("summary", False),
         ),
     ),
     # ----- System -----
