@@ -620,3 +620,37 @@ class TestGpLinkRegressions:
             "gPLink parsing lives once, in aditor.gpo.parsers.parse_gp_link"
         )
 
+
+# delegate_ou_control was deleted in WP3 (the WP2 Bucket-A follow-up): it was
+# self-described as a mock, performed no delegation, and still returned
+# 'success': True with a 'delegated_permissions' list -- an operator could
+# reasonably believe rights had been granted. Real OU delegation means writing
+# nTSecurityDescriptor ACEs, a deliberate future feature rather than a revived
+# shell. It was never registered as an MCP tool.
+DELETED_MOCK_METHODS = [
+    'delegate_ou_control',
+]
+
+
+@pytest.mark.parametrize('method_name', DELETED_MOCK_METHODS)
+def test_mock_methods_stay_deleted(method_name):
+    assert not hasattr(OrganizationalUnitTools, method_name), (
+        f"{method_name} was deleted in WP3 as a fabrication; do not reintroduce it"
+    )
+
+
+@pytest.mark.parametrize('method_name', DELETED_MOCK_METHODS)
+def test_deleted_mock_methods_are_not_registered_as_tools(method_name):
+    from aditor.registry import tool_names
+
+    assert method_name not in tool_names()
+
+
+def test_schema_operations_all_exist(ou_tools):
+    """get_schema_info must advertise only methods that actually exist."""
+    for operation in ou_tools.get_schema_info()['operations']:
+        assert hasattr(ou_tools, operation), (
+            f"schema advertises {operation}, which OrganizationalUnitTools "
+            "does not implement"
+        )
+
