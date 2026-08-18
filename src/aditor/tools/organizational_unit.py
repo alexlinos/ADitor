@@ -670,19 +670,6 @@ class OrganizationalUnitTools(BaseTool):
             'inherited': True
         }, "get_ou_permissions")
     
-    def delegate_ou_control(self, ou_dn: str = None, principal: str = None, delegate_dn: str = None,
-                          permissions: List[str] = None, **kwargs) -> List[Dict[str, Any]]:
-        """Mock method for OU delegation - not implemented in real tool."""
-        # Handle both parameter names for backward compatibility
-        if delegate_dn is not None:
-            principal = delegate_dn
-        return self._format_response({
-            'ou_dn': ou_dn,
-            'principal': principal,
-            'delegated_permissions': permissions or [],
-            'success': True
-        }, "delegate_ou_control")
-    
     # Helper methods that tests expect
     def _validate_ou_dn(self, ou_dn: str) -> bool:
         """Validate if DN is a proper OU DN."""
