@@ -708,34 +708,6 @@ class OrganizationalUnitTools(BaseTool):
             'success': True
         }, "delegate_ou_control")
     
-    def get_ou_statistics(self, ou_dn: str) -> Dict[str, Any]:
-        """Get statistics for an OU."""
-        try:
-            # get_ou_contents returns List[Content], parse the JSON response
-            contents_response = self.get_ou_contents(ou_dn)
-            if not contents_response or len(contents_response) == 0:
-                return {'success': False, 'error': 'OU contents not found', 'ou_dn': ou_dn}
-                
-            import json
-            contents = json.loads(contents_response[0].text)
-            
-            if not contents.get('success', True):
-                return {'success': False, 'error': contents.get('error', 'Unknown error'), 'ou_dn': ou_dn}
-                
-            stats = {
-                'ou_dn': ou_dn,
-                'total_objects': contents.get('total_objects', 0),
-                'users': contents.get('users_count', 0), 
-                'groups': contents.get('groups_count', 0),
-                'computers': contents.get('computers_count', 0),
-                'sub_ous': contents.get('sub_ous_count', 0)
-            }
-            
-            return self._format_response(True, stats)
-            
-        except Exception as e:
-            return self._handle_ldap_error(e, 'get_ou_statistics', ou_dn)
-    
     # Helper methods that tests expect
     def _validate_ou_dn(self, ou_dn: str) -> bool:
         """Validate if DN is a proper OU DN."""
