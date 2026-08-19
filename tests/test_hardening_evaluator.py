@@ -35,10 +35,15 @@ import pytest
 from aditor.gpo.parsers import (
     parse_ini,
     parse_registry_pol,
+    parse_registry_xml,
     parse_security_template_registry_values,
 )
 from aditor.hardening.catalog import build_catalog, load_catalog
 from aditor.hardening.evaluator import (
+    DELIVERIES,
+    DELIVERY_REGISTRY_POL,
+    DELIVERY_REGISTRY_PREFERENCE,
+    DELIVERY_SECURITY_TEMPLATE,
     EVIDENCE_SOURCE_GPO,
     EVIDENCE_SOURCE_NOT_CONFIGURED,
     EVIDENCE_SOURCE_OS_DEFAULT,
@@ -50,6 +55,7 @@ from aditor.hardening.evaluator import (
     STATE_AUDIT,
     STATE_ENFORCED,
     STATE_NOT_STARTED,
+    NON_WRITE_DELETE,
     UNSCORED_NEEDS_BASELINE_VALUE,
     GpoLink,
     GpoSnapshot,
@@ -57,6 +63,7 @@ from aditor.hardening.evaluator import (
     evaluate_control,
     evaluate_controls,
     find_matches,
+    find_preference_non_writes,
     satisfies,
 )
 
@@ -1573,3 +1580,722 @@ class TestShippedCatalogAgainstSynthesizedGpos:
         assert counts["needs_baseline_value"] == len(catalog.unscored_controls)
         assert counts["scored"] == len(catalog.scored_controls)
         assert len(findings) == len(catalog.controls)
+
+
+# --------------------------------------------------------------------------- #
+# Group Policy Preferences (Registry.xml) as a value source — P2-WP4
+# --------------------------------------------------------------------------- #
+
+KDC_CONTROL_ID = "DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES"
+KDC_PREFERENCE_KEY = r"SYSTEM\CurrentControlSet\Services\Kdc"
+
+
+def registry_xml(*properties):
+    """Hand-written Registry.xml bytes with one <Registry> item per argument.
+
+    Each argument is either the ``<Properties>`` attribute string or a
+    ``(attributes, item_attributes, children)`` triple. Nothing here was
+    captured from a real domain: the value names are Microsoft-documented
+    registry names, and no GUID, uid, timestamp or domain identifier appears.
+    """
+    items = []
+    for spec in properties:
+        attrs, item_attrs, children = (spec if isinstance(spec, tuple)
+                                       else (spec, "", ""))
+        items.append(f'<Registry name="Item"{item_attrs}>'
+                     f'<Properties {attrs}/>{children}</Registry>')
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<RegistrySettings clsid="{A3CCFC41-0000-0000-0000-000000000002}">'
+        + "".join(items) + '</RegistrySettings>'
+    ).encode("utf-8")
+
+
+def properties(key, name, value, *, action="U", reg_type="REG_DWORD",
+               hive="HKEY_LOCAL_MACHINE", extra=""):
+    """One <Properties> attribute string for a machine-side registry item."""
+    return (f'action="{action}" displayDecimal="0" default="0" hive="{hive}" '
+            f'key="{key}" name="{name}" type="{reg_type}" value="{value}" '
+            f'{extra}')
+
+
+def preference_gpo(guid, name, *specs, links=None, read_error=None):
+    """A GPO snapshot whose only registry source is a Registry.xml.
+
+    Built by running the *real* ``parse_registry_xml`` over hand-written XML, so
+    these tests exercise the same decoding path the live scan does — including
+    the hex value parse.
+    """
+    return GpoSnapshot(
+        dn=gpo_dn(guid),
+        display_name=name,
+        guid=guid,
+        registry_xml_entries=parse_registry_xml(registry_xml(*specs)),
+        links=links if links is not None else (GpoLink(DC_OU),),
+        read_error=read_error,
+    )
+
+
+def pol_control(**overrides):
+    """A gpo-registry-pol control over the synthetic test flag key."""
+    defaults = {
+        "check_type": "gpo-registry-pol",
+        "registry_key": r"HKLM\System\CurrentControlSet\Services\Test\Flag",
+        "final_expected": 2,
+    }
+    defaults.update(overrides)
+    return control(**defaults)
+
+
+TEST_FLAG_PREFERENCE_KEY = r"SYSTEM\CurrentControlSet\Services\Test"
+
+
+class TestPreferenceItemsAreAValueSource:
+    """A gpo-registry-pol control matches a value delivered by preference.
+
+    This is the false negative the work package exists to close: a registry
+    value with no ADMX policy behind it can only be delivered by a preference
+    item, so a scanner that reads Registry.pol alone reports the operator's
+    hardening as missing.
+    """
+
+    def test_a_preference_item_satisfies_a_registry_pol_control(self):
+        gpo = preference_gpo(GUID_SIGNING, "Test Flag By Preference",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002"))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["evidence"]["found_count"] == 1
+
+    def test_the_found_value_is_the_hex_parse(self):
+        """0x38 = 56. Decimal 38 would be 0x26, which is a different setting."""
+        gpo = preference_gpo(GUID_SIGNING, "Enc Types By Preference",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000038"))
+
+        matches = find_matches(pol_control(final_expected=56), [gpo])
+
+        assert matches[0]["value"] == 56
+        assert matches[0]["value"] != 38
+
+    def test_the_full_hive_name_is_folded_onto_the_catalog_spelling(self):
+        gpo = preference_gpo(GUID_SIGNING, "Test Flag By Preference",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002"))
+
+        matches = find_matches(pol_control(), [gpo])
+
+        assert matches[0]["registry_key"] == (
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Test\Flag")
+        assert matches[0]["source_file"] == r"Preferences\Registry\Registry.xml"
+
+    def test_a_preference_setting_a_different_key_is_not_matched(self):
+        gpo = preference_gpo(GUID_SIGNING, "Something Else",
+                             properties(r"SYSTEM\CurrentControlSet\Services"
+                                        r"\Other", "Flag", "00000002"))
+
+        assert find_matches(pol_control(), [gpo]) == []
+
+    def test_a_preference_does_not_satisfy_a_security_template_control(self):
+        """Scoped deliberately: a template control asserts a Security Option.
+
+        WP4 widened the ``gpo-registry-pol`` value sources only. A
+        ``gpo-security-template`` control asserts a ``[Registry Values]``
+        setting, and widening that too was out of scope for this work package.
+        """
+        gpo = preference_gpo(GUID_SIGNING, "Test Flag By Preference",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002"))
+
+        assert find_matches(control(), [gpo]) == []
+
+    def test_a_non_compliant_preference_value_fails(self):
+        gpo = preference_gpo(GUID_SIGNING, "Test Flag By Preference",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000000"))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"][0]["value"] == 0
+
+    def test_a_reg_sz_preference_value_stays_a_string_in_the_evidence(self):
+        gpo = preference_gpo(GUID_SIGNING, "Padding Check",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag", "1",
+                                        reg_type="REG_SZ"))
+
+        finding = evaluate_control(pol_control(final_expected=1), [gpo])
+
+        # 'equals' compares numerically, so the string "1" still satisfies 1 —
+        # but the evidence must show what the GPO actually writes.
+        assert finding["result"] == RESULT_PASS
+        assert finding["evidence"]["found"][0]["value"] == "1"
+        assert finding["evidence"]["found"][0]["type_name"] == "REG_SZ"
+
+    def test_several_preference_items_in_one_gpo_are_all_reported(self):
+        gpo = preference_gpo(
+            GUID_SIGNING, "Two Items",
+            properties(TEST_FLAG_PREFERENCE_KEY, "Flag", "00000002"),
+            properties(TEST_FLAG_PREFERENCE_KEY, "Flag", "00000002"))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["evidence"]["found_count"] == 2
+        assert [match["preference"]["item_order"]
+                for match in finding["evidence"]["found"]] == [1, 2]
+
+
+class TestDeliveryIsRecordedOnEveryFoundValue:
+    """``delivery`` says which mechanism put the value there."""
+
+    def test_a_security_template_value_is_labelled_security_template(self):
+        gpo = template_gpo(GUID_SIGNING, "Template Policy",
+                           TEST_FLAG_LINE.format(2))
+
+        finding = evaluate_control(control(), [gpo])
+
+        assert finding["evidence"]["found"][0]["delivery"] == \
+            DELIVERY_SECURITY_TEMPLATE
+        assert finding["evidence"]["found"][0]["preference"] is None
+
+    def test_a_registry_pol_value_is_labelled_registry_pol(self):
+        gpo = pol_gpo(GUID_SIGNING, "Pol Policy",
+                      (r"System\CurrentControlSet\Services\Test", "Flag", 4,
+                       dword(2)))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["evidence"]["found"][0]["delivery"] == \
+            DELIVERY_REGISTRY_POL
+        assert finding["evidence"]["found"][0]["preference"] is None
+
+    def test_a_preference_value_is_labelled_registry_preference(self):
+        gpo = preference_gpo(GUID_SIGNING, "Preference Policy",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002"))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["evidence"]["found"][0]["delivery"] == \
+            DELIVERY_REGISTRY_PREFERENCE
+
+    def test_every_found_value_carries_a_known_delivery(self):
+        gpos = [
+            pol_gpo(GUID_SIGNING, "Pol Policy",
+                    (r"System\CurrentControlSet\Services\Test", "Flag", 4,
+                     dword(2))),
+            preference_gpo(GUID_CONFLICT, "Preference Policy",
+                           properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                      "00000002")),
+        ]
+
+        finding = evaluate_control(pol_control(), gpos)
+
+        assert {match["delivery"] for match in finding["evidence"]["found"]} == {
+            DELIVERY_REGISTRY_POL, DELIVERY_REGISTRY_PREFERENCE}
+        assert all(match["delivery"] in DELIVERIES
+                   for match in finding["evidence"]["found"])
+
+    def test_the_preference_action_is_recorded_with_the_value(self):
+        gpo = preference_gpo(GUID_SIGNING, "Preference Policy",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002", action="R"))
+
+        preference = evaluate_control(
+            pol_control(), [gpo])["evidence"]["found"][0]["preference"]
+
+        assert preference["action"] == "R"
+        assert preference["action_name"] == "Replace"
+        assert preference["corrects_drift"] is True
+        assert preference["tattoos"] is True
+        assert preference["has_filters"] is False
+
+    def test_a_preference_pass_states_that_the_value_tattoos(self):
+        gpo = preference_gpo(GUID_SIGNING, "Preference Policy",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002"))
+
+        notes = evaluate_control(pol_control(), [gpo])["evidence"]["notes"]
+
+        assert any("TATTOOS" in note for note in notes)
+
+    def test_a_policy_only_finding_gains_no_preference_notes(self):
+        """Existing verdicts must read exactly as they did before WP4."""
+        gpo = pol_gpo(GUID_SIGNING, "Pol Policy",
+                      (r"System\CurrentControlSet\Services\Test", "Flag", 4,
+                       dword(2)))
+
+        notes = evaluate_control(pol_control(), [gpo])["evidence"]["notes"]
+
+        assert notes == []
+
+
+class TestPreferenceActionSemantics:
+    """C/R/U/D are not interchangeable, and D is the dangerous one."""
+
+    def test_a_delete_item_does_not_count_as_configuring_the_value(self):
+        """The most damaging possible misread: a Delete reported as hardening."""
+        gpo = preference_gpo(GUID_SIGNING, "Remove The Flag",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002", action="D"))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert find_matches(pol_control(), [gpo]) == []
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"] == []
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+
+    def test_a_delete_item_is_reported_in_the_notes_not_silently_dropped(self):
+        gpo = preference_gpo(GUID_SIGNING, "Remove The Flag",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002", action="D"))
+
+        notes = evaluate_control(pol_control(), [gpo])["evidence"]["notes"]
+
+        assert any("DELETE this value" in note for note in notes)
+        assert any("Remove The Flag" in note for note in notes)
+
+    def test_find_preference_non_writes_reports_the_delete(self):
+        gpo = preference_gpo(GUID_SIGNING, "Remove The Flag",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002", action="D"))
+
+        non_writes = find_preference_non_writes(pol_control(), [gpo])
+
+        assert len(non_writes) == 1
+        assert non_writes[0]["reason"] == NON_WRITE_DELETE
+        assert non_writes[0]["preference"]["action"] == "D"
+        assert non_writes[0]["gpo_dn"] == gpo_dn(GUID_SIGNING)
+
+    def test_a_delete_alongside_a_real_setting_still_passes_but_says_so(self):
+        gpos = [
+            pol_gpo(GUID_SIGNING, "Set The Flag",
+                    (r"System\CurrentControlSet\Services\Test", "Flag", 4,
+                     dword(2))),
+            preference_gpo(GUID_CONFLICT, "Remove The Flag",
+                           properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                      "00000002", action="D")),
+        ]
+
+        finding = evaluate_control(pol_control(), gpos)
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["evidence"]["found_count"] == 1
+        assert any("working against each other" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_delete_does_not_break_an_absent_control(self):
+        """For an 'absent' control a Delete is not a setting, so it still passes."""
+        gpo = preference_gpo(GUID_SIGNING, "Remove The Flag",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002", action="D"))
+
+        finding = evaluate_control(pol_control(operator="absent",
+                                              final_expected=None), [gpo])
+
+        assert finding["result"] == RESULT_PASS
+        assert any("DELETE this value" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_create_item_counts_but_is_flagged_as_not_correcting_drift(self):
+        gpo = preference_gpo(GUID_SIGNING, "Create The Flag",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002", action="C"))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["result"] == RESULT_PASS
+        preference = finding["evidence"]["found"][0]["preference"]
+        assert preference["action"] == "C"
+        assert preference["action_name"] == "Create"
+        assert preference["corrects_drift"] is False
+        assert any("does not correct drift" in note
+                   for note in finding["evidence"]["notes"])
+
+    @pytest.mark.parametrize("action,corrects", [("U", True), ("R", True),
+                                                 ("C", False)])
+    def test_drift_correction_is_recorded_per_action(self, action, corrects):
+        gpo = preference_gpo(GUID_SIGNING, "The Flag",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002", action=action))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["evidence"]["found"][0]["preference"]["corrects_drift"] \
+            is corrects
+
+    def test_a_missing_action_attribute_is_treated_as_update(self):
+        gpo = GpoSnapshot(
+            dn=gpo_dn(GUID_SIGNING), display_name="No Action Attribute",
+            guid=GUID_SIGNING,
+            registry_xml_entries=parse_registry_xml(registry_xml(
+                f'hive="HKEY_LOCAL_MACHINE" key="{TEST_FLAG_PREFERENCE_KEY}" '
+                f'name="Flag" type="REG_DWORD" value="00000002"')),
+            links=(GpoLink(DC_OU),))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["evidence"]["found"][0]["preference"]["action"] == "U"
+
+    def test_a_disabled_item_writes_nothing_and_does_not_count(self):
+        gpo = preference_gpo(
+            GUID_SIGNING, "Switched Off",
+            (properties(TEST_FLAG_PREFERENCE_KEY, "Flag", "00000002"),
+             ' disabled="1"', ''))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"] == []
+        assert any("are disabled and write nothing" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_an_unrecognised_action_is_not_counted_and_is_disclosed(self):
+        """Whether it writes is unknown, and unknown is not a pass."""
+        gpo = preference_gpo(GUID_SIGNING, "Odd Action",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002", action="Z"))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"] == []
+        assert any("does not recognise" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_bare_key_creation_item_configures_nothing_either_way(self):
+        gpo = preference_gpo(
+            GUID_SIGNING, "Create The Key",
+            f'action="C" hive="HKEY_LOCAL_MACHINE" '
+            f'key="{TEST_FLAG_PREFERENCE_KEY}\\Flag"')
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"] == []
+        assert finding["evidence"]["notes"] == [
+            "No GPO in the domain sets this key."], \
+            "a skipped key item must not produce a non-write note either"
+
+
+class TestPreferenceItemLevelTargeting:
+    """Filters are not resolved, so they must be disclosed, not implied away."""
+
+    FILTER = ('<Filters><FilterGroup bool="AND" not="0" '
+              'name="Placeholder Group"/></Filters>')
+
+    def test_a_filtered_item_is_flagged_in_the_evidence(self):
+        gpo = preference_gpo(
+            GUID_SIGNING, "Filtered Preference",
+            (properties(TEST_FLAG_PREFERENCE_KEY, "Flag", "00000002"), '',
+             self.FILTER))
+
+        finding = evaluate_control(pol_control(), [gpo])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["evidence"]["found"][0]["preference"]["has_filters"] \
+            is True
+
+    def test_a_filtered_item_says_coverage_is_not_domain_wide(self):
+        gpo = preference_gpo(
+            GUID_SIGNING, "Filtered Preference",
+            (properties(TEST_FLAG_PREFERENCE_KEY, "Flag", "00000002"), '',
+             self.FILTER))
+
+        notes = evaluate_control(pol_control(), [gpo])["evidence"]["notes"]
+
+        assert any("item-level targeting" in note for note in notes)
+        assert any("not as domain-wide coverage" in note for note in notes)
+
+    def test_an_unfiltered_item_makes_no_targeting_claim(self):
+        gpo = preference_gpo(GUID_SIGNING, "Plain Preference",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002"))
+
+        notes = evaluate_control(pol_control(), [gpo])["evidence"]["notes"]
+
+        assert not any("item-level targeting" in note for note in notes)
+
+
+class TestPolicyVersusPreferenceConflict:
+    """A policy and a preference disagreeing is a conflict like any other."""
+
+    def policy_and_preference(self, policy_value, preference_value,
+                              enforced=False):
+        return [
+            pol_gpo(GUID_SIGNING, "Policy Sets The Flag",
+                    (r"System\CurrentControlSet\Services\Test", "Flag", 4,
+                     dword(policy_value)),
+                    links=(GpoLink(DC_OU, enforced=enforced),)),
+            preference_gpo(GUID_CONFLICT, "Preference Sets The Flag",
+                           properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                      f"{preference_value:08x}")),
+        ]
+
+    def test_the_disagreement_is_detected(self):
+        finding = evaluate_control(pol_control(),
+                                   self.policy_and_preference(2, 0))
+
+        assert finding["conflict"]["detected"] is True
+        assert finding["conflict"]["kind"] == "policy-preference-disagreement"
+
+    def test_the_verdict_follows_the_least_compliant_value(self):
+        finding = evaluate_control(pol_control(),
+                                   self.policy_and_preference(2, 0))
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+
+    def test_each_conflicting_setting_names_its_delivery(self):
+        finding = evaluate_control(pol_control(),
+                                   self.policy_and_preference(2, 0))
+
+        assert {(setting["value"], setting["delivery"])
+                for setting in finding["conflict"]["settings"]} == {
+            (2, DELIVERY_REGISTRY_POL), (0, DELIVERY_REGISTRY_PREFERENCE)}
+        preference_setting = next(
+            s for s in finding["conflict"]["settings"]
+            if s["delivery"] == DELIVERY_REGISTRY_PREFERENCE)
+        assert preference_setting["preference_action"] == "U"
+
+    def test_the_detail_explains_that_link_precedence_does_not_settle_it(self):
+        detail = evaluate_control(
+            pol_control(), self.policy_and_preference(2, 0))["conflict"]["detail"]
+
+        assert "client-side extensions" in detail
+        assert "not on link precedence" in detail
+        assert "tattoos" in detail
+
+    def test_the_conflict_detail_reaches_the_evidence_notes(self):
+        finding = evaluate_control(pol_control(),
+                                   self.policy_and_preference(2, 0))
+
+        assert finding["conflict"]["detail"] in finding["evidence"]["notes"]
+
+    def test_two_agreeing_mechanisms_are_not_a_conflict(self):
+        finding = evaluate_control(pol_control(),
+                                   self.policy_and_preference(2, 2))
+
+        assert finding["conflict"] is None
+        assert finding["result"] == RESULT_PASS
+
+    def test_an_enforced_link_still_wins_the_conflict_kind(self):
+        """An enforced link is the more urgent fact; delivery is added to it."""
+        finding = evaluate_control(
+            pol_control(), self.policy_and_preference(0, 2, enforced=True))
+
+        assert finding["conflict"]["kind"] == "enforced-override"
+        assert "client-side extensions" in finding["conflict"]["detail"]
+
+    def test_two_preferences_disagreeing_is_a_plain_value_disagreement(self):
+        """Both sides are preferences, so there is no policy-vs-preference."""
+        gpos = [
+            preference_gpo(GUID_SIGNING, "First Preference",
+                           properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                      "00000002")),
+            preference_gpo(GUID_CONFLICT, "Second Preference",
+                           properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                      "00000000")),
+        ]
+
+        finding = evaluate_control(pol_control(), gpos)
+
+        assert finding["conflict"]["kind"] == "value-disagreement"
+
+    def test_two_policies_disagreeing_still_reads_exactly_as_before(self):
+        gpos = [
+            pol_gpo(GUID_SIGNING, "First Policy",
+                    (r"System\CurrentControlSet\Services\Test", "Flag", 4,
+                     dword(2))),
+            pol_gpo(GUID_CONFLICT, "Second Policy",
+                    (r"System\CurrentControlSet\Services\Test", "Flag", 4,
+                     dword(0))),
+        ]
+
+        finding = evaluate_control(pol_control(), gpos)
+
+        assert finding["conflict"]["kind"] == "value-disagreement"
+        assert "client-side extensions" not in finding["conflict"]["detail"]
+
+
+class TestLiveVerifiedKdcPreferenceCase:
+    """The confirmed live case, reproduced end to end and entirely offline.
+
+    A production domain sets ``DefaultDomainSupportedEncTypes`` to ``0x38`` —
+    RC4 and DES disabled for Kerberos at the domain level — through a Registry
+    *preference* item, because the value has no ADMX policy behind it. Before
+    WP4 the scanner read only ``Registry.pol`` and reported
+    ``DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES`` as ``fail`` on a domain
+    where it is correctly configured.
+
+    The GPO below has **no** ``Registry.pol`` and **no** ``GptTmpl.inf``: the
+    preference item is the only registry source, exactly as observed. Both
+    halves of the fix have to hold for this to pass — reading the file at all,
+    and reading ``value="00000038"`` as 0x38 rather than as decimal 38.
+    """
+
+    def kdc_gpo(self, value="00000038", **kwargs):
+        return preference_gpo(
+            GUID_SIGNING, "DefaultDomainSupportedEncTypes",
+            properties(KDC_PREFERENCE_KEY, "DefaultDomainSupportedEncTypes",
+                       value),
+            **kwargs)
+
+    def test_the_control_passes_on_a_preference_only_gpo(self):
+        control_obj = load_catalog().by_id(KDC_CONTROL_ID)
+
+        finding = evaluate_control(control_obj, [self.kdc_gpo()])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["evidence"]["found_count"] == 1
+
+    def test_the_evidence_shows_56_and_names_the_delivery_mechanism(self):
+        control_obj = load_catalog().by_id(KDC_CONTROL_ID)
+
+        found = evaluate_control(
+            control_obj, [self.kdc_gpo()])["evidence"]["found"][0]
+
+        assert found["value"] == 56
+        assert found["delivery"] == DELIVERY_REGISTRY_PREFERENCE
+        assert found["source_file"] == r"Preferences\Registry\Registry.xml"
+        assert found["preference"]["action"] == "U"
+        assert found["preference"]["tattoos"] is True
+
+    def test_the_finding_still_says_the_value_is_not_policy_enforced(self):
+        control_obj = load_catalog().by_id(KDC_CONTROL_ID)
+
+        notes = evaluate_control(
+            control_obj, [self.kdc_gpo()])["evidence"]["notes"]
+
+        assert any("TATTOOS" in note for note in notes)
+
+    def test_reading_the_value_as_decimal_would_have_failed_the_control(self):
+        """Pins the consequence of the hex/decimal error rather than the parse.
+
+        38 decimal is 0x26 — AES128 plus RC4 plus DES-CBC-MD5. It is not merely
+        a different number from 56, it is the RC4-enabled configuration the
+        control exists to detect, and the catalog's ``equals 56`` rejects it.
+        """
+        control_obj = load_catalog().by_id(KDC_CONTROL_ID)
+
+        finding = evaluate_control(control_obj, [self.kdc_gpo(value="00000026")])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"][0]["value"] == 38
+
+    def test_a_domain_with_no_kdc_preference_still_fails(self):
+        """The pre-WP4 verdict is still correct when nothing sets the key."""
+        control_obj = load_catalog().by_id(KDC_CONTROL_ID)
+
+        finding = evaluate_control(control_obj, [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+
+    def test_a_gpo_that_deletes_the_value_does_not_pass_the_control(self):
+        control_obj = load_catalog().by_id(KDC_CONTROL_ID)
+        gpo = preference_gpo(
+            GUID_SIGNING, "Undo Enc Types",
+            properties(KDC_PREFERENCE_KEY, "DefaultDomainSupportedEncTypes",
+                       "00000038", action="D"))
+
+        finding = evaluate_control(control_obj, [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert any("DELETE this value" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_the_wpad_and_wintrust_shapes_from_the_same_domain(self):
+        """The other two observed GPOs: a REG_DWORD 'C' and a REG_SZ pair.
+
+        Not catalog controls, so this asserts the *parse and delivery* path over
+        a synthetic control per key rather than a shipped verdict.
+        """
+        wpad = preference_gpo(
+            GUID_SIGNING, "Disable WPAD",
+            properties(r"SYSTEM\CurrentControlSet\Services"
+                       r"\WinHttpAutoProxySvc", "Start", "00000004",
+                       action="C"))
+        wpad_finding = evaluate_control(
+            pol_control(registry_key=r"HKLM\SYSTEM\CurrentControlSet\Services"
+                                     r"\WinHttpAutoProxySvc\Start",
+                        final_expected=4), [wpad])
+
+        assert wpad_finding["result"] == RESULT_PASS
+        assert wpad_finding["evidence"]["found"][0]["value"] == 4
+        assert wpad_finding["evidence"]["found"][0]["preference"][
+            "corrects_drift"] is False
+
+        wintrust_key = r"SOFTWARE\Microsoft\Cryptography\Wintrust\Config"
+        wintrust = preference_gpo(
+            GUID_CONFLICT, "CVE-2013-3900",
+            f'action="C" hive="HKEY_LOCAL_MACHINE" key="{wintrust_key}"',
+            properties(wintrust_key, "EnableCertPaddingCheck", "1",
+                       reg_type="REG_SZ"),
+            properties(r"SOFTWARE\WOW6432Node\Microsoft\Cryptography"
+                       r"\Wintrust\Config", "EnableCertPaddingCheck", "1",
+                       reg_type="REG_SZ"))
+        wintrust_finding = evaluate_control(
+            pol_control(registry_key=rf"HKLM\{wintrust_key}"
+                                     r"\EnableCertPaddingCheck",
+                        final_expected=1), [wintrust])
+
+        assert wintrust_finding["result"] == RESULT_PASS
+        assert wintrust_finding["evidence"]["found_count"] == 1, \
+            "the WOW6432Node twin is a different key and must not double-count"
+        assert wintrust_finding["evidence"]["found"][0]["value"] == "1"
+
+
+class TestPreferencesDoNotDisturbTheRestOfTheEngine:
+    """Regression cover: everything that has no preferences behaves as before."""
+
+    def test_a_snapshot_defaults_to_no_preference_entries(self):
+        assert GpoSnapshot(dn=gpo_dn(GUID_SIGNING)).registry_xml_entries == ()
+
+    def test_find_preference_non_writes_is_empty_without_preferences(self):
+        gpo = pol_gpo(GUID_SIGNING, "Pol Policy",
+                      (r"System\CurrentControlSet\Services\Test", "Flag", 4,
+                       dword(2)))
+
+        assert find_preference_non_writes(pol_control(), [gpo]) == []
+
+    def test_a_security_template_control_ignores_preferences_entirely(self):
+        gpo = preference_gpo(GUID_SIGNING, "Preference Policy",
+                             properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                        "00000002"))
+
+        assert find_preference_non_writes(control(), [gpo]) == []
+
+    def test_the_whole_catalog_still_evaluates_against_a_preference_only_gpo(self):
+        catalog = load_catalog()
+        gpo = preference_gpo(
+            GUID_SIGNING, "DefaultDomainSupportedEncTypes",
+            properties(KDC_PREFERENCE_KEY, "DefaultDomainSupportedEncTypes",
+                       "00000038"))
+
+        findings, counts = evaluate_controls(catalog.controls, [gpo],
+                                             include_not_applicable=True)
+
+        assert counts["total"] == len(catalog.controls)
+        assert counts[RESULT_ERROR] == 0
+        kdc = next(f for f in findings if f["control_id"] == KDC_CONTROL_ID)
+        assert kdc["result"] == RESULT_PASS
+
+    def test_an_unreadable_gpo_report_is_unaffected_by_preferences(self):
+        gpos = [preference_gpo(GUID_SIGNING, "Preference Policy",
+                               properties(TEST_FLAG_PREFERENCE_KEY, "Flag",
+                                          "00000002")),
+                GpoSnapshot(dn=gpo_dn(GUID_ENFORCED), display_name="Broken",
+                            read_error="SYSVOL read failed")]
+
+        finding = evaluate_control(pol_control(), gpos)
+
+        assert finding["result"] == RESULT_PASS
+        assert any("could not be read" in note
+                   for note in finding["evidence"]["notes"])
