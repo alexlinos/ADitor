@@ -916,6 +916,18 @@ class TestParseRegistryXml:
     def test_a_document_with_no_registry_items_returns_an_empty_list(self):
         assert parse_registry_xml(self.document()) == []
 
+    def test_a_utf8_bom_does_not_defeat_the_parse(self):
+        """SYSVOL text files routinely carry a BOM; this one must still parse."""
+        assert parse_registry_xml(
+            b"\xef\xbb\xbf" + self.kdc_document())[0]["value"] == 56
+
+    def test_a_utf16_encoded_file_still_parses(self):
+        """GPMC writes UTF-8, but an edited file can come back UTF-16."""
+        text = self.kdc_document().decode("utf-8").replace(
+            'encoding="utf-8"', 'encoding="utf-16"')
+
+        assert parse_registry_xml(text.encode("utf-16"))[0]["value"] == 56
+
     def test_text_input_is_accepted_as_well_as_bytes(self):
         assert parse_registry_xml(
             '<RegistrySettings><Registry><Properties '
