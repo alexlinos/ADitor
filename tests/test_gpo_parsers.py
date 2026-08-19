@@ -23,9 +23,11 @@ from aditor.gpo.parsers import (
     decode_version,
     extract_applocker,
     normalize_guid,
+    normalize_registry_key,
     parse_gp_link,
     parse_ini,
     parse_registry_pol,
+    parse_security_template_registry_values,
     summarize_applocker,
     summarize_gpo_contents,
 )
@@ -308,6 +310,261 @@ class TestParseIni:
 
         assert sections["Empty"] == []
         assert sections["Full"] == ["k=v"]
+
+
+class TestParseSecurityTemplateRegistryValues:
+    """parse_security_template_registry_values on GptTmpl.inf line shapes.
+
+    The two LDAP lines below are the exact shape a real ``GptTmpl.inf``
+    ``[Registry Values]`` section uses (the value name is the last path
+    component; ``4,2`` is ``REG_DWORD`` data ``2``). They are hand-written here,
+    not captured: no domain name, GPO GUID or SID appears in a
+    ``[Registry Values]`` line at all.
+    """
+
+    LDAP_SERVER_SIGNING = (
+        r"MACHINE\System\CurrentControlSet\Services\NTDS\Parameters"
+        r"\LDAPServerIntegrity=4,2"
+    )
+    LDAP_CHANNEL_BINDING = (
+        r"MACHINE\System\CurrentControlSet\Services\NTDS\Parameters"
+        r"\LdapEnforceChannelBinding=4,2"
+    )
+
+    def test_real_world_dword_line(self):
+        entries = parse_security_template_registry_values([self.LDAP_SERVER_SIGNING])
+
+        assert entries == [{
+            "key": r"MACHINE\System\CurrentControlSet\Services\NTDS"
+                   r"\Parameters\LDAPServerIntegrity",
+            "type": REG_DWORD,
+            "type_name": "REG_DWORD",
+            "value": 2,
+        }]
+
+    def test_the_two_real_ldap_lines_from_one_gpo(self):
+        """One GPO's section, as read live: two settings, two entries."""
+        entries = parse_security_template_registry_values(
+            ["  " + self.LDAP_CHANNEL_BINDING, "  " + self.LDAP_SERVER_SIGNING])
+
+        assert [e["key"].rsplit("\\", 1)[1] for e in entries] == [
+            "LdapEnforceChannelBinding", "LDAPServerIntegrity"]
+        assert [e["value"] for e in entries] == [2, 2]
+
+    def test_leading_whitespace_is_stripped(self):
+        entries = parse_security_template_registry_values(
+            ["\t   MACHINE\\Software\\Test\\Flag=4,1   "])
+
+        assert entries[0]["key"] == r"MACHINE\Software\Test\Flag"
+        assert entries[0]["value"] == 1
+
+    def test_dword_zero_is_a_value_not_a_blank(self):
+        entries = parse_security_template_registry_values(
+            [r"MACHINE\Software\Policies\Microsoft\Windows NT\DNSClient"
+             r"\EnableMulticast=4,0"])
+
+        assert entries[0]["value"] == 0
+
+    def test_hex_dword_data(self):
+        entries = parse_security_template_registry_values(
+            [r"MACHINE\System\CurrentControlSet\services\KDC"
+             r"\DefaultDomainSupportedEncTypes=4,0x38"])
+
+        assert entries[0]["value"] == 0x38 == 56
+
+    def test_qword_and_big_endian_dword(self):
+        entries = parse_security_template_registry_values(
+            [r"MACHINE\Software\Test\Big=5,7", r"MACHINE\Software\Test\Wide=11,9"])
+
+        assert [(e["type_name"], e["value"]) for e in entries] == [
+            ("REG_DWORD_BIG_ENDIAN", 7), ("REG_QWORD", 9)]
+
+    def test_string_value_is_unquoted(self):
+        entries = parse_security_template_registry_values(
+            [r'MACHINE\Software\Test\Banner=1,"Authorised users only"'])
+
+        assert entries[0]["type_name"] == "REG_SZ"
+        assert entries[0]["value"] == "Authorised users only"
+
+    def test_value_containing_commas_splits_on_the_first_comma_only(self):
+        entries = parse_security_template_registry_values(
+            [r'MACHINE\Software\Test\Notice=1,"one, two, three"'])
+
+        assert entries[0]["type"] == REG_SZ
+        assert entries[0]["value"] == "one, two, three"
+
+    def test_unquoted_value_containing_commas_is_kept_whole(self):
+        entries = parse_security_template_registry_values(
+            [r"MACHINE\Software\Test\Notice=1,one, two, three"])
+
+        assert entries[0]["value"] == "one, two, three"
+
+    def test_expand_sz_value(self):
+        entries = parse_security_template_registry_values(
+            [r"MACHINE\Software\Test\Path=2,%SystemRoot%\System32"])
+
+        assert entries[0]["type_name"] == "REG_EXPAND_SZ"
+        assert entries[0]["value"] == r"%SystemRoot%\System32"
+
+    def test_multi_sz_value_splits_into_a_list(self):
+        entries = parse_security_template_registry_values(
+            [r'MACHINE\Software\Test\Allowed=7,"alpha","beta","gamma"'])
+
+        assert entries[0]["type"] == REG_MULTI_SZ
+        assert entries[0]["value"] == ["alpha", "beta", "gamma"]
+
+    def test_multi_sz_without_quotes_and_with_blank_items(self):
+        entries = parse_security_template_registry_values(
+            [r"MACHINE\Software\Test\Allowed=7,alpha,,beta,"])
+
+        assert entries[0]["value"] == ["alpha", "beta"]
+
+    def test_blank_dword_data_is_none(self):
+        entries = parse_security_template_registry_values(
+            [r"MACHINE\Software\Test\Unset=4,"])
+
+        assert entries[0]["type_name"] == "REG_DWORD"
+        assert entries[0]["value"] is None
+
+    def test_blank_string_data_is_the_empty_string(self):
+        entries = parse_security_template_registry_values(
+            [r"MACHINE\Software\Test\Empty=1,"])
+
+        assert entries[0]["value"] == ""
+
+    def test_non_numeric_dword_data_is_kept_raw_not_dropped(self):
+        """A configured-but-unparseable value must still surface as evidence."""
+        entries = parse_security_template_registry_values(
+            [r"MACHINE\Software\Test\Broken=4,not-a-number"])
+
+        assert entries[0]["value"] == "not-a-number"
+
+    def test_unknown_type_code_is_labelled_and_kept(self):
+        entries = parse_security_template_registry_values(
+            [r"MACHINE\Software\Test\Odd=99,payload"])
+
+        assert entries[0]["type"] == 99
+        assert entries[0]["type_name"] == "UNKNOWN_99"
+        assert entries[0]["value"] == "payload"
+
+    @pytest.mark.parametrize("malformed", [
+        "no-separator-at-all",
+        r"MACHINE\Software\Test\NoComma=4",
+        r"MACHINE\Software\Test\BadType=four,2",
+        r"MACHINE\Software\Test\EmptyType=,2",
+        "=4,2",
+        "   ",
+        "[Registry Values]",
+        "; a comment",
+        "# another comment",
+    ])
+    def test_malformed_lines_are_skipped_never_raised_on(self, malformed):
+        assert parse_security_template_registry_values([malformed]) == []
+
+    def test_malformed_lines_do_not_lose_the_good_ones(self):
+        entries = parse_security_template_registry_values([
+            "garbage",
+            self.LDAP_SERVER_SIGNING,
+            r"MACHINE\Software\Test\BadType=x,1",
+            self.LDAP_CHANNEL_BINDING,
+        ])
+
+        assert len(entries) == 2
+
+    @pytest.mark.parametrize("empty", [None, [], {}, "", b""])
+    def test_empty_and_non_list_input_returns_empty(self, empty):
+        assert parse_security_template_registry_values(empty) == []
+
+    def test_non_string_items_are_ignored(self):
+        entries = parse_security_template_registry_values(
+            [None, 42, ["nested"], self.LDAP_SERVER_SIGNING])
+
+        assert len(entries) == 1
+
+    def test_parses_the_section_parse_ini_actually_returns(self):
+        """End to end from UTF-16 INF bytes, the way SYSVOL delivers them."""
+        inf = (
+            "[Unicode]\n"
+            "Unicode=yes\n"
+            "[Registry Values]\n"
+            + self.LDAP_CHANNEL_BINDING + "\n"
+            + self.LDAP_SERVER_SIGNING + "\n"
+            "[Version]\n"
+            "Revision=1\n"
+        )
+        sections = parse_ini(b"\xff\xfe" + inf.encode("utf-16-le"))
+
+        entries = parse_security_template_registry_values(
+            sections["Registry Values"])
+
+        assert {e["key"].rsplit("\\", 1)[1]: e["value"] for e in entries} == {
+            "LdapEnforceChannelBinding": 2, "LDAPServerIntegrity": 2}
+
+
+class TestNormalizeRegistryKey:
+    """normalize_registry_key bridges the MACHINE\\ and HKLM\\ namespaces."""
+
+    TEMPLATE_KEY = (r"MACHINE\System\CurrentControlSet\Services\NTDS"
+                    r"\Parameters\LDAPServerIntegrity")
+    CATALOG_KEY = (r"HKLM\SYSTEM\CurrentControlSet\Services\NTDS"
+                   r"\Parameters\LDAPServerIntegrity")
+
+    def test_gpo_and_catalog_spellings_of_the_same_key_match(self):
+        """The live-verified mismatch: MACHINE\\System vs HKLM\\SYSTEM."""
+        assert (normalize_registry_key(self.TEMPLATE_KEY)
+                == normalize_registry_key(self.CATALOG_KEY))
+
+    def test_comparison_is_case_insensitive(self):
+        assert (normalize_registry_key(self.TEMPLATE_KEY.lower())
+                == normalize_registry_key(self.CATALOG_KEY.upper()))
+
+    @pytest.mark.parametrize("prefix", [
+        "MACHINE", "machine", "HKLM", "hklm", "HKEY_LOCAL_MACHINE",
+    ])
+    def test_every_machine_hive_alias_normalises_to_hklm(self, prefix):
+        assert normalize_registry_key(prefix + r"\Software\Test\Flag") == \
+            r"HKLM\SOFTWARE\TEST\FLAG"
+
+    @pytest.mark.parametrize("prefix,expected", [
+        ("USER", "HKCU"), ("HKCU", "HKCU"), ("HKEY_CURRENT_USER", "HKCU"),
+        ("HKEY_USERS", "HKU"), ("HKEY_CLASSES_ROOT", "HKCR"),
+    ])
+    def test_other_hive_aliases(self, prefix, expected):
+        assert normalize_registry_key(prefix + r"\Test").startswith(expected + "\\")
+
+    def test_unknown_hive_prefix_is_left_alone(self):
+        assert normalize_registry_key(r"SOMETHINGELSE\Test") == r"SOMETHINGELSE\TEST"
+
+    def test_separators_are_collapsed_and_trimmed(self):
+        assert normalize_registry_key("  MACHINE\\\\Software\\Test\\ ") == \
+            r"HKLM\SOFTWARE\TEST"
+
+    def test_forward_slashes_are_treated_as_separators(self):
+        assert normalize_registry_key("MACHINE/Software/Test") == r"HKLM\SOFTWARE\TEST"
+
+    def test_value_names_containing_spaces_survive(self):
+        assert normalize_registry_key(
+            r"HKLM\SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics"
+            r"\16 LDAP Interface Events").endswith(r"\16 LDAP INTERFACE EVENTS")
+
+    @pytest.mark.parametrize("empty", [None, "", "   ", 42, "\\\\", ["MACHINE"]])
+    def test_empty_and_non_string_input_returns_empty_string(self, empty):
+        assert normalize_registry_key(empty) == ""
+
+    def test_default_hive_fills_in_for_a_hiveless_registry_pol_key(self):
+        """PReg keys carry no hive; the machine file is implicitly HKLM."""
+        pol_key = r"Software\Policies\Microsoft\Windows NT\DNSClient\EnableMulticast"
+
+        assert (normalize_registry_key(pol_key, "HKLM")
+                == normalize_registry_key(r"HKLM\Software\Policies\Microsoft"
+                                          r"\Windows NT\DNSClient\EnableMulticast"))
+
+    def test_default_hive_does_not_override_a_hive_that_is_present(self):
+        assert normalize_registry_key(r"MACHINE\Software\Test", "HKCU") == \
+            r"HKLM\SOFTWARE\TEST"
+
+    def test_without_a_default_hive_a_hiveless_key_is_left_hiveless(self):
+        assert normalize_registry_key(r"Software\Test") == r"SOFTWARE\TEST"
 
 
 def applocker_entry(collection, rule_id, xml):
