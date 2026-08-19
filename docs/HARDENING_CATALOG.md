@@ -69,10 +69,32 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 
 2. **Three engines, two already exist.** `gpo-security-template` and
    `gpo-registry-pol` are served by `get_gpo_contents` (GptTmpl.inf `[Registry Values]`
-   + Registry.pol). `directory-state` controls (SMBv1 feature, msDS-SupportedEncryptionTypes,
+   + Registry.pol + Group Policy Preferences `Registry.xml`). `directory-state`
+   controls (SMBv1 feature, msDS-SupportedEncryptionTypes,
    Least Privilege, Protected Users) map onto tools you already have —
    `get_privileged_groups`, `audit_admin_accounts`, `get_user` — plus a couple of
    new directory queries. SMBv1 feature-state is the one genuinely new check kind.
+
+   **A `gpo-registry-pol` control has two value sources, not one** (P2-WP4).
+   Registry.pol can only carry values an ADMX template defines, so a GPO
+   delivering an arbitrary registry value — `Kdc\DefaultDomainSupportedEncTypes`,
+   `WinHttpAutoProxySvc\Start`, `Wintrust\Config\EnableCertPaddingCheck` — has to
+   use a Registry **preference** item under
+   `{Machine,User}\Preferences\Registry\Registry.xml`. Reading Registry.pol
+   alone therefore under-reports real hardening; the KDC control above was
+   reported `fail` on a domain that had correctly set `0x38`. There is
+   deliberately **no separate `check_type`** for preferences: a control asserts a
+   registry key, and how the value got there is *evidence* (see
+   `evidence.found[].delivery` below).
+
+   Two traps in that file. **DWORD/QWORD values are hexadecimal strings** —
+   `value="00000038"` is `0x38` = 56, and reading it as decimal 38 (`0x26`)
+   inverts the setting, turning "RC4 and DES off" into "RC4 and DES on".
+   `displayDecimal` is a GPMC display hint and must not affect parsing. And the
+   item's **action** decides whether it configures anything at all: `D` (Delete)
+   *removes* the value and is never a match, `C` (Create) writes only when the
+   value is absent so it does not correct drift, and `U`/`R` rewrite it on every
+   refresh.
 
 3. **Pass/fail is not binary — it's phased.** Almost every network control is
    *audit-first, then enforce* with an interim and a final target (NTLM level 3→5,
@@ -124,6 +146,26 @@ format**; the JSON is the source of truth the renderer consumes.
   did not establish the setting's state: either the control is not evaluated at all,
   or GPOs could not be read. **`not-configured` is never used for a scan that
   failed** — "we could not look" is not the same claim as "nothing sets it".
+- `evidence.found[].delivery`: `security-template | registry-pol |
+  registry-preference` — **how** the GPO put the value there. A control asserts
+  the key, so all three satisfy it, but the mechanism changes what a pass is
+  worth and belongs in the report:
+  - a **preference tattoos.** The value is written into the registry and stays
+    there if the GPO is unlinked, deleted or scoped away, where a policy value
+    reverts. So "configured by preference" is a weaker statement about ongoing
+    state — and a stickier one, because the value can persist on machines the GPO
+    no longer reaches.
+  - the item's **action** is carried alongside (`evidence.found[].preference`).
+    `C` (Create) means drift will not be corrected; `D` (Delete) is never counted
+    as configuring the value, and is reported in the scan notes instead — a GPO
+    deleting the value is usually the explanation for the failure being read.
+  - **item-level targeting** (`<Filters>`) is *not* resolved. A filtered item is
+    flagged as such so the verdict reads "configured where the filter matches"
+    rather than implying domain-wide coverage.
+  - a policy value and a preference value disagreeing on one key is a
+    `policy-preference-disagreement` conflict. Link precedence cannot settle it:
+    which one lands depends on client-side extension ordering, and this scan
+    resolves neither.
 - **Unreadable GPOs.** If any GPO's content could not be read, a control with a
   documented `os_default` reports `error`, not a pass: an unread GPO could set the
   key below the default, so "no GPO sets this key" is unproven and the default
