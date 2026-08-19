@@ -17,6 +17,9 @@ control's key, with its DN and link/enforced status, and flags **conflicts**:
 * ``enforced-override`` — the disagreeing set includes an enforced link, which
   is the case where a compliant-looking setting is most likely being overridden
   elsewhere.
+* ``policy-preference-disagreement`` — a policy setting and a Group Policy
+  preference item set the same key to different values, which link precedence
+  cannot settle at all (see below).
 
 When settings disagree, the verdict follows the **least compliant** of them.
 A "pass" that some other GPO silently overrides is a lie, and refusing to issue
@@ -46,6 +49,28 @@ finding carries ``rollout_state``: ``not_started`` when nothing sets the key or
 the value is below the interim step, ``audit`` when it meets the interim step,
 ``enforced`` when it meets the final one. A domain correctly mid-rollout reads
 as ``pass`` / ``audit``, not as a failure.
+
+**How a value was delivered is evidence, not a different kind of check.** A GPO
+can put a registry value in place three ways: a security template's
+``[Registry Values]`` line, an admin-template ``Registry.pol`` entry, or a Group
+Policy Preferences ``Registry.xml`` item. A control asserts the *key*, so all
+three satisfy the same control and there is deliberately no separate
+``check_type`` for preferences. But which mechanism delivered it is real audit
+information and every found value records it in ``delivery``:
+
+* a **preference tattoos** — the value is written into the registry and stays
+  there if the GPO is unlinked or deleted, where a policy value reverts. So
+  "configured by preference" is a weaker guarantee about ongoing state, and also
+  a stickier one: it can persist on machines the GPO no longer reaches.
+* a preference's **action** decides whether drift is corrected. ``U``/``R``
+  rewrite the value every refresh; ``C`` writes it only when absent, so a value
+  someone lowers by hand stays lowered. ``D`` *removes* the value and is never
+  counted as configuring it.
+* item-level targeting (``<Filters>``) can narrow a preference to a subset of
+  the machines its GPO reaches. Resolving filters is out of scope, so a filtered
+  item says so in the evidence rather than implying domain-wide coverage.
+* a policy and a preference setting the same key to different values is a
+  conflict like any other, reported as ``policy-preference-disagreement``.
 """
 
 from __future__ import annotations
@@ -53,7 +78,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ..gpo.parsers import normalize_registry_key
+from ..gpo.parsers import (
+    REGISTRY_XML_ACTIONS,
+    REGISTRY_XML_DRIFT_CORRECTING_ACTIONS,
+    REGISTRY_XML_WRITE_ACTIONS,
+    normalize_registry_key,
+)
 from .catalog import (
     EVALUABLE_CHECK_TYPES,
     STATUS_NEEDS_BASELINE_VALUE,
@@ -98,6 +128,31 @@ EVIDENCE_SOURCE_UNKNOWN = "unknown"
 EVIDENCE_SOURCES = (EVIDENCE_SOURCE_GPO, EVIDENCE_SOURCE_OS_DEFAULT,
                     EVIDENCE_SOURCE_NOT_CONFIGURED, EVIDENCE_SOURCE_UNKNOWN)
 
+# How a GPO put the value in place. Recorded per found value in
+# ``evidence.found[].delivery`` — see the module docstring for why this is
+# evidence rather than a separate ``check_type``.
+DELIVERY_SECURITY_TEMPLATE = "security-template"
+DELIVERY_REGISTRY_POL = "registry-pol"
+DELIVERY_REGISTRY_PREFERENCE = "registry-preference"
+DELIVERIES = (DELIVERY_SECURITY_TEMPLATE, DELIVERY_REGISTRY_POL,
+              DELIVERY_REGISTRY_PREFERENCE)
+
+# The two mechanisms that are *policy*: the value reverts when the GPO stops
+# applying. Everything not in here is a preference, which tattoos.
+POLICY_DELIVERIES = frozenset({DELIVERY_SECURITY_TEMPLATE,
+                               DELIVERY_REGISTRY_POL})
+
+# Where each delivery mechanism was read from, for the evidence's source_file.
+SOURCE_FILE_SECURITY_TEMPLATE = "GptTmpl.inf [Registry Values]"
+SOURCE_FILE_REGISTRY_POL = "Registry.pol"
+SOURCE_FILE_REGISTRY_XML = "Preferences\\Registry\\Registry.xml"
+
+# Why a preference item that names the control's key is not counted as setting
+# it. Recorded per excluded item so the note can say which case it was.
+NON_WRITE_DISABLED = "disabled"
+NON_WRITE_DELETE = "delete"
+NON_WRITE_UNRECOGNISED_ACTION = "unrecognised-action"
+
 _PRESENCE_ONLY_NOTE = (
     "Operator 'present': the source states this setting's registry path but not "
     "its compliant numeric value, so the control asserts only that the policy is "
@@ -119,6 +174,38 @@ _OS_DEFAULT_CAP_NOTE = (
     "meets this control's final target, but nothing enforces a default, so "
     "reporting 'enforced' would credit Group Policy with a value it does not "
     "set. Configure the policy explicitly to reach 'enforced'."
+)
+_PREFERENCE_TATTOO_NOTE = (
+    "At least one value below is delivered by a Group Policy Preferences "
+    "registry item, not by a policy setting. A preference TATTOOS: it writes the "
+    "value into the registry and the value stays there if the GPO is unlinked, "
+    "deleted or scoped away, where a policy value reverts. So a pass here is a "
+    "weaker statement about ongoing state than a policy would be - and also a "
+    "stickier one, because the value can persist on machines the GPO no longer "
+    "reaches. This scan reads Group Policy, not the machines."
+)
+_PREFERENCE_CREATE_NOTE = (
+    "At least one preference item below uses action 'C' (Create), which writes "
+    "the value ONLY when it does not already exist. It therefore does not "
+    "correct drift: if the value is changed on a machine afterwards, Group "
+    "Policy will leave the changed value in place. Use Update or Replace where "
+    "the intent is to hold the value at this setting."
+)
+_PREFERENCE_FILTER_NOTE = (
+    "At least one preference item below carries item-level targeting "
+    "(<Filters>), so it may apply to only some of the machines its GPO reaches. "
+    "This scan does not evaluate targeting, so read this verdict as 'configured "
+    "where the filter matches', not as domain-wide coverage - check the filter "
+    "in GPMC before relying on it."
+)
+_MIXED_DELIVERY_DETAIL = (
+    "One of these values comes from a policy setting and one from a Group Policy "
+    "preference item ({summary}), so which value a machine ends up with depends "
+    "on the order the Group Policy client-side extensions run - not on link "
+    "precedence - and this scan resolves neither. The two can also diverge over "
+    "time: the preference value tattoos and survives its GPO being unlinked, "
+    "while the policy value reverts. Confirm the effective value on a "
+    "representative machine before trusting either."
 )
 _UNREADABLE_OS_DEFAULT_NOTE = (
     "No GPO that could be read sets this key, but {unreadable} of {total} GPO(s) "
@@ -161,6 +248,11 @@ class GpoSnapshot:
             ``[Registry Values]`` section.
         registry_pol_entries: ``{key, value, type, data}`` dicts from
             ``parse_registry_pol`` over the machine ``Registry.pol``.
+        registry_xml_entries: ``{hive, key, value_name, type, type_name, value,
+            action, order, has_filters, disabled}`` dicts from
+            ``parse_registry_xml`` over the machine
+            ``Preferences\\Registry\\Registry.xml``. Defaults to empty, so a
+            caller that does not read preferences behaves exactly as before.
         links: Where the GPO is linked, with enforcement flags.
         read_error: Set when the GPO's content could not be read, so findings
             can say "unknown" rather than "not configured".
@@ -171,6 +263,7 @@ class GpoSnapshot:
     guid: str = ""
     security_template_entries: Sequence[Dict[str, Any]] = field(default_factory=tuple)
     registry_pol_entries: Sequence[Dict[str, Any]] = field(default_factory=tuple)
+    registry_xml_entries: Sequence[Dict[str, Any]] = field(default_factory=tuple)
     links: Sequence[GpoLink] = field(default_factory=tuple)
     read_error: Optional[str] = None
 
@@ -198,9 +291,24 @@ def find_matches(control: Control,
     implicit ``HKLM`` hive of the machine file is supplied, since PReg keys carry
     no hive at all.
 
+    ``gpo-registry-pol`` searches **two** sources: the admin-template
+    ``Registry.pol`` and Group Policy Preferences ``Registry.xml``. A registry
+    value with no ADMX policy behind it can only be delivered by a preference
+    item, so searching ``Registry.pol`` alone systematically under-reports
+    hardening the operator has really done. Preference items name their hive in
+    full (``HKEY_LOCAL_MACHINE``), which ``normalize_registry_key`` already
+    folds.
+
+    A preference item that does not *write* the value is not a match: an
+    ``action="D"`` item removes it, and a disabled item writes nothing. Counting
+    either as configuring the value would report hardening that Group Policy is
+    actively undoing. Those items are not discarded silently — see
+    :func:`find_preference_non_writes`.
+
     Returns:
         One dict per setting found: the GPO's identity and links, the key and
-        value as they appear in the GPO, and the type.
+        value as they appear in the GPO, the type, and ``delivery`` (plus a
+        ``preference`` sub-dict for preference items, ``None`` otherwise).
     """
     wanted = normalize_registry_key(control.registry_key)
     matches: List[Dict[str, Any]] = []
@@ -214,19 +322,115 @@ def find_matches(control: Control,
                     continue
                 matches.append(_match(gpo, entry.get("key"), entry.get("value"),
                                      entry.get("type_name"),
-                                     "GptTmpl.inf [Registry Values]"))
+                                     SOURCE_FILE_SECURITY_TEMPLATE,
+                                     DELIVERY_SECURITY_TEMPLATE))
         elif control.check_type == "gpo-registry-pol":
             for entry in gpo.registry_pol_entries or ():
                 full_key = f"{entry.get('key', '')}\\{entry.get('value', '')}"
                 if normalize_registry_key(full_key, MACHINE_POL_HIVE) != wanted:
                     continue
                 matches.append(_match(gpo, full_key, entry.get("data"),
-                                     entry.get("type"), "Registry.pol"))
+                                     entry.get("type"), SOURCE_FILE_REGISTRY_POL,
+                                     DELIVERY_REGISTRY_POL))
+            for entry in gpo.registry_xml_entries or ():
+                full_key = _preference_key(entry)
+                if normalize_registry_key(full_key, MACHINE_POL_HIVE) != wanted:
+                    continue
+                if _non_write_reason(entry) is not None:
+                    continue
+                matches.append(_match(gpo, full_key, entry.get("value"),
+                                     entry.get("type_name"),
+                                     SOURCE_FILE_REGISTRY_XML,
+                                     DELIVERY_REGISTRY_PREFERENCE,
+                                     preference=_preference_evidence(entry)))
     return matches
 
 
+def find_preference_non_writes(control: Control,
+                               gpos: Iterable[GpoSnapshot]
+                               ) -> List[Dict[str, Any]]:
+    """Preference items that name the control's key but do not set a value.
+
+    Three cases, and none of them is a match:
+
+    * ``action="D"`` — the item **deletes** the value. Reporting a Delete as
+      "configured" would be the most damaging possible misread: it would show
+      hardening on a key the GPO is actively clearing.
+    * the item is disabled in GPMC, so it writes nothing.
+    * the action is not one of ``C``/``R``/``U``/``D``, so whether it writes the
+      value is unknown — and unknown is not a pass.
+
+    They are reported rather than dropped, because "a GPO deletes this value" is
+    very often the explanation for the failure the reader is looking at.
+    """
+    wanted = normalize_registry_key(control.registry_key)
+    excluded: List[Dict[str, Any]] = []
+    if not wanted or control.check_type != "gpo-registry-pol":
+        return excluded
+
+    for gpo in gpos:
+        for entry in gpo.registry_xml_entries or ():
+            full_key = _preference_key(entry)
+            if normalize_registry_key(full_key, MACHINE_POL_HIVE) != wanted:
+                continue
+            reason = _non_write_reason(entry)
+            if reason is None:
+                continue
+            excluded.append({
+                "gpo_dn": gpo.dn,
+                "gpo_display_name": gpo.display_name,
+                "gpo_guid": gpo.guid,
+                "registry_key": full_key,
+                "delivery": DELIVERY_REGISTRY_PREFERENCE,
+                "source_file": SOURCE_FILE_REGISTRY_XML,
+                "reason": reason,
+                "preference": _preference_evidence(entry),
+            })
+    return excluded
+
+
+def _preference_key(entry: Dict[str, Any]) -> str:
+    """Rejoin a preference item's hive, key and value name into one path."""
+    parts = [entry.get("hive"), entry.get("key"), entry.get("value_name")]
+    return "\\".join(part for part in parts if part)
+
+
+def _non_write_reason(entry: Dict[str, Any]) -> Optional[str]:
+    """Why this preference item does not set the value, or ``None`` if it does.
+
+    Order matters: a disabled item writes nothing whatever its action says, so
+    ``disabled`` is checked first and every item lands in exactly one bucket.
+    """
+    if entry.get("disabled"):
+        return NON_WRITE_DISABLED
+    action = entry.get("action")
+    if action in REGISTRY_XML_WRITE_ACTIONS:
+        return None
+    if action == "D":
+        return NON_WRITE_DELETE
+    return NON_WRITE_UNRECOGNISED_ACTION
+
+
+def _preference_evidence(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """The preference-specific facts an auditor needs about a found value."""
+    action = entry.get("action")
+    return {
+        "action": action,
+        "action_name": REGISTRY_XML_ACTIONS.get(action) if isinstance(action, str)
+                       else None,
+        "corrects_drift": action in REGISTRY_XML_DRIFT_CORRECTING_ACTIONS,
+        # Every preference item tattoos; it is stated per value rather than
+        # left to prose so the report layer never has to infer it.
+        "tattoos": True,
+        "has_filters": bool(entry.get("has_filters")),
+        "disabled": bool(entry.get("disabled")),
+        "item_order": entry.get("order"),
+    }
+
+
 def _match(gpo: GpoSnapshot, key: Any, value: Any, type_name: Any,
-           source_file: str) -> Dict[str, Any]:
+           source_file: str, delivery: str,
+           preference: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {
         "gpo_dn": gpo.dn,
         "gpo_display_name": gpo.display_name,
@@ -235,6 +439,8 @@ def _match(gpo: GpoSnapshot, key: Any, value: Any, type_name: Any,
         "type_name": type_name,
         "value": value,
         "source_file": source_file,
+        "delivery": delivery,
+        "preference": preference,
         "enforced_link": gpo.enforced,
         "links": gpo.link_dicts(),
     }
@@ -333,20 +539,27 @@ def evaluate_control(control: Control,
 
     try:
         matches = find_matches(control, gpos)
+        non_writes = find_preference_non_writes(control, gpos)
     except Exception as exc:  # pragma: no cover - defensive
         return _error_finding(control, f"could not scan GPO content: {exc}",
                               [], gpos)
 
+    # Preference items that name the key but delete it, are disabled, or carry
+    # an action we do not recognise. They set nothing, so they are not matches —
+    # but they are usually the explanation for whatever verdict follows.
+    extra_notes = _non_write_notes(non_writes)
+
     if control.operator == "absent":
-        return _absent_finding(control, matches, gpos)
+        return _absent_finding(control, matches, gpos, extra_notes)
     if not matches:
-        return _missing_finding(control, gpos)
+        return _missing_finding(control, gpos, extra_notes)
 
     try:
         assessed = [dict(match, rollout_state=_state_for(control, match["value"]))
                     for match in matches]
     except OperatorError as exc:
-        return _error_finding(control, str(exc), matches, gpos)
+        return _error_finding(control, str(exc), matches, gpos,
+                              notes=extra_notes)
 
     states = {match["rollout_state"] for match in assessed}
     worst = min(states, key=lambda state: _STATE_RANK[state])
@@ -359,7 +572,8 @@ def evaluate_control(control: Control,
         result = RESULT_FAIL if worst == STATE_NOT_STARTED else RESULT_PASS
         rollout_state = worst
 
-    finding = _finding(control, result, rollout_state, assessed, gpos)
+    finding = _finding(control, result, rollout_state, assessed, gpos,
+                       notes=extra_notes)
     finding["conflict"] = conflict
     if conflict:
         finding["evidence"]["notes"].append(conflict["detail"])
@@ -454,14 +668,95 @@ def _state_for(control: Control, found: Any) -> str:
     return STATE_NOT_STARTED
 
 
+def _delivery_notes(matches: Sequence[Dict[str, Any]]) -> List[str]:
+    """The caveats that follow from *how* the found values were delivered.
+
+    Only preferences carry any, and only when they apply: a finding whose values
+    all come from ``Registry.pol`` or a security template gains nothing here, so
+    existing verdicts are untouched.
+    """
+    preferences = [match for match in matches
+                   if match.get("delivery") == DELIVERY_REGISTRY_PREFERENCE]
+    if not preferences:
+        return []
+
+    notes = [_PREFERENCE_TATTOO_NOTE]
+    if any((match.get("preference") or {}).get("action") == "C"
+           for match in preferences):
+        notes.append(_PREFERENCE_CREATE_NOTE)
+    if any((match.get("preference") or {}).get("has_filters")
+           for match in preferences):
+        notes.append(_PREFERENCE_FILTER_NOTE)
+    return notes
+
+
+def _non_write_notes(non_writes: Sequence[Dict[str, Any]]) -> List[str]:
+    """State the preference items that name the key but do not set it.
+
+    One note per reason, naming the GPOs, because "a preference deletes this
+    value" is usually the answer to the question the reader is holding.
+    """
+    if not non_writes:
+        return []
+
+    def names(items: Sequence[Dict[str, Any]]) -> str:
+        return ", ".join(item.get("gpo_display_name") or item.get("gpo_dn") or "?"
+                         for item in items)
+
+    notes: List[str] = []
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for item in non_writes:
+        grouped.setdefault(item["reason"], []).append(item)
+
+    deletes = grouped.get(NON_WRITE_DELETE) or []
+    if deletes:
+        notes.append(
+            f"{len(deletes)} Group Policy preference item(s) DELETE this value "
+            f"rather than set it ({names(deletes)}). A Delete action removes the "
+            f"value, so it is never counted as configuring it. If this control "
+            f"fails, that is very likely why; if it passes, something else is "
+            f"setting the value and the two are working against each other.")
+
+    disabled = grouped.get(NON_WRITE_DISABLED) or []
+    if disabled:
+        notes.append(
+            f"{len(disabled)} Group Policy preference item(s) naming this value "
+            f"are disabled and write nothing ({names(disabled)}). They are not "
+            f"counted as configuring it - re-enable the item in GPMC if the "
+            f"value was meant to be applied.")
+
+    unrecognised = grouped.get(NON_WRITE_UNRECOGNISED_ACTION) or []
+    if unrecognised:
+        actions = ", ".join(sorted({
+            repr((item.get("preference") or {}).get("action"))
+            for item in unrecognised}))
+        notes.append(
+            f"{len(unrecognised)} Group Policy preference item(s) naming this "
+            f"value carry an action this scan does not recognise ({actions}) "
+            f"({names(unrecognised)}). They are not counted as configuring it, "
+            f"because whether they write the value is unknown - and unknown is "
+            f"not a pass.")
+    return notes
+
+
 def _detect_conflict(assessed: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Flag disagreement between GPOs setting the same key.
 
-    Two shapes matter. Plain ``value-disagreement`` means two GPOs set different
-    values and, without RSoP, which one wins is unproven. ``enforced-override``
-    means one of the disagreeing GPOs is linked with enforcement, so it very
-    likely overrides the others regardless of where they sit — the case where a
-    "pass" read off the compliant GPO would be actively misleading.
+    Three shapes matter. Plain ``value-disagreement`` means two GPOs set
+    different values and, without RSoP, which one wins is unproven.
+    ``enforced-override`` means one of the disagreeing GPOs is linked with
+    enforcement, so it very likely overrides the others regardless of where they
+    sit — the case where a "pass" read off the compliant GPO would be actively
+    misleading. ``policy-preference-disagreement`` means the disagreement is
+    between a *policy* value and a Group Policy *preference* item, which is a
+    different failure mode: which one lands depends on the order the client-side
+    extensions run rather than on link precedence, and because a preference
+    tattoos while a policy reverts, the two can also drift apart over time.
+
+    The delivery distinction never suppresses ``enforced-override`` — an enforced
+    link is the more urgent fact — but it is added to that conflict's detail when
+    a preference is involved, so the reader is not told to settle it with link
+    precedence alone.
     """
     if len(assessed) < 2:
         return None
@@ -471,20 +766,41 @@ def _detect_conflict(assessed: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
 
     settings = [{"gpo_dn": m["gpo_dn"], "gpo_display_name": m["gpo_display_name"],
                  "value": m["value"], "enforced_link": m["enforced_link"],
-                 "rollout_state": m["rollout_state"]} for m in assessed]
+                 "rollout_state": m["rollout_state"],
+                 "delivery": m.get("delivery"),
+                 "preference_action": (m.get("preference") or {}).get("action")}
+                for m in assessed]
     enforcing = [m for m in assessed if m["enforced_link"]]
+    deliveries = {m.get("delivery") for m in assessed}
+    mixed_delivery = (DELIVERY_REGISTRY_PREFERENCE in deliveries
+                      and bool(deliveries & POLICY_DELIVERIES))
 
     if enforcing:
         names = ", ".join(f"{m['gpo_display_name'] or m['gpo_dn']} = {m['value']!r}"
                           for m in enforcing)
+        detail = (f"{len(assessed)} GPOs set this key to different values and "
+                  f"at least one is linked with enforcement ({names}), so the "
+                  f"other settings are likely overridden. Precedence is not "
+                  f"resolved here — verify with RSoP / gpresult before "
+                  f"trusting any single value.")
+        if mixed_delivery:
+            detail += " " + _MIXED_DELIVERY_DETAIL.format(
+                summary=_delivery_summary(assessed))
         return {
             "detected": True,
             "kind": "enforced-override",
-            "detail": (f"{len(assessed)} GPOs set this key to different values and "
-                       f"at least one is linked with enforcement ({names}), so the "
-                       f"other settings are likely overridden. Precedence is not "
-                       f"resolved here — verify with RSoP / gpresult before "
-                       f"trusting any single value."),
+            "detail": detail,
+            "settings": settings,
+        }
+    if mixed_delivery:
+        return {
+            "detected": True,
+            "kind": "policy-preference-disagreement",
+            "detail": (f"{len(assessed)} GPOs set this key to different values, "
+                       f"and the disagreement is between a policy setting and a "
+                       f"Group Policy preference item. "
+                       + _MIXED_DELIVERY_DETAIL.format(
+                           summary=_delivery_summary(assessed))),
             "settings": settings,
         }
     return {
@@ -499,6 +815,13 @@ def _detect_conflict(assessed: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
     }
 
 
+def _delivery_summary(assessed: Sequence[Dict[str, Any]]) -> str:
+    """``'Policy A' = 2 (registry-pol), 'Pref B' = 0 (registry-preference)``."""
+    return ", ".join(
+        f"{match['gpo_display_name'] or match['gpo_dn']} = {match['value']!r} "
+        f"({match.get('delivery')})" for match in assessed)
+
+
 def _finding(control: Control, result: str, rollout_state: Optional[str],
              matches: List[Dict[str, Any]], gpos: Sequence[GpoSnapshot],
              notes: Optional[List[str]] = None,
@@ -510,6 +833,7 @@ def _finding(control: Control, result: str, rollout_state: Optional[str],
         notes.append(_PRESENCE_ONLY_NOTE)
     if len(matches) > 1:
         notes.append(_NO_RSOP_NOTE)
+    notes.extend(_delivery_notes(matches))
     unreadable = [gpo.dn for gpo in gpos if gpo.read_error]
     if unreadable:
         notes.append(f"{len(unreadable)} GPO(s) could not be read and were not "
@@ -551,8 +875,8 @@ def _unreadable_gpos(gpos: Sequence[GpoSnapshot]) -> List[GpoSnapshot]:
     return [gpo for gpo in gpos if gpo.read_error]
 
 
-def _missing_finding(control: Control,
-                     gpos: Sequence[GpoSnapshot]) -> Dict[str, Any]:
+def _missing_finding(control: Control, gpos: Sequence[GpoSnapshot],
+                     extra_notes: Sequence[str] = ()) -> Dict[str, Any]:
     """No GPO sets the key: the control's own semantics decide what that means.
 
     A control that documents an ``os_default`` is evaluated against that default
@@ -578,14 +902,17 @@ def _missing_finding(control: Control,
     if control.os_default is not None:
         unreadable = _unreadable_gpos(gpos)
         if unreadable:
-            return _incomplete_scan_finding(control, gpos, unreadable)
-        return _os_default_finding(control, gpos, note)
+            return _incomplete_scan_finding(control, gpos, unreadable,
+                                            extra_notes)
+        return _os_default_finding(control, gpos, note, extra_notes)
     return _finding(control, control.missing_result or RESULT_FAIL,
-                    STATE_NOT_STARTED, [], gpos, notes=[note])
+                    STATE_NOT_STARTED, [], gpos,
+                    notes=[note] + list(extra_notes))
 
 
 def _incomplete_scan_finding(control: Control, gpos: Sequence[GpoSnapshot],
-                             unreadable: Sequence[GpoSnapshot]) -> Dict[str, Any]:
+                             unreadable: Sequence[GpoSnapshot],
+                             extra_notes: Sequence[str] = ()) -> Dict[str, Any]:
     """The key is unset in everything we read, but we could not read everything.
 
     This is the honest verdict for "the scan found nothing and also could not
@@ -624,11 +951,12 @@ def _incomplete_scan_finding(control: Control, gpos: Sequence[GpoSnapshot],
         },
         notes=[_UNREADABLE_OS_DEFAULT_NOTE.format(
             unreadable=len(unreadable), total=len(gpos),
-            value=control.os_default)])
+            value=control.os_default)] + list(extra_notes))
 
 
 def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
-                        missing_note: str) -> Dict[str, Any]:
+                        missing_note: str,
+                        extra_notes: Sequence[str] = ()) -> Dict[str, Any]:
     """Judge the assertion against the documented Windows default.
 
     Unset is not automatically insecure: ``LdapClientIntegrity`` is ``1``
@@ -669,6 +997,7 @@ def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
                                        f"could not be compared: {exc}", [], gpos)
 
     notes = [missing_note, _OS_DEFAULT_NOTE.format(value=control.os_default)]
+    notes.extend(extra_notes)
     capped = rollout_state == STATE_ENFORCED
     if capped:
         rollout_state = STATE_AUDIT
@@ -704,18 +1033,23 @@ def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
 
 
 def _absent_finding(control: Control, matches: List[Dict[str, Any]],
-                    gpos: Sequence[GpoSnapshot]) -> Dict[str, Any]:
+                    gpos: Sequence[GpoSnapshot],
+                    extra_notes: Sequence[str] = ()) -> Dict[str, Any]:
     """``absent`` inverts the usual sense: finding the key is the failure."""
     if matches:
         assessed = [dict(match, rollout_state=STATE_NOT_STARTED)
                     for match in matches]
-        finding = _finding(control, RESULT_FAIL, STATE_NOT_STARTED, assessed, gpos,
-                           notes=["This key must not be set; the GPO(s) below set it."])
+        finding = _finding(
+            control, RESULT_FAIL, STATE_NOT_STARTED, assessed, gpos,
+            notes=["This key must not be set; the GPO(s) below set it."]
+                  + list(extra_notes))
         finding["conflict"] = _detect_conflict(assessed)
         return finding
-    return _finding(control, RESULT_PASS,
-                    control.presence_rollout_state or STATE_ENFORCED, [], gpos,
-                    notes=["No GPO sets this key, which is what the control requires."])
+    return _finding(
+        control, RESULT_PASS,
+        control.presence_rollout_state or STATE_ENFORCED, [], gpos,
+        notes=["No GPO sets this key, which is what the control requires."]
+              + list(extra_notes))
 
 
 def _unscored_finding(control: Control, reason: str, detail: str,

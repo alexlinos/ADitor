@@ -7,7 +7,8 @@ server that exposes Active Directory — over LDAP and SYSVOL — to an MCP clie
 as Claude Code. Its focus is **read-only auditing**: domain and password-policy
 review, privileged-group and admin-account analysis, inactive-account detection,
 and Group Policy inspection, including parsing a GPO's actual SYSVOL contents
-(Registry.pol, security templates, AppLocker rules). It also provides full
+(Registry.pol, Group Policy Preferences Registry.xml, security
+templates, AppLocker rules). It also provides full
 directory management — users, groups, computers, and organizational units — for
 day-to-day administration.
 
@@ -102,7 +103,8 @@ redirects):
 
 **Group Policy**
 `get_gpos`, `get_gpo`, `get_linked_gpos` (enforcement and inheritance),
-`get_gpo_contents` (parses Registry.pol, security templates, and AppLocker rules
+`get_gpo_contents` (parses Registry.pol, Group Policy Preferences
+Registry.xml, security templates, and AppLocker rules
 from SYSVOL)
 
 **Hardening scan**
