@@ -12,6 +12,7 @@ GUID below is synthesized (``DC=test,DC=local``, placeholder GUIDs).
 """
 
 import json
+import re
 import sys
 from unittest.mock import Mock, patch
 
@@ -749,3 +750,41 @@ class TestSchemaInfo:
 
         assert "unknown" in info["evidence_sources"]
         assert any("could not be read" in note for note in info["notes"])
+
+
+class TestScanId:
+    """A scan must be nameable, not merely timestamped — the diffing work needs it."""
+
+    GUID = "11111111-1111-1111-1111-111111111111"
+
+    def _scan(self, tools, mock_ldap_manager):
+        wire_ldap(mock_ldap_manager, [gpo_entry(self.GUID, "Some GPO")], [])
+        return run_scan(tools, {self.GUID: sysvol_contents()})
+
+    def test_every_scan_carries_an_id(self, tools, mock_ldap_manager):
+        scan_id = self._scan(tools, mock_ldap_manager)["scan"]["scan_id"]
+        assert isinstance(scan_id, str) and len(scan_id) == 32
+        int(scan_id, 16)  # hex, or this raises
+
+    def test_two_scans_get_different_ids(self, tools, mock_ldap_manager):
+        """Two scans can share a timestamp; they must not share an identity."""
+        first = self._scan(tools, mock_ldap_manager)["scan"]["scan_id"]
+        second = self._scan(tools, mock_ldap_manager)["scan"]["scan_id"]
+        assert first != second
+
+    def test_the_written_report_carries_its_scan_id(self, tools, mock_ldap_manager,
+                                                    tmp_path):
+        """The rendered document must name the scan that produced it."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(self.GUID, "Some GPO")], [])
+        out = tmp_path / "r.html"
+
+        def read_sysvol(sysvol_path, include_registry=True, max_value_chars=6000):
+            return sysvol_contents()
+
+        with patch.dict(sys.modules, {"smbclient": Mock()}), \
+             patch.object(GPOTools, "_read_gpo_sysvol", side_effect=read_sysvol):
+            json.loads(tools.write_hardening_report(str(out))[0].text)
+
+        document = out.read_text(encoding="utf-8")
+        assert "Scan id" in document
+        assert re.search(r"\b[0-9a-f]{32}\b", document), "no scan id in the document"
