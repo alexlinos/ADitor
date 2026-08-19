@@ -25,12 +25,22 @@ from .catalog import (  # noqa: E402  (re-exported for callers' convenience)
     build_catalog,
     load_catalog,
 )
+from .evaluator import (  # noqa: E402
+    GpoLink,
+    GpoSnapshot,
+    evaluate_control,
+    evaluate_controls,
+)
 
 __all__ = [
     "SCAN_ENGINE_VERSION",
     "Catalog",
     "CatalogError",
     "Control",
+    "GpoLink",
+    "GpoSnapshot",
     "build_catalog",
     "load_catalog",
+    "evaluate_control",
+    "evaluate_controls",
 ]

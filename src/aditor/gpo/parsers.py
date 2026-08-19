@@ -166,7 +166,7 @@ def parse_ini(data: bytes) -> Dict[str, Any]:
     return sections
 
 
-def normalize_registry_key(key: Any) -> str:
+def normalize_registry_key(key: Any, default_hive: Optional[str] = None) -> str:
     """Canonicalise a registry path so two spellings of it compare equal.
 
     Needed because the same setting is written differently depending on where it
@@ -185,6 +185,13 @@ def normalize_registry_key(key: Any) -> str:
     form is a **comparison key only** — never display it back to a user; show
     the ``key`` the parser found instead.
 
+    Args:
+        key: The path to normalise, in any of the spellings above.
+        default_hive: Hive to assume when the path names none. ``Registry.pol``
+            keys are stored *without* a hive (the machine file is implicitly
+            ``HKLM``, the user file ``HKCU``), so a caller comparing those
+            against a catalog key passes the hive the file implies.
+
     Returns:
         The normalised path, or ``''`` for empty/non-string input.
     """
@@ -196,6 +203,8 @@ def normalize_registry_key(key: Any) -> str:
     hive = _HIVE_ALIASES.get(parts[0].strip().upper())
     if hive:
         parts[0] = hive
+    elif default_hive:
+        parts.insert(0, default_hive)
     return "\\".join(p.strip() for p in parts).upper()
 
 
