@@ -632,18 +632,29 @@ def _render_found(finding: Dict[str, Any]) -> str:
             f'<br><code class="dn">{_esc(match.get("gpo_dn"))}</code>'
             f'<br><span class="small muted">read from '
             f'{_esc(match.get("source_file"))}</span></td>'
-            f'<td>{_render_delivery(match)}</td>'
+            f'<td class="delivery-cell">{_render_delivery(match)}</td>'
             f'<td>{"<strong>yes</strong>" if match.get("enforced_link") else "no"}'
             f'{_links_text(match.get("links"))}</td>'
             '</tr>')
 
-    return (
+    return _scrollable(
         '<table class="grid found"><thead><tr>'
         '<th>Value found</th><th>Type</th><th>Rollout step</th>'
         '<th>Set by GPO</th><th>Delivered by</th>'
         '<th>Enforced link / link path</th>'
         f'</tr></thead><tbody>{"".join(rows)}</tbody></table>'
     )
+
+
+def _scrollable(table: str) -> str:
+    """Wrap a wide evidence table so it scrolls instead of the page body.
+
+    These tables carry DNs, registry values and now the delivery caveats, and
+    they are read on laptops and in print. Without the wrapper the widest of them
+    pushes the whole document into horizontal scroll, which makes every other
+    section harder to read; with it, only the table scrolls.
+    """
+    return f'<div class="table-wrap">{table}</div>'
 
 
 def _conflict_delivery(setting: Dict[str, Any]) -> str:
@@ -690,10 +701,12 @@ def _render_conflict(finding: Dict[str, Any]) -> str:
         '<div class="block conflict">'
         f'<h4>Conflict &mdash; {_esc(conflict.get("kind"))}</h4>'
         f'<p>{_esc(conflict.get("detail"))}</p>'
-        '<table class="grid"><thead><tr>'
-        '<th>GPO</th><th>Value</th><th>Rollout step</th><th>Delivered by</th>'
-        '<th>Enforced link</th>'
-        f'</tr></thead><tbody>{rows}</tbody></table>'
+        + _scrollable(
+            '<table class="grid"><thead><tr>'
+            '<th>GPO</th><th>Value</th><th>Rollout step</th>'
+            '<th>Delivered by</th><th>Enforced link</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>')
+        +
         '<p class="warn"><strong>Precedence is unresolved.</strong> Confirm the '
         'effective value with <code>gpresult /h</code> or the Group Policy '
         'Results (RSoP) wizard against a representative machine before changing '
@@ -1120,7 +1133,11 @@ padding:.28rem .6rem .28rem 0;border-bottom:1px solid var(--line);
 color:var(--muted);font-size:.88rem}
 .kv td{vertical-align:top;padding:.28rem 0;border-bottom:1px solid var(--line);
 font-size:.92rem}
+/* Wide evidence tables scroll inside their own box; the page body never
+   scrolls sideways. */
+.table-wrap{overflow-x:auto}
 .grid{font-size:.88rem}
+.grid .delivery-cell{min-width:11rem}
 .grid th{text-align:left;background:var(--panel);border:1px solid var(--line);
 padding:.35rem .5rem}
 .grid td{border:1px solid var(--line);padding:.35rem .5rem;vertical-align:top}

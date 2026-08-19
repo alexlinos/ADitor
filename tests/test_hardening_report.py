@@ -1206,6 +1206,39 @@ class TestDeliveryIsRendered:
         assert "Undo Enc Types" in card
 
 
+class TestWideEvidenceTablesScrollThemselves:
+    """The Delivered by column widened the evidence tables.
+
+    A table that overflows the page pushes the whole document into horizontal
+    scroll and makes every other section harder to read, so the found and
+    conflict tables get their own scroll container. Still no script and still one
+    file.
+    """
+
+    @pytest.fixture
+    def document(self):
+        payload = scan_payload([
+            snapshot(GUID_A, "Enc Types By Preference",
+                     preference_entries=[preference_entry(has_filters=True)],
+                     links=[GpoLink(target_dn=BASE_DN)]),
+            snapshot(GUID_B, "Enc Types By Policy",
+                     pol_entries=[kdc_pol_entry(38)],
+                     links=[GpoLink(target_dn=BASE_DN)]),
+        ], control_ids=[KDC_CONTROL])
+        return render_report(payload)
+
+    def test_every_evidence_table_sits_in_a_scroll_container(self, document):
+        tables = re.findall(r'(.{24})<table class="grid', document)
+
+        assert tables, "the document should contain evidence tables"
+        assert all(chunk == '<div class="table-wrap">' for chunk in tables), \
+            tables
+
+    def test_the_scroll_container_is_css_only(self, document):
+        assert ".table-wrap{overflow-x:auto}" in document
+        assert "<script" not in document.lower()
+
+
 class TestPolicyVersusPreferenceConflictIsRendered:
     """The conflict a reader must not try to settle with link precedence."""
 
