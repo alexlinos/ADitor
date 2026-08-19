@@ -390,6 +390,7 @@ def _render_provenance(scan: Dict[str, Any], counts: Dict[str, Any]) -> str:
         ("Report format version", _esc(REPORT_FORMAT_VERSION)),
         ("Catalog version", _esc(scan.get("catalog_version"))),
         ("Catalog source", _esc(scan.get("catalog_source"))),
+        ("Scan id", f'<code>{_esc(scan.get("scan_id"))}</code>'),
         ("Scan timestamp (UTC)", _esc(scan.get("timestamp"))),
         ("Domain", _esc(scan.get("domain"))),
         ("Base DN", f'<code>{_esc(scan.get("base_dn"))}</code>'),
@@ -794,7 +795,11 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
     """One finding, rendered for the section it is in."""
     evidence = finding.get("evidence") or {}
     control_id = str(finding.get("control_id") or "")
-    anchor = f"{section_id}-{control_id}".lower().replace(" ", "-")
+    # Anchor on the control id alone: a card's anchor must NOT move when its
+    # verdict changes, or a link from a ticket breaks exactly when the finding
+    # changes — which is the moment someone follows it. The section survives as
+    # the card's class.
+    anchor = control_id.lower().replace(" ", "-")
 
     identity = _rows([
         ("Policy", _esc(finding.get("friendly_policy"))),
