@@ -273,8 +273,15 @@ class HardeningTools(BaseTool):
                 "evidence.source says what a verdict rests on. 'os-default' means "
                 "no GPO sets the key and the control was judged against a "
                 "Microsoft-documented Windows default — a pass there is not "
-                "evidence that Group Policy enforces the value. counts.os_default "
-                "reports how many findings are in that position.",
+                "evidence that Group Policy enforces the value, and its "
+                "rollout_state is capped at 'audit' because nothing enforces a "
+                "default. counts.os_default reports how many findings are in that "
+                "position; it is not a number to subtract from pass, because such a "
+                "finding can also be fail, not_applicable or error — "
+                "counts.os_default_pass is the subset that passed.",
+                "Every count describes what was evaluated, not what was rendered. "
+                "counts.rendered and counts.hidden reconcile the totals with the "
+                "length of the findings list when include_not_applicable is false.",
                 "'unknown' means the scan did not establish the setting's state — "
                 "either the control is not evaluated at all, or GPOs could not be "
                 "read. Where any GPO is unreadable, a control with a documented OS "

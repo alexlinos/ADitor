@@ -113,13 +113,29 @@ time). HTML/JSON for reuse; **PDF is the primary hand-off format.**
   enforcement / group membership) next to the **expected** value — plus the
   **source GPO DN and link path** (which GPO delivered it, enforced/blocked). An
   auditor must see *what was checked and what was found*, not just a verdict.
-- `evidence.source`: `gpo | os-default | not-configured` — what the verdict rests
-  on. `os-default` means no GPO sets the key and the control was judged against a
-  Microsoft-documented Windows default, with the value and its citation in
-  `evidence.os_default`. **The report must render that distinctly:** an
+- `evidence.source`: `gpo | os-default | not-configured | unknown` — what the
+  verdict rests on. `os-default` means no GPO sets the key and the control was
+  judged against a Microsoft-documented Windows default, with the value and its
+  citation in `evidence.os_default`. **The report must render that distinctly:** an
   os-default pass is a hardening *opportunity* ("at the OS default, not raised"),
-  never a claim that Group Policy enforces the value. `counts.os_default` gives
-  the total, so a summary can keep assumed passes out of the enforced tally.
+  never a claim that Group Policy enforces the value — and its `rollout_state` is
+  capped at `audit`, because nothing enforces a default. `unknown` means the scan
+  did not establish the setting's state: either the control is not evaluated at all,
+  or GPOs could not be read. **`not-configured` is never used for a scan that
+  failed** — "we could not look" is not the same claim as "nothing sets it".
+- **Unreadable GPOs.** If any GPO's content could not be read, a control with a
+  documented `os_default` reports `error`, not a pass: an unread GPO could set the
+  key below the default, so "no GPO sets this key" is unproven and the default
+  cannot be assumed effective. This holds for a partial read as much as a total
+  one.
+- **Counting `os_default`.** `counts.os_default` is the number of findings whose
+  verdict rests on a documented default. It is **not** a number to subtract from
+  `pass`: an os-default finding can also be `fail` (a default below the floor),
+  `not_applicable` (a conditional control) or `error` (unreadable GPOs). Use
+  `counts.os_default_pass` — the subset that returned `pass` — to get "passes a GPO
+  actually configures". Every count describes what was **evaluated**, not what was
+  rendered; `counts.rendered` and `counts.hidden` reconcile the totals with the
+  length of the findings list when `include_not_applicable` is false.
 
 **Provenance header (required for auditability):** tool version; **baseline
 version** (Devore series rev + Microsoft/CIS baseline rev the exact values came
