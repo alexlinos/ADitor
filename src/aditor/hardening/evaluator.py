@@ -383,16 +383,31 @@ def evaluate_controls(controls: Iterable[Control],
 
     Returns:
         ``(findings, counts)``. ``counts`` reports every result, plus
-        ``needs_baseline_value``, ``conflicts``, ``os_default``, ``scored`` and
-        ``total``, so a report never has to infer a total from a filtered list.
-        ``os_default`` counts the findings whose verdict rests on a documented
-        Windows default rather than on any GPO — a summary that lumps those in
-        with configured passes overstates what the domain enforces.
+        ``needs_baseline_value``, ``conflicts``, ``os_default``,
+        ``os_default_pass``, ``hidden``, ``rendered``, ``scored`` and ``total``,
+        so a report never has to infer a total from a filtered list.
+
+        **Every count describes what was evaluated, not what was rendered.**
+        ``total`` and the per-result counts have always been pre-filter, and
+        ``os_default`` is deliberately the same — a control that was judged
+        against a documented default was judged whether or not the visibility
+        filter shows it. ``rendered`` and ``hidden`` say how many findings the
+        filter kept and dropped, so a caller comparing ``len(findings)`` with the
+        counts has the reconciliation instead of having to guess at a discrepancy.
+
+        ``os_default`` counts findings whose verdict rests on a documented Windows
+        default rather than on any GPO. It is **not** a number to subtract from
+        ``pass``: an os-default finding can now be ``fail`` (a default below the
+        floor) or ``not_applicable`` (a conditional control), so subtracting the
+        total would understate configured passes. ``os_default_pass`` is the
+        subset that actually returned ``pass``, and is the number to subtract from
+        ``pass`` to get "passes a GPO configures".
     """
     gpos = list(gpos)
     counts = {RESULT_PASS: 0, RESULT_FAIL: 0, RESULT_NOT_APPLICABLE: 0,
               RESULT_ERROR: 0, "needs_baseline_value": 0, "conflicts": 0,
-              "os_default": 0, "scored": 0, "total": 0}
+              "os_default": 0, "os_default_pass": 0, "scored": 0,
+              "rendered": 0, "hidden": 0, "total": 0}
     findings: List[Dict[str, Any]] = []
 
     for control in controls:
@@ -407,11 +422,16 @@ def evaluate_controls(controls: Iterable[Control],
             counts["conflicts"] += 1
         if finding["evidence"].get("source") == EVIDENCE_SOURCE_OS_DEFAULT:
             counts["os_default"] += 1
+            if finding["result"] == RESULT_PASS:
+                counts["os_default_pass"] += 1
 
         hide = (finding["result"] == RESULT_NOT_APPLICABLE
                 and not include_not_applicable
                 and finding.get("unscored_reason") is None)
-        if not hide:
+        if hide:
+            counts["hidden"] += 1
+        else:
+            counts["rendered"] += 1
             findings.append(finding)
 
     return findings, counts

@@ -665,6 +665,75 @@ class TestOsDefault:
         assert neither["os_default"] == 0
         assert neither[RESULT_PASS] == 1
 
+    def test_os_default_pass_is_the_number_to_subtract_from_pass(self):
+        """``os_default`` alone cannot be subtracted: it includes non-passes.
+
+        The doc used to say "subtract it from pass". Since an os-default finding
+        can be ``fail`` or ``not_applicable``, that would understate configured
+        passes. ``os_default_pass`` is the subset that actually passed.
+        """
+        passing = self.default_control(id="TEST-ASSUMED-PASS", os_default=1)
+        failing = self.default_control(id="TEST-ASSUMED-FAIL", os_default=0)
+
+        _, counts = evaluate_controls([passing, failing], [])
+
+        assert counts["os_default"] == 2
+        assert counts["os_default_pass"] == 1
+        assert counts[RESULT_PASS] == 1
+        assert counts[RESULT_FAIL] == 1
+        # The only subtraction that is correct.
+        assert counts[RESULT_PASS] - counts["os_default_pass"] == 0
+
+    def test_a_conditional_os_default_is_counted_but_is_not_a_pass(self):
+        conditional = self.default_control(
+            id="TEST-ASSUMED-NA", os_default=1, missing_result="not_applicable",
+            missing_note="Only applies where X is retained.")
+
+        _, counts = evaluate_controls([conditional], [],
+                                      include_not_applicable=True)
+
+        assert counts["os_default"] == 1
+        assert counts["os_default_pass"] == 0
+        assert counts[RESULT_NOT_APPLICABLE] == 1
+
+    def test_the_counts_reconcile_with_the_filtered_findings_list(self):
+        """The review's complaint: a count with zero rendered findings.
+
+        ``counts.os_default == 1`` alongside an empty findings list looked like a
+        bug. It is not — every count describes what was *evaluated* — but nothing
+        said so. ``rendered`` and ``hidden`` now make the reconciliation explicit
+        instead of leaving a reader to guess at the discrepancy.
+        """
+        hidden_control = self.default_control(
+            id="TEST-HIDDEN", os_default=1, missing_result="not_applicable",
+            missing_note="Only applies where X is retained.")
+
+        findings, counts = evaluate_controls([hidden_control], [],
+                                             include_not_applicable=False)
+
+        assert findings == []
+        assert counts["os_default"] == 1
+        assert counts["total"] == 1
+        assert counts["hidden"] == 1
+        assert counts["rendered"] == 0
+        assert counts["rendered"] == len(findings)
+        assert counts["rendered"] + counts["hidden"] == counts["total"]
+
+    def test_rendered_and_hidden_always_sum_to_total(self):
+        gpo = template_gpo(GUID_SIGNING, "Require Signing", TEST_FLAG_LINE.format(2))
+        controls = [
+            self.default_control(id="TEST-PASS"),
+            self.default_control(id="TEST-FAIL", os_default=0),
+            self.default_control(id="TEST-NA", os_default=1,
+                                 missing_result="not_applicable",
+                                 missing_note="Only applies where X is retained."),
+        ]
+
+        findings, counts = evaluate_controls(controls, [gpo])
+
+        assert counts["rendered"] == len(findings)
+        assert counts["rendered"] + counts["hidden"] == counts["total"] == 3
+
 
 def unreadable_gpo(guid, name="Unreadable Policy",
                    read_error="SMB access denied"):
