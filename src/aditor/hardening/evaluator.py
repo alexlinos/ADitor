@@ -620,11 +620,17 @@ def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
     enforces it. ``found`` stays empty and ``found_count`` zero, because no GPO
     was found; the default is not fabricated into a match.
 
-    A default that does *not* meet the assertion falls back to the control's own
-    ``missing_result``. Knowing the default cannot make a control apply that its
-    author said does not apply when nothing sets the key, so a conditional
-    control keeps reporting ``not_applicable`` rather than being upgraded to a
-    failure by an unset key it already excused.
+    **``missing_result`` wins in both directions.** A control whose
+    ``missing_result`` is ``not_applicable`` has declared that an unset key means
+    "this does not apply here" — a statement about *scope*, which knowing the OS
+    default cannot change. So such a control reports ``not_applicable`` whether the
+    default falls below the floor or meets it. Honouring ``missing_result`` only on
+    the way down (the original behaviour) contradicted the rule it was written to
+    express: a default that met the floor returned a scored ``pass``, quietly making
+    a control apply that its author said does not.
+
+    Controls whose ``missing_result`` is ``fail`` are unaffected: the default is
+    judged, and it passes or fails on its merits.
 
     **``rollout_state`` is capped at ``audit``.** ``_state_for`` will happily
     return ``enforced`` for a default that meets ``final_expected``, but nothing
@@ -648,8 +654,20 @@ def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
         rollout_state = STATE_AUDIT
         notes.append(_OS_DEFAULT_CAP_NOTE.format(value=control.os_default))
 
-    result = (control.missing_result or RESULT_FAIL
-              if rollout_state == STATE_NOT_STARTED else RESULT_PASS)
+    if control.missing_result == RESULT_NOT_APPLICABLE:
+        # The control declared that an unset key puts it out of scope. A default
+        # cannot bring it back into scope, however compliant that default is.
+        result = RESULT_NOT_APPLICABLE
+        notes.append(
+            "This control reports 'not applicable' when no GPO sets the key, so "
+            "the documented default is reported for information only and does not "
+            "produce a pass: knowing the default cannot make a control apply that "
+            "its author said does not apply here.")
+    elif rollout_state == STATE_NOT_STARTED:
+        result = RESULT_FAIL
+    else:
+        result = RESULT_PASS
+
     return _finding(
         control, result, rollout_state, [], gpos,
         notes=notes,

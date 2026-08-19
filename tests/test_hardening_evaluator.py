@@ -496,6 +496,45 @@ class TestOsDefault:
         assert finding["result"] == RESULT_NOT_APPLICABLE
         assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
 
+    def test_a_strong_default_also_respects_a_conditional_controls_semantics(self):
+        """The other half of the same rule, which used to be missing.
+
+        ``missing_result: not_applicable`` was honoured only when the default fell
+        *below* the floor. A default that met the floor returned a scored ``pass``
+        — making a control apply that its author said does not, which is exactly
+        what the rule's own docstring forbade.
+        """
+        finding = evaluate_control(
+            self.default_control(os_default=1, missing_result="not_applicable",
+                                 missing_note="Only applies where X is retained."),
+            [])
+
+        assert finding["result"] == RESULT_NOT_APPLICABLE
+        assert finding["result"] != RESULT_PASS
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+        assert any("cannot make a control apply" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_conditional_control_reports_the_default_for_information(self):
+        """Out of scope is not a reason to hide what the default is."""
+        finding = evaluate_control(
+            self.default_control(os_default=2, missing_result="not_applicable",
+                                 missing_note="Only applies where X is retained."),
+            [])
+
+        assert finding["result"] == RESULT_NOT_APPLICABLE
+        assert finding["evidence"]["os_default"]["value"] == 2
+        assert finding["evidence"]["os_default"]["applied"] is True
+
+    @pytest.mark.parametrize("os_default,expected", [
+        (0, RESULT_FAIL), (1, RESULT_PASS), (2, RESULT_PASS)])
+    def test_a_fail_missing_result_still_judges_the_default_on_its_merits(
+            self, os_default, expected):
+        """The two-sided rule must not change the ``missing_result: fail`` case."""
+        finding = evaluate_control(self.default_control(os_default=os_default), [])
+
+        assert finding["result"] == expected
+
     def test_a_default_that_meets_the_final_step_is_capped_at_audit(self):
         """Nothing enforces a default, so no default may read as ``enforced``.
 
