@@ -24,7 +24,12 @@ from ..core.logging import log_ldap_operation
 from ..gpo.parsers import parse_gp_link, parse_security_template_registry_values
 from ..hardening import SCAN_ENGINE_VERSION
 from ..hardening.catalog import Catalog, CatalogError, load_catalog
-from ..hardening.evaluator import GpoLink, GpoSnapshot, evaluate_controls
+from ..hardening.evaluator import (
+    EVIDENCE_SOURCES,
+    GpoLink,
+    GpoSnapshot,
+    evaluate_controls,
+)
 from .base import BaseTool
 from .gpo import GPOTools
 
@@ -257,7 +262,7 @@ class HardeningTools(BaseTool):
             "check_types": ["gpo-security-template", "gpo-registry-pol"],
             "results": ["pass", "fail", "not_applicable", "error"],
             "rollout_states": ["not_started", "audit", "enforced"],
-            "evidence_sources": ["gpo", "os-default", "not-configured"],
+            "evidence_sources": list(EVIDENCE_SOURCES),
             "notes": [
                 "Reads GPO settings from SYSVOL over SMB; needs the optional "
                 "'smbprotocol' package and SYSVOL read access.",
@@ -270,6 +275,12 @@ class HardeningTools(BaseTool):
                 "Microsoft-documented Windows default — a pass there is not "
                 "evidence that Group Policy enforces the value. counts.os_default "
                 "reports how many findings are in that position.",
+                "'unknown' means the scan did not establish the setting's state — "
+                "either the control is not evaluated at all, or GPOs could not be "
+                "read. Where any GPO is unreadable, a control with a documented OS "
+                "default reports 'error' instead of judging the key unset: an "
+                "unread GPO could set it, so the default cannot be assumed "
+                "effective.",
             ],
             **catalog_info,
         }

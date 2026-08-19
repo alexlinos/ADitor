@@ -36,6 +36,7 @@ from aditor.hardening.evaluator import (
     EVIDENCE_SOURCE_GPO,
     EVIDENCE_SOURCE_NOT_CONFIGURED,
     EVIDENCE_SOURCE_OS_DEFAULT,
+    EVIDENCE_SOURCE_UNKNOWN,
     RESULT_ERROR,
     RESULT_FAIL,
     RESULT_NOT_APPLICABLE,
@@ -536,6 +537,157 @@ class TestOsDefault:
         assert both[RESULT_PASS] == 1
         assert neither["os_default"] == 0
         assert neither[RESULT_PASS] == 1
+
+
+def unreadable_gpo(guid, name="Unreadable Policy",
+                   read_error="SMB access denied"):
+    """A GPO whose content could not be read: no entries, and a read_error.
+
+    This is the shape the tool layer produces when a SYSVOL read fails — the
+    snapshot exists (it was found in the directory) but nothing could be parsed
+    out of it.
+    """
+    return GpoSnapshot(dn=gpo_dn(guid), display_name=name, guid=guid,
+                       security_template_entries=[], registry_pol_entries=[],
+                       links=(GpoLink(DC_OU),), read_error=read_error)
+
+
+class TestUnreadableGposCannotProduceAnOsDefaultPass:
+    """"We could not look" is not "nothing sets this key".
+
+    ``find_matches`` can only report keys it managed to read, so an empty match
+    list conflates two very different claims. The os-default branch rests on the
+    strong one — it concludes the Windows default is the *effective* value — so an
+    unreadable GPO must invalidate it. Reporting ``pass`` / ``audit`` /
+    ``source: os-default`` off a scan that read nothing is the exact failure this
+    class exists to prevent.
+    """
+
+    def default_control(self, **overrides):
+        raw = dict(operator="gte", interim_expected=1, final_expected=2,
+                   os_default=1,
+                   value_source="Microsoft, 'LDAP client signing requirements'.",
+                   missing_result="fail")
+        raw.update(overrides)
+        return control(**raw)
+
+    def test_all_gpos_unreadable_is_an_error_not_a_pass(self):
+        """The reported defect: two unreadable GPOs and nothing else."""
+        gpos = [unreadable_gpo(GUID_SIGNING), unreadable_gpo(GUID_CONFLICT)]
+
+        finding = evaluate_control(self.default_control(), gpos)
+
+        assert finding["result"] == RESULT_ERROR
+        assert finding["result"] != RESULT_PASS
+        assert finding["rollout_state"] is None
+
+    def test_all_gpos_unreadable_does_not_assert_the_default_is_effective(self):
+        gpos = [unreadable_gpo(GUID_SIGNING), unreadable_gpo(GUID_CONFLICT)]
+
+        finding = evaluate_control(self.default_control(), gpos)
+        evidence = finding["evidence"]
+
+        assert evidence["source"] == EVIDENCE_SOURCE_UNKNOWN
+        assert evidence["source"] != EVIDENCE_SOURCE_OS_DEFAULT
+        assert evidence["source"] != EVIDENCE_SOURCE_NOT_CONFIGURED
+        assert evidence["os_default"]["applied"] is False
+        assert evidence["os_default"]["value"] == 1
+        assert evidence["os_default"]["not_applied_reason"]
+
+    def test_the_error_names_the_gpos_that_could_not_be_read(self):
+        """An auditor must be able to act on this: which GPOs, and why."""
+        gpos = [unreadable_gpo(GUID_SIGNING, read_error="SMB access denied")]
+
+        finding = evaluate_control(self.default_control(), gpos)
+
+        notes = " ".join(finding["evidence"]["notes"])
+        assert gpo_dn(GUID_SIGNING) in notes
+        assert "SMB access denied" in notes
+        assert "1 of 1" in notes
+        assert finding["evidence"]["gpos_searched"] == 1
+
+    def test_partially_unreadable_also_refuses_the_default(self):
+        """One unreadable GPO is enough, even when others read cleanly.
+
+        The judgement call: the os-default branch concludes "the OS default is
+        what is in effect", which requires knowing that *no* GPO sets the key.
+        Reading 1 of 2 GPOs does not establish that — the unread one could set the
+        value below the default — so the conservative rule is that any unreadable
+        GPO blocks the branch.
+        """
+        gpos = [template_gpo(GUID_SIGNING, "Readable, Unrelated Policy"),
+                unreadable_gpo(GUID_CONFLICT)]
+
+        finding = evaluate_control(self.default_control(), gpos)
+
+        assert finding["result"] == RESULT_ERROR
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_UNKNOWN
+        assert finding["evidence"]["os_default"]["applied"] is False
+        assert finding["evidence"]["gpos_searched"] == 2
+        assert "1 of 2" in " ".join(finding["evidence"]["notes"])
+
+    def test_a_readable_gpo_that_sets_the_key_still_wins(self):
+        """An unreadable GPO must not suppress evidence we actually have.
+
+        Where a readable GPO *does* set the key there is a real found value to
+        report, so the verdict stands on it (with the unread GPOs noted) rather
+        than collapsing to an error.
+        """
+        gpos = [template_gpo(GUID_SIGNING, "Require Signing",
+                             TEST_FLAG_LINE.format(2)),
+                unreadable_gpo(GUID_CONFLICT)]
+
+        finding = evaluate_control(self.default_control(), gpos)
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+        assert finding["evidence"]["found"][0]["value"] == 2
+        assert any("could not be read" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_control_without_a_default_keeps_its_missing_result(self):
+        """Scope: this fix targets the unsound pass, not every unread GPO.
+
+        Without ``os_default`` an unset key already returns ``missing_result``
+        (never a pass), and the unread GPOs are already noted, so the verdict is
+        left alone rather than turning every fail on an imperfectly-read domain
+        into an error.
+        """
+        gpos = [unreadable_gpo(GUID_SIGNING)]
+
+        finding = evaluate_control(self.default_control(os_default=None), gpos)
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+        assert any("could not be read" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_the_shipped_ldap_client_control_refuses_to_pass(self):
+        """The defect as reported, against the real shipped catalog control."""
+        control_obj = load_catalog().by_id("DEVORE-03-LDAP-CLIENT-SIGNING")
+        gpos = [unreadable_gpo(GUID_SIGNING), unreadable_gpo(GUID_CONFLICT)]
+
+        findings, counts = evaluate_controls([control_obj], gpos)
+
+        assert findings[0]["result"] == RESULT_ERROR
+        assert findings[0]["evidence"]["source"] == EVIDENCE_SOURCE_UNKNOWN
+        assert counts[RESULT_PASS] == 0
+        assert counts[RESULT_ERROR] == 1
+        assert counts["os_default"] == 0
+
+    def test_an_unreadable_scan_is_never_hidden_from_the_report(self):
+        """Why ``error`` and not ``not_applicable``: visibility.
+
+        ``not_applicable`` findings are filtered out by default, which would hide
+        the very thing the reader needs to see.
+        """
+        gpos = [unreadable_gpo(GUID_SIGNING)]
+
+        findings, _ = evaluate_controls([self.default_control()], gpos,
+                                        include_not_applicable=False)
+
+        assert len(findings) == 1
+        assert findings[0]["result"] == RESULT_ERROR
 
 
 class TestConflictDetection:

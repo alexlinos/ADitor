@@ -32,6 +32,14 @@ finding. Such a verdict is always labelled: ``evidence.source`` is
 is documented, and a note states that no GPO enforces it. Controls without an
 ``os_default`` keep the ``missing_result`` behaviour unchanged.
 
+**"We could not look" is not "nothing sets it".** An empty match list only means
+no GPO *that was read* sets the key, so if any GPO carries a ``read_error`` the
+os-default branch is refused outright and the finding is an ``error``: concluding
+that the Windows default is effective would rest on GPOs nobody read, and an
+unreadable GPO could set the value below the default. This holds whether all or
+only some of the GPOs failed to read — the branch needs "no GPO sets this key",
+and a partial read cannot establish it.
+
 **Rollout state is not pass/fail.** Most network controls are audit-first, then
 enforce (NTLM 3 -> 5, LDAP signing 1 -> 2, channel binding 1 -> 2), so each
 finding carries ``rollout_state``: ``not_started`` when nothing sets the key or
@@ -76,10 +84,19 @@ UNSCORED_UNSUPPORTED_CHECK_TYPE = "unsupported_check_type"
 # Where the value a verdict rests on came from. ``os-default`` is the honest
 # label for "no GPO sets this, but Microsoft documents the OS default" — a
 # reader (and the report layer) must be able to tell an assumed value from a
-# configured one without parsing prose.
+# configured one without parsing prose. ``unknown`` is the label for "the scan
+# does not know", which covers both a control the engine refuses to judge and a
+# scan whose GPO reads failed: neither may be rendered as "not configured",
+# because "we could not look" is not the same claim as "nothing sets it".
 EVIDENCE_SOURCE_GPO = "gpo"
 EVIDENCE_SOURCE_OS_DEFAULT = "os-default"
 EVIDENCE_SOURCE_NOT_CONFIGURED = "not-configured"
+EVIDENCE_SOURCE_UNKNOWN = "unknown"
+
+# Every value ``evidence.source`` can take. The tool layer advertises this list,
+# so it lives next to the constants rather than being retyped there.
+EVIDENCE_SOURCES = (EVIDENCE_SOURCE_GPO, EVIDENCE_SOURCE_OS_DEFAULT,
+                    EVIDENCE_SOURCE_NOT_CONFIGURED, EVIDENCE_SOURCE_UNKNOWN)
 
 _PRESENCE_ONLY_NOTE = (
     "Operator 'present': the source states this setting's registry path but not "
@@ -96,6 +113,20 @@ _OS_DEFAULT_NOTE = (
     "Group Policy enforces it and this finding is not evidence that anything "
     "would stop a GPO from lowering it: configure the policy explicitly to make "
     "the value enforced and auditable."
+)
+_OS_DEFAULT_CAP_NOTE = (
+    "Rollout state is capped at 'audit': the documented default ({value!r}) "
+    "meets this control's final target, but nothing enforces a default, so "
+    "reporting 'enforced' would credit Group Policy with a value it does not "
+    "set. Configure the policy explicitly to reach 'enforced'."
+)
+_UNREADABLE_OS_DEFAULT_NOTE = (
+    "No GPO that could be read sets this key, but {unreadable} of {total} GPO(s) "
+    "could not be read at all, so 'nothing sets this key' is unproven. The "
+    "documented Windows default ({value!r}) is therefore NOT applied: an "
+    "unreadable GPO could set this value to anything, including a value below "
+    "the default. Reported as an error rather than a pass — fix the read failures "
+    "below and re-scan."
 )
 
 
@@ -293,16 +324,18 @@ def evaluate_control(control: Control,
         return _unscored_finding(control, UNSCORED_NEEDS_BASELINE_VALUE,
                                  control.baseline_gap or
                                  "the source does not state this control's "
-                                 "expected value")
+                                 "expected value", gpos)
     if control.check_type not in EVALUABLE_CHECK_TYPES:
         return _unscored_finding(
             control, UNSCORED_UNSUPPORTED_CHECK_TYPE,
-            f"check type {control.check_type!r} has no evaluator in this release")
+            f"check type {control.check_type!r} has no evaluator in this release",
+            gpos)
 
     try:
         matches = find_matches(control, gpos)
     except Exception as exc:  # pragma: no cover - defensive
-        return _error_finding(control, f"could not scan GPO content: {exc}", [])
+        return _error_finding(control, f"could not scan GPO content: {exc}",
+                              [], gpos)
 
     if control.operator == "absent":
         return _absent_finding(control, matches, gpos)
@@ -313,7 +346,7 @@ def evaluate_control(control: Control,
         assessed = [dict(match, rollout_state=_state_for(control, match["value"]))
                     for match in matches]
     except OperatorError as exc:
-        return _error_finding(control, str(exc), matches)
+        return _error_finding(control, str(exc), matches, gpos)
 
     states = {match["rollout_state"] for match in assessed}
     worst = min(states, key=lambda state: _STATE_RANK[state])
@@ -493,6 +526,11 @@ def _finding(control: Control, result: str, rollout_state: Optional[str],
     return finding
 
 
+def _unreadable_gpos(gpos: Sequence[GpoSnapshot]) -> List[GpoSnapshot]:
+    """The GPOs whose content could not be read at all."""
+    return [gpo for gpo in gpos if gpo.read_error]
+
+
 def _missing_finding(control: Control,
                      gpos: Sequence[GpoSnapshot]) -> Dict[str, Any]:
     """No GPO sets the key: the control's own semantics decide what that means.
@@ -500,12 +538,73 @@ def _missing_finding(control: Control,
     A control that documents an ``os_default`` is evaluated against that default
     instead (see :func:`_os_default_finding`) — for those settings, "no GPO sets
     it" does not mean "off".
+
+    **Unless the scan could not read every GPO.** ``find_matches`` can only
+    report keys it managed to read, so an empty match list means "no GPO *that
+    we read* sets this key", which is not the same claim as "no GPO sets this
+    key". The os-default branch depends on the stronger claim — it concludes that
+    the Windows default is what is actually in effect — so a single unreadable
+    GPO invalidates it, and the finding becomes an ``error`` rather than an
+    assumed pass (see :func:`_incomplete_scan_finding`).
+
+    The no-``os_default`` branch is left alone deliberately: it already returns
+    the control's ``missing_result`` (``fail`` or ``not_applicable``), never a
+    pass, and :func:`_finding` already notes which GPOs went unread. Turning
+    those into errors as well would change every verdict on any domain with one
+    unreadable GPO, which is a far larger change than the unsound-pass this fix
+    exists to close.
     """
     note = control.missing_note or "No GPO in the domain sets this key."
     if control.os_default is not None:
+        unreadable = _unreadable_gpos(gpos)
+        if unreadable:
+            return _incomplete_scan_finding(control, gpos, unreadable)
         return _os_default_finding(control, gpos, note)
     return _finding(control, control.missing_result or RESULT_FAIL,
                     STATE_NOT_STARTED, [], gpos, notes=[note])
+
+
+def _incomplete_scan_finding(control: Control, gpos: Sequence[GpoSnapshot],
+                             unreadable: Sequence[GpoSnapshot]) -> Dict[str, Any]:
+    """The key is unset in everything we read, but we could not read everything.
+
+    This is the honest verdict for "the scan found nothing and also could not
+    look everywhere". It must not be a ``pass``: taking the os-default branch
+    here would assert that the Windows default is the effective value on the
+    strength of GPOs nobody read, which is exactly the "more confidence than the
+    evidence supports" failure this catalog exists to avoid.
+
+    ``error`` rather than ``not_applicable``, for two reasons. ``not_applicable``
+    is a claim about *scope* — "this control does not apply to this domain" —
+    which is not what happened; and ``not_applicable`` findings are hidden by
+    default (``include_not_applicable=False``), so the one thing a reader most
+    needs to see would be filtered out of the report. ``error`` is never hidden,
+    is counted separately, and says what is true: the scan could not decide.
+
+    The documented default is still reported in ``evidence.os_default`` — a
+    reader wants to know what the default *would* have been — but carries
+    ``applied: False`` and the reason, so nothing downstream can mistake it for
+    the value the verdict rests on.
+    """
+    detail = (f"{len(unreadable)} of {len(gpos)} GPO(s) could not be read, so it "
+              f"is unproven that no GPO sets this key; the documented Windows "
+              f"default was not applied")
+    return _error_finding(
+        control, detail, [], gpos,
+        evidence_source=EVIDENCE_SOURCE_UNKNOWN,
+        os_default_evidence={
+            "value": control.os_default,
+            "source": EVIDENCE_SOURCE_OS_DEFAULT,
+            "applied": False,
+            "enforced_by_gpo": False,
+            "not_applied_reason": (
+                "one or more GPOs could not be read, so 'no GPO sets this key' "
+                "is unproven and the default cannot be assumed effective"),
+            "value_source": control.value_source,
+        },
+        notes=[_UNREADABLE_OS_DEFAULT_NOTE.format(
+            unreadable=len(unreadable), total=len(gpos),
+            value=control.os_default)])
 
 
 def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
@@ -531,7 +630,7 @@ def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
         rollout_state = _state_for(control, control.os_default)
     except OperatorError as exc:  # pragma: no cover - defensive
         return _error_finding(control, f"os_default {control.os_default!r} "
-                                       f"could not be compared: {exc}", [])
+                                       f"could not be compared: {exc}", [], gpos)
 
     result = (control.missing_result or RESULT_FAIL
               if rollout_state == STATE_NOT_STARTED else RESULT_PASS)
@@ -562,9 +661,15 @@ def _absent_finding(control: Control, matches: List[Dict[str, Any]],
                     notes=["No GPO sets this key, which is what the control requires."])
 
 
-def _unscored_finding(control: Control, reason: str,
-                      detail: str) -> Dict[str, Any]:
-    """A control the engine deliberately refuses to judge."""
+def _unscored_finding(control: Control, reason: str, detail: str,
+                      gpos: Sequence[GpoSnapshot] = ()) -> Dict[str, Any]:
+    """A control the engine deliberately refuses to judge.
+
+    ``evidence.source`` is ``unknown`` rather than ``None``: the state of this
+    setting genuinely was not established, and every finding advertising a
+    ``source`` from the same small vocabulary is what lets the report layer
+    render it without special-casing a null.
+    """
     finding = control.summary()
     finding.update({
         "result": RESULT_NOT_APPLICABLE,
@@ -575,10 +680,11 @@ def _unscored_finding(control: Control, reason: str,
             "registry_key": control.registry_key,
             "registry_type": control.registry_type,
             "expected": None,
-            "source": None,
+            "source": EVIDENCE_SOURCE_UNKNOWN,
             "os_default": None,
             "found": [],
             "found_count": 0,
+            "gpos_searched": len(gpos),
             "notes": [
                 detail,
                 "Excluded from scoring: no verdict is issued rather than a guessed "
@@ -594,7 +700,30 @@ def _unscored_finding(control: Control, reason: str,
 
 
 def _error_finding(control: Control, message: str,
-                   matches: List[Dict[str, Any]]) -> Dict[str, Any]:
+                   matches: List[Dict[str, Any]],
+                   gpos: Sequence[GpoSnapshot] = (),
+                   evidence_source: Optional[str] = None,
+                   os_default_evidence: Optional[Dict[str, Any]] = None,
+                   notes: Optional[List[str]] = None) -> Dict[str, Any]:
+    """A control the engine could not decide.
+
+    ``evidence_source`` defaults to ``gpo`` when settings were found and
+    ``unknown`` when they were not: an error means the scan does not know what is
+    configured, and labelling that ``not-configured`` would state a fact the scan
+    did not establish. Callers whose error is *about* the OS default pass
+    ``os_default_evidence`` so the finding can report the default it declined to
+    apply, rather than a bare ``None`` that hides what was at stake.
+    """
+    notes = list(notes or [])
+    notes.append(f"Could not evaluate: {message}. Reported as an error rather "
+                 f"than a pass or a fail.")
+    unreadable = _unreadable_gpos(gpos)
+    if unreadable:
+        notes.append(f"{len(unreadable)} GPO(s) could not be read and were not "
+                     f"searched for this key: "
+                     f"{', '.join(gpo.dn for gpo in unreadable)}")
+        notes.extend(f"{gpo.dn}: {gpo.read_error}" for gpo in unreadable)
+
     finding = control.summary()
     finding.update({
         "result": RESULT_ERROR,
@@ -612,13 +741,13 @@ def _error_finding(control: Control, message: str,
                 "os_default": control.os_default,
                 "value_source": control.value_source,
             },
-            "source": (EVIDENCE_SOURCE_GPO if matches
-                       else EVIDENCE_SOURCE_NOT_CONFIGURED),
-            "os_default": None,
+            "source": evidence_source or (EVIDENCE_SOURCE_GPO if matches
+                                          else EVIDENCE_SOURCE_UNKNOWN),
+            "os_default": os_default_evidence,
             "found": matches,
             "found_count": len(matches),
-            "notes": [f"Could not evaluate: {message}. Reported as an error rather "
-                      f"than a pass or a fail."],
+            "gpos_searched": len(gpos),
+            "notes": notes,
         },
         "conflict": None,
         "caveats": list(control.caveats),

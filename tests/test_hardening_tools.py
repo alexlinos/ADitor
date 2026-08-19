@@ -506,6 +506,19 @@ class TestSchemaInfo:
     def test_schema_info_explains_what_an_os_default_verdict_means(self, tools):
         info = tools.get_schema_info()
 
-        assert info["evidence_sources"] == ["gpo", "os-default", "not-configured"]
+        assert info["evidence_sources"] == ["gpo", "os-default",
+                                            "not-configured", "unknown"]
         assert any("not evidence that Group Policy enforces" in note
                    for note in info["notes"])
+
+    def test_schema_info_advertises_the_unknown_evidence_source(self, tools):
+        """Every ``evidence.source`` a finding can carry must be advertised.
+
+        ``unknown`` is what an unevaluated control and an unreadable-GPO error
+        both report, and a consumer that has not been told about it would have to
+        guess.
+        """
+        info = tools.get_schema_info()
+
+        assert "unknown" in info["evidence_sources"]
+        assert any("could not be read" in note for note in info["notes"])
