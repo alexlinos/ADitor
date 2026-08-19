@@ -121,12 +121,26 @@ def test_expected_security_tools_are_registered(server):
 
 def test_expected_tool_count(server):
     # 9 user + 8 group + 9 computer + 7 OU + 7 security + 4 GPO
-    # + 1 hardening + 3 system = 48
-    assert len(TOOLS) == 48
-    assert len(server._tools) == 48
+    # + 2 hardening + 3 system = 49
+    assert len(TOOLS) == 49
+    assert len(server._tools) == 49
 
 
 def test_scan_hardening_is_registered(server):
     """P2-WP1's tool. Adding a tool needs a Claude Code restart to be visible."""
     assert "scan_hardening" in {spec.name for spec in TOOLS}
     assert "scan_hardening" in set(server._tool_handlers)
+
+
+def test_write_hardening_report_is_registered(server):
+    """P2-WP3's tool. Adding a tool needs a Claude Code restart to be visible."""
+    assert "write_hardening_report" in {spec.name for spec in TOOLS}
+    assert "write_hardening_report" in set(server._tool_handlers)
+
+    spec = next(s for s in TOOLS if s.name == "write_hardening_report")
+    assert spec.input_schema["required"] == ["output_path"]
+    assert "control_ids" in spec.input_schema["properties"]
+    # The description has to say what the file contains: a rendered report
+    # carries the domain's GPO names and registry values.
+    assert "self-contained" in spec.description
+    assert "only side effect" in spec.description
