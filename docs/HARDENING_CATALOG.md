@@ -101,7 +101,7 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 The report is the product's deliverable — an auditor/leadership-facing **proof**
 of each control's state. It is not a score; it is evidence.
 
-**Pipeline:** `scan → JSON (source of truth) → HTML (styled) → PDF (audit/leadership)`.
+**Pipeline:** `scan → JSON (source of truth) → HTML (styled, self-contained)`. **PDF rendering is deliberately not built** — it would drag a renderer into the packaging (WeasyPrint's native deps, or bundling headless Chromium) to buy typography the readers don't need; a browser can print the HTML if a PDF is ever wanted. The audit-grade *standard* below is unchanged — provenance, citations, expected-vs-found evidence. Only the medium changed. The report's job is to drive action: failures, conflicts and unreadable GPOs first, passes last.
 The JSON is also the machine-readable, versioned artifact (diff two scans over
 time). HTML/JSON for reuse; **PDF is the primary hand-off format.**
 
