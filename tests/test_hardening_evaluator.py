@@ -22,6 +22,12 @@ reads as GPO-enforced), ``TestSmbSigningOnTheShippedCatalog`` (the newly active
 SMB controls, spelled the way real GPOs spell the service names), and
 ``TestNtlmAuditFloorOnTheShippedCatalog`` (auditing configured *off* must fail
 rather than pass as "the policy is configured").
+
+``TestUnreadableGposCannotProduceAnOsDefaultPass`` pins the review fix that
+matters most: an empty match list means "no GPO *that we read* sets this key", so
+a scan with any unreadable GPO must not conclude the Windows default is effective.
+It reported ``pass`` / ``audit`` / ``source: os-default`` off a scan that read
+nothing at all.
 """
 
 import pytest
