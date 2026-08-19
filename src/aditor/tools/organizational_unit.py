@@ -662,14 +662,6 @@ class OrganizationalUnitTools(BaseTool):
         """Get child objects of an OU."""
         return self.get_ou_contents(ou_dn)
     
-    def get_ou_permissions(self, ou_dn: str) -> List[Dict[str, Any]]:
-        """Mock method for OU permissions - not implemented in real tool."""
-        return self._format_response({
-            'ou_dn': ou_dn,
-            'permissions': ['Read', 'Write', 'Create Child Objects'],
-            'inherited': True
-        }, "get_ou_permissions")
-    
     # Helper methods that tests expect
     def _validate_ou_dn(self, ou_dn: str) -> bool:
         """Validate if DN is a proper OU DN."""

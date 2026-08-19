@@ -1,5 +1,5 @@
 """
-Setup script for ActiveDirectoryMCP.
+Setup script for ADitor.
 
 This file is used for backward compatibility with older build systems.
 Modern builds should use pyproject.toml configuration.
@@ -11,5 +11,5 @@ setup(
     name="aditor",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
-    python_requires=">=3.9",
+    python_requires=">=3.12",
 )

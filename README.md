@@ -37,7 +37,6 @@ uv venv --python 3.12
 source .venv/bin/activate
 
 uv pip install -e ".[dev,smb]"
-uv pip install "mcp==1.9.0"    # pin the MCP SDK to a known-good release
 ```
 
 ## Configuration
