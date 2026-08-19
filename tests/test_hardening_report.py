@@ -77,16 +77,38 @@ def template_entry(key, value, type_name="REG_DWORD"):
 
 
 def snapshot(guid, display_name, entries=(), links=(), read_error=None,
-             pol_entries=()):
+             pol_entries=(), preference_entries=()):
     return GpoSnapshot(
         dn=gpo_dn(guid),
         display_name=display_name,
         guid=guid,
         security_template_entries=list(entries),
         registry_pol_entries=list(pol_entries),
+        registry_xml_entries=list(preference_entries),
         links=tuple(links),
         read_error=read_error,
     )
+
+
+# The live-observed KDC preference item, already parsed (the value is 0x38, so
+# parse_registry_xml has decoded it to 56 by the time the evaluator sees it).
+KDC_CONTROL = "DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES"
+
+
+def preference_entry(value=56, action="U", has_filters=False,
+                     key=r"SYSTEM\CurrentControlSet\Services\Kdc",
+                     value_name="DefaultDomainSupportedEncTypes",
+                     type_name="REG_DWORD"):
+    return {"hive": "HKEY_LOCAL_MACHINE", "key": key,
+            "value_name": value_name, "type": 4, "type_name": type_name,
+            "value": value, "action": action, "order": 1,
+            "has_filters": has_filters, "disabled": False}
+
+
+def kdc_pol_entry(value=56):
+    return {"key": r"System\CurrentControlSet\services\KDC",
+            "value": "DefaultDomainSupportedEncTypes",
+            "type": "REG_DWORD", "data": value}
 
 
 def provenance(catalog, gpos_scanned=2, gpos_unreadable=0):
@@ -1068,3 +1090,158 @@ class TestStableAnchorsAndScanId:
         document = render_report(mixed_scan)
         assert "Scan id" in document
         assert mixed_scan["scan"]["scan_id"] in document
+
+
+class TestDeliveryIsRendered:
+    """A pass held by a preference must not look like a policy-enforced pass.
+
+    The scan already records how each value was delivered; the report's job is
+    to put that in front of the reader. A "Delivered by" cell, the item's
+    action, and the tattoo/drift/targeting caveats all come straight from the
+    payload — the renderer derives nothing.
+    """
+
+    def preference_payload(self, **entry_kwargs):
+        return scan_payload(
+            [snapshot(GUID_A, "Enc Types By Preference",
+                      preference_entries=[preference_entry(**entry_kwargs)],
+                      links=[GpoLink(target_dn=BASE_DN)])],
+            control_ids=[KDC_CONTROL])
+
+    def test_the_found_table_names_the_delivery_mechanism(self):
+        document = render_report(self.preference_payload())
+
+        row = pass_row_of(document, KDC_CONTROL)
+        assert "Delivered by" in row
+        assert "Group Policy preference" in row
+
+    def test_the_preference_action_is_shown(self):
+        row = pass_row_of(render_report(self.preference_payload(action="R")),
+                          KDC_CONTROL)
+
+        assert "R (Replace)" in row
+
+    def test_the_tattoo_caveat_is_visible_to_a_reader(self):
+        row = pass_row_of(render_report(self.preference_payload()), KDC_CONTROL)
+
+        assert "tattoos" in visible_text(row)
+        assert "if this GPO is unlinked" in visible_text(row)
+
+    def test_a_create_action_says_drift_is_not_corrected(self):
+        row = pass_row_of(render_report(self.preference_payload(action="C")),
+                          KDC_CONTROL)
+
+        assert "drift is not corrected" in visible_text(row)
+
+    def test_an_update_action_makes_no_drift_claim(self):
+        row = pass_row_of(render_report(self.preference_payload(action="U")),
+                          KDC_CONTROL)
+
+        assert "drift is not corrected" not in visible_text(row)
+
+    def test_item_level_targeting_is_disclosed(self):
+        row = pass_row_of(
+            render_report(self.preference_payload(has_filters=True)),
+            KDC_CONTROL)
+
+        assert "item-level targeting" in visible_text(row)
+        assert "Not evaluated" in visible_text(row)
+
+    def test_an_unfiltered_item_makes_no_targeting_claim(self):
+        row = pass_row_of(render_report(self.preference_payload()), KDC_CONTROL)
+
+        assert "item-level targeting" not in visible_text(row)
+
+    def test_a_preference_pass_is_badged_on_the_compact_row(self):
+        """The skim-level signal: this pass is held by a preference."""
+        row = pass_row_of(render_report(self.preference_payload()), KDC_CONTROL)
+
+        assert "BY PREFERENCE" in row
+
+    def test_a_policy_pass_is_not_badged_and_shows_no_preference_caveats(self):
+        payload = scan_payload(
+            [snapshot(GUID_A, "Enc Types By Policy",
+                      pol_entries=[kdc_pol_entry()],
+                      links=[GpoLink(target_dn=BASE_DN)])],
+            control_ids=[KDC_CONTROL])
+
+        row = pass_row_of(render_report(payload), KDC_CONTROL)
+
+        assert "BY PREFERENCE" not in row
+        assert "administrative template (policy)" in row
+        assert "tattoos" not in visible_text(row)
+
+    def test_a_security_template_pass_names_its_delivery(self):
+        payload = scan_payload(
+            [snapshot(GUID_A, "LM Policy", entries=[template_entry(LM_KEY, 5)],
+                      links=[GpoLink(target_dn=BASE_DN)])],
+            control_ids=[LM_CONTROL])
+
+        row = pass_row_of(render_report(payload), LM_CONTROL)
+
+        assert "security template (policy)" in row
+
+    def test_a_failing_preference_value_still_shows_its_delivery(self):
+        payload = scan_payload(
+            [snapshot(GUID_A, "Enc Types By Preference",
+                      preference_entries=[preference_entry(value=38)],
+                      links=[GpoLink(target_dn=BASE_DN)])],
+            control_ids=[KDC_CONTROL])
+
+        card = card_of(render_report(payload), SECTION_FAIL, KDC_CONTROL)
+
+        assert "Group Policy preference" in card
+        assert "tattoos" in visible_text(card)
+
+    def test_a_deleting_preference_appears_in_the_scan_notes(self):
+        payload = scan_payload(
+            [snapshot(GUID_A, "Undo Enc Types",
+                      preference_entries=[preference_entry(action="D")],
+                      links=[GpoLink(target_dn=BASE_DN)])],
+            control_ids=[KDC_CONTROL])
+
+        card = card_of(render_report(payload), SECTION_FAIL, KDC_CONTROL)
+
+        assert "DELETE this value" in visible_text(card)
+        assert "Undo Enc Types" in card
+
+
+class TestPolicyVersusPreferenceConflictIsRendered:
+    """The conflict a reader must not try to settle with link precedence."""
+
+    @pytest.fixture
+    def document(self):
+        payload = scan_payload([
+            snapshot(GUID_A, "Enc Types By Policy",
+                     pol_entries=[kdc_pol_entry(56)],
+                     links=[GpoLink(target_dn=BASE_DN)]),
+            snapshot(GUID_B, "Enc Types By Preference",
+                     preference_entries=[preference_entry(value=38)],
+                     links=[GpoLink(target_dn=BASE_DN)]),
+        ], control_ids=[KDC_CONTROL])
+        return render_report(payload)
+
+    def test_the_conflict_section_carries_the_finding(self, document):
+        section = sections_of(document)[SECTION_CONFLICTS]
+
+        assert KDC_CONTROL in section
+        assert "policy-preference-disagreement" in section
+
+    def test_each_side_of_the_conflict_names_its_delivery(self, document):
+        section = sections_of(document)[SECTION_CONFLICTS]
+
+        assert "administrative template (policy)" in section
+        assert "Group Policy preference" in section
+
+    def test_the_reader_is_told_link_precedence_does_not_settle_it(self,
+                                                                  document):
+        text = visible_text(sections_of(document)[SECTION_CONFLICTS])
+
+        assert "client-side extensions" in text
+        assert "not on link precedence" in text
+
+    def test_the_finding_also_lands_in_the_failures_section(self, document):
+        card = card_of(document, SECTION_FAIL, KDC_CONTROL)
+
+        assert "38" in card
+        assert "56" in card

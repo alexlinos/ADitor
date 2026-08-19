@@ -26,6 +26,16 @@ network request when opened. The only outbound references are the citation
 hyperlinks, which are inert until a reader clicks them. ``<details>`` provides
 the collapsing without script.
 
+**Delivery is shown, not just the value.** Every found value carries a
+"Delivered by" cell naming the mechanism that put it there, and a preference item
+additionally shows its action plus the caveats that follow: the value *tattoos*
+(it survives its GPO being unlinked, where a policy value reverts), an action of
+``C`` will not correct drift, and item-level targeting may narrow who gets it. A
+pass held only by a preference is badged ``BY PREFERENCE`` on the compact
+always-visible row, because that is the line a reader skims. None of this is
+inferred — it all comes from the scan's own ``delivery`` and ``preference``
+fields.
+
 **PDF is deliberately not built** (see ``docs/HARDENING_CATALOG.md``): a browser
 can print this file if a PDF is ever wanted, which is cheaper than dragging a
 renderer and its native dependencies into the packaging.
@@ -40,7 +50,9 @@ to drive action rather than to be admired. See :data:`SECTIONS`:
 2. ``fail`` findings, with expected versus every found value, its source GPO, the
    catalog's remediation, and the phasing caveat.
 3. Conflicts — cross-referenced rather than owned, because a conflict on a
-   *passing* control is the dangerous one.
+   *passing* control is the dangerous one. A ``policy-preference-disagreement``
+   is rendered with each side's delivery mechanism, because that conflict is the
+   one a reader must *not* try to settle by comparing link precedence.
 4. ``os-default`` findings as hardening *opportunities* — never as enforcement.
 5. Unscored (``needs_baseline_value``) controls, explicitly not judged.
 6. Passes last, compact.
@@ -59,7 +71,7 @@ from . import SCAN_ENGINE_VERSION
 # Version of the *report layout*. Bumped when the rendered structure changes, so
 # a stored report can say which renderer produced it alongside which engine and
 # which catalog scored it.
-REPORT_FORMAT_VERSION = "1.0.0"
+REPORT_FORMAT_VERSION = "1.1.0"
 
 # The string that identifies a file as one of our reports. ``write_report``
 # refuses to overwrite an existing file that does not carry it, so a mistyped
@@ -155,6 +167,28 @@ _SOURCE_LABELS = {
     "not-configured": "no GPO sets this key",
     "unknown": "not established by this scan",
 }
+# How the GPO put the value there. Shown per found value because the mechanism
+# changes what a "pass" is worth: a policy value reverts when the GPO stops
+# applying, a preference value tattoos and stays.
+_DELIVERY_LABELS = {
+    "security-template": "security template (policy)",
+    "registry-pol": "administrative template (policy)",
+    "registry-preference": "Group Policy preference",
+}
+_PREFERENCE_TATTOO_WARNING = (
+    "Preference &mdash; <strong>tattoos</strong>: the value stays in the "
+    "registry if this GPO is unlinked or deleted, where a policy value would "
+    "revert."
+)
+_PREFERENCE_CREATE_WARNING = (
+    "Action <code>C</code> (Create) writes the value only when it is absent, so "
+    "<strong>drift is not corrected</strong>."
+)
+_PREFERENCE_FILTER_WARNING = (
+    "Carries item-level targeting (<code>&lt;Filters&gt;</code>), so it may "
+    "apply to only some of the machines this GPO reaches. <strong>Not "
+    "evaluated</strong> by this scan."
+)
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3,
                    "informational": 4}
 
@@ -523,6 +557,38 @@ def _render_expected(finding: Dict[str, Any]) -> str:
     return _rows(pairs)
 
 
+def _render_delivery(match: Dict[str, Any]) -> str:
+    """How this value was delivered, plus the caveats that follow from it.
+
+    A pass delivered by a Group Policy *preference* is a materially different
+    statement from one delivered by policy, so the mechanism gets its own cell
+    rather than being buried in prose: the value tattoos, action ``C`` will not
+    correct drift, and item-level targeting may narrow who gets it. All three
+    come from the scan's own ``delivery`` / ``preference`` fields — nothing here
+    is inferred.
+    """
+    delivery = match.get("delivery")
+    label = _DELIVERY_LABELS.get(str(delivery), _esc(delivery))
+    parts = [f'<span class="delivery">{label}</span>']
+
+    preference = match.get("preference")
+    if isinstance(preference, dict):
+        action = preference.get("action")
+        action_name = preference.get("action_name")
+        shown = f"{action} ({action_name})" if action_name else str(action)
+        parts.append(f'<br><span class="small">action '
+                     f'<code>{_esc(shown)}</code></span>')
+        parts.append(f'<br><span class="small pref-note">'
+                     f'{_PREFERENCE_TATTOO_WARNING}</span>')
+        if action == "C":
+            parts.append(f'<br><span class="small pref-note">'
+                         f'{_PREFERENCE_CREATE_WARNING}</span>')
+        if preference.get("has_filters"):
+            parts.append(f'<br><span class="small pref-note">'
+                         f'{_PREFERENCE_FILTER_WARNING}</span>')
+    return "".join(parts)
+
+
 def _render_found(finding: Dict[str, Any]) -> str:
     """Every value found, with the GPO that set it and that GPO's link path."""
     evidence = finding.get("evidence") or {}
@@ -566,6 +632,7 @@ def _render_found(finding: Dict[str, Any]) -> str:
             f'<br><code class="dn">{_esc(match.get("gpo_dn"))}</code>'
             f'<br><span class="small muted">read from '
             f'{_esc(match.get("source_file"))}</span></td>'
+            f'<td>{_render_delivery(match)}</td>'
             f'<td>{"<strong>yes</strong>" if match.get("enforced_link") else "no"}'
             f'{_links_text(match.get("links"))}</td>'
             '</tr>')
@@ -573,9 +640,27 @@ def _render_found(finding: Dict[str, Any]) -> str:
     return (
         '<table class="grid found"><thead><tr>'
         '<th>Value found</th><th>Type</th><th>Rollout step</th>'
-        '<th>Set by GPO</th><th>Enforced link / link path</th>'
+        '<th>Set by GPO</th><th>Delivered by</th>'
+        '<th>Enforced link / link path</th>'
         f'</tr></thead><tbody>{"".join(rows)}</tbody></table>'
     )
+
+
+def _conflict_delivery(setting: Dict[str, Any]) -> str:
+    """The delivery mechanism for one conflicting setting.
+
+    Load-bearing in a ``policy-preference-disagreement``: without it the table
+    reads as two GPOs to compare by link precedence, which is precisely the
+    wrong way to settle this particular conflict.
+    """
+    delivery = setting.get("delivery")
+    if not delivery:
+        return _ABSENT
+    label = _DELIVERY_LABELS.get(str(delivery), _esc(delivery))
+    action = setting.get("preference_action")
+    if action:
+        return f'{label}<br><span class="small">action <code>{_esc(action)}</code></span>'
+    return label
 
 
 def _cite(label: str, text: Any) -> str:
@@ -596,6 +681,7 @@ def _render_conflict(finding: Dict[str, Any]) -> str:
         f'<br><code class="dn">{_esc((s or {}).get("gpo_dn"))}</code></td>'
         f'<td class="val"><code>{_esc_value((s or {}).get("value"))}</code></td>'
         f'<td>{_STATE_LABELS.get(str((s or {}).get("rollout_state")), _ABSENT)}</td>'
+        f'<td>{_conflict_delivery(s or {})}</td>'
         f'<td>{"<strong>yes</strong>" if (s or {}).get("enforced_link") else "no"}</td>'
         '</tr>'
         for s in (conflict.get("settings") or []))
@@ -605,7 +691,8 @@ def _render_conflict(finding: Dict[str, Any]) -> str:
         f'<h4>Conflict &mdash; {_esc(conflict.get("kind"))}</h4>'
         f'<p>{_esc(conflict.get("detail"))}</p>'
         '<table class="grid"><thead><tr>'
-        '<th>GPO</th><th>Value</th><th>Rollout step</th><th>Enforced link</th>'
+        '<th>GPO</th><th>Value</th><th>Rollout step</th><th>Delivered by</th>'
+        '<th>Enforced link</th>'
         f'</tr></thead><tbody>{rows}</tbody></table>'
         '<p class="warn"><strong>Precedence is unresolved.</strong> Confirm the '
         'effective value with <code>gpresult /h</code> or the Group Policy '
@@ -848,6 +935,13 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
     )
 
 
+def _delivered_by_preference(found: Sequence[Any]) -> bool:
+    """Whether any found value came from a Group Policy preference item."""
+    return any(isinstance(match, dict)
+               and match.get("delivery") == "registry-preference"
+               for match in found or ())
+
+
 def _render_pass_row(finding: Dict[str, Any]) -> str:
     """A pass, compact: one always-visible line plus expandable evidence.
 
@@ -862,6 +956,11 @@ def _render_pass_row(finding: Dict[str, Any]) -> str:
     state = finding.get("rollout_state")
     conflict = ' <span class="badge badge-conflict">CONFLICT</span>' if \
         finding.get("conflict") else ""
+    # A pass held only by a preference is a weaker pass, and the compact row is
+    # where a reader skims. Say so on the always-visible line, not only inside
+    # the expanded evidence.
+    preference = (' <span class="badge badge-preference">BY PREFERENCE</span>'
+                  if _delivered_by_preference(found) else "")
 
     detail_body = (
         '<div class="pass-detail">'
@@ -882,7 +981,7 @@ def _render_pass_row(finding: Dict[str, Any]) -> str:
         f'<span class="badge badge-state-{_esc(state, "none")}">rollout: '
         f'{_esc(_STATE_LABELS.get(str(state), state))}</span> '
         f'<span class="pass-val">found {_esc(values, "no value (see evidence)")}'
-        f'</span>{conflict}'
+        f'</span>{preference}{conflict}'
         '</summary>'
         f'{detail_body}'
         '</details>'
@@ -993,6 +1092,11 @@ padding:0 .25em;word-break:break-all}
 a{color:var(--info)}
 .muted{color:var(--muted)}
 .small{font-size:.85rem}
+/* Delivery mechanism, per found value. The pref-note caveats are inline
+   rather than .warn blocks because they live inside a table cell. */
+.delivery{font-weight:600}
+.pref-note{display:inline-block;margin-top:.2rem;padding-left:.4rem;
+border-left:3px solid var(--warn)}
 .bad{color:var(--bad)}
 .err{color:var(--bad);word-break:break-word}
 .warn{background:var(--warn-bg);border-left:4px solid var(--warn);
@@ -1060,7 +1164,8 @@ background:var(--panel);color:var(--muted)}
 background:var(--bad-bg);border-color:var(--bad);color:var(--bad)}
 .badge-result-pass{background:var(--ok-bg);border-color:var(--ok);
 color:var(--ok)}
-.badge-conflict,.badge-notjudged,.badge-srcosdefault,.badge-sev-medium{
+.badge-conflict,.badge-notjudged,.badge-srcosdefault,.badge-sev-medium,
+.badge-preference{
 background:var(--warn-bg);border-color:var(--warn);color:var(--warn)}
 .block{margin:.8rem 0}
 .remediation p,.phasing p{margin:.35rem 0}
