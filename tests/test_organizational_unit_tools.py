@@ -627,8 +627,16 @@ class TestGpLinkRegressions:
 # reasonably believe rights had been granted. Real OU delegation means writing
 # nTSecurityDescriptor ACEs, a deliberate future feature rather than a revived
 # shell. It was never registered as an MCP tool.
+#
+# get_ou_permissions was deleted in WP4 for the same reason -- it was the last
+# self-described mock left in src/. It ignored the DN it was handed and returned
+# a hardcoded ['Read', 'Write', 'Create Child Objects'] with 'inherited': True,
+# so it could only ever misreport an OU's real rights. Genuine OU-permission
+# analysis means parsing nTSecurityDescriptor, a deliberate Phase-2 feature. It
+# was never registered as an MCP tool either.
 DELETED_MOCK_METHODS = [
     'delegate_ou_control',
+    'get_ou_permissions',
 ]
 
 
