@@ -1,5 +1,5 @@
 """
-Setup script for ActiveDirectoryMCP.
+Setup script for ADitor.
 
 This file is used for backward compatibility with older build systems.
 Modern builds should use pyproject.toml configuration.
