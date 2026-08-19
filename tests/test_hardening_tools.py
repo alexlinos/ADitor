@@ -23,6 +23,7 @@ from aditor.tools.gpo import GPOTools
 from aditor.tools.hardening import (
     HardeningTools,
     _machine_pol_entries,
+    _machine_preference_entries,
     _template_entries,
 )
 
@@ -71,9 +72,33 @@ def link_entry(target_dn, *gpo_guids, enforced=False, gp_options=0):
     }
 
 
-def sysvol_contents(*registry_lines, pol_entries=None):
-    """What GPOTools._read_gpo_sysvol returns for a GPO, synthesized."""
-    return {
+KDC_PREFERENCE_ENTRY = {
+    "hive": "HKEY_LOCAL_MACHINE",
+    "key": r"SYSTEM\CurrentControlSet\Services\Kdc",
+    "value_name": "DefaultDomainSupportedEncTypes",
+    "type": 4, "type_name": "REG_DWORD",
+    # 0x38 — already hex-decoded by parse_registry_xml, which is what
+    # _read_gpo_sysvol hands the snapshot builder.
+    "value": 56,
+    "action": "U", "order": 1, "has_filters": False, "disabled": False,
+}
+
+
+def preference_entry(**overrides):
+    """One parsed Registry.xml item, defaulting to the live-observed KDC one."""
+    entry = dict(KDC_PREFERENCE_ENTRY)
+    entry.update(overrides)
+    return entry
+
+
+def sysvol_contents(*registry_lines, pol_entries=None, preference_entries=None):
+    """What GPOTools._read_gpo_sysvol returns for a GPO, synthesized.
+
+    ``machine_registry_xml`` is added only when ``preference_entries`` is given,
+    matching the real reader: the block is absent for a GPO that has no
+    Preferences\\Registry\\Registry.xml at all.
+    """
+    contents = {
         "smb_source": r"\\dc.test.local\SYSVOL\test.local\Policies",
         "files": [{"path": "GPT.INI", "size": 59}],
         "gpt_ini": {"General": ["Version=3"]},
@@ -94,6 +119,12 @@ def sysvol_contents(*registry_lines, pol_entries=None):
         }],
         "scripts": [],
     }
+    if preference_entries is not None:
+        contents["machine_registry_xml"] = {
+            "entry_count": len(preference_entries),
+            "entries": list(preference_entries),
+        }
+    return contents
 
 
 @pytest.fixture
@@ -175,6 +206,31 @@ class TestContentExtraction:
                  "type": "REG_DWORD", "data": 1}
 
         assert _machine_pol_entries(sysvol_contents(pol_entries=[entry])) == [entry]
+
+    def test_preference_entries_are_passed_through(self):
+        entry = preference_entry()
+
+        assert _machine_preference_entries(
+            sysvol_contents(preference_entries=[entry])) == [entry]
+
+    def test_a_gpo_with_no_preferences_yields_no_preference_entries(self):
+        """The key is absent entirely for such a GPO, not None."""
+        contents = sysvol_contents()
+
+        assert "machine_registry_xml" not in contents
+        assert _machine_preference_entries(contents) == []
+
+    def test_an_empty_preferences_file_yields_no_entries(self):
+        assert _machine_preference_entries(
+            sysvol_contents(preference_entries=[])) == []
+
+    def test_user_side_preferences_are_not_scanned(self):
+        """Machine side only, matching _machine_pol_entries."""
+        contents = sysvol_contents()
+        contents["user_registry_xml"] = {
+            "entry_count": 1, "entries": [preference_entry()]}
+
+        assert _machine_preference_entries(contents) == []
 
     def test_a_gpo_with_no_registry_pol_yields_no_entries(self):
         contents = sysvol_contents()
@@ -374,6 +430,88 @@ class TestScanHardening:
         finding = response["findings"][0]
         assert finding["result"] == "pass"
         assert finding["evidence"]["found"][0]["source_file"] == "Registry.pol"
+
+    def test_a_registry_preference_reaches_the_verdict_through_the_tool(
+            self, tools, mock_ldap_manager):
+        """The live case, end to end through the orchestration layer.
+
+        The GPO has no Registry.pol and no [Registry Values] section: the
+        Registry.xml preference item is its only registry source, exactly as
+        observed on the domain where this control was wrongly reported as fail.
+        """
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "DefaultDomainSupportedEncTypes")],
+                  [link_entry(DC_OU, GUID_SIGNING)])
+
+        response = run_scan(
+            tools,
+            {GUID_SIGNING: sysvol_contents(
+                preference_entries=[preference_entry()])},
+            control_ids=["DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES"])
+
+        finding = response["findings"][0]
+        assert finding["result"] == "pass"
+        found = finding["evidence"]["found"][0]
+        assert found["value"] == 56
+        assert found["delivery"] == "registry-preference"
+        assert found["source_file"] == r"Preferences\Registry\Registry.xml"
+        assert found["preference"]["action"] == "U"
+        assert any("TATTOOS" in note for note in finding["evidence"]["notes"])
+
+    def test_a_preference_that_deletes_the_value_does_not_pass(
+            self, tools, mock_ldap_manager):
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Undo Enc Types")], [])
+
+        response = run_scan(
+            tools,
+            {GUID_SIGNING: sysvol_contents(
+                preference_entries=[preference_entry(action="D")])},
+            control_ids=["DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES"])
+
+        finding = response["findings"][0]
+        assert finding["result"] == "fail"
+        assert finding["evidence"]["found"] == []
+        assert any("DELETE this value" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_gpo_with_no_preferences_scores_exactly_as_before(
+            self, tools, mock_ldap_manager):
+        """The block is absent for such a GPO, and nothing else moves."""
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Example DC LDAP Signing")], [])
+
+        response = run_scan(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)},
+                            control_ids=["DEVORE-03-LDAP-SERVER-SIGNING"])
+
+        finding = response["findings"][0]
+        assert finding["result"] == "pass"
+        assert finding["evidence"]["found"][0]["delivery"] == "security-template"
+        assert finding["evidence"]["found"][0]["preference"] is None
+
+    def test_a_policy_and_a_preference_disagreeing_is_a_conflict(
+            self, tools, mock_ldap_manager):
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Enc Types By Policy"),
+                   gpo_entry(GUID_OVERRIDE, "Enc Types By Preference")], [])
+        pol_entry = {"key": r"System\CurrentControlSet\services\KDC",
+                     "value": "DefaultDomainSupportedEncTypes",
+                     "type": "REG_DWORD", "data": 56}
+
+        response = run_scan(
+            tools,
+            {GUID_SIGNING: sysvol_contents(pol_entries=[pol_entry]),
+             GUID_OVERRIDE: sysvol_contents(
+                 preference_entries=[preference_entry(value=38)])},
+            control_ids=["DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES"])
+
+        finding = response["findings"][0]
+        assert finding["result"] == "fail"
+        assert finding["conflict"]["kind"] == "policy-preference-disagreement"
+        assert {(s["value"], s["delivery"])
+                for s in finding["conflict"]["settings"]} == {
+            (56, "registry-pol"), (38, "registry-preference")}
+        assert response["counts"]["conflicts"] == 1
 
     def test_an_unreadable_gpo_is_disclosed_and_does_not_abort_the_scan(
             self, tools, mock_ldap_manager):
@@ -738,6 +876,20 @@ class TestSchemaInfo:
                                             "not-configured", "unknown"]
         assert any("not evidence that Group Policy enforces" in note
                    for note in info["notes"])
+
+    def test_schema_info_advertises_the_delivery_vocabulary(self, tools):
+        schema = tools.get_schema_info()
+
+        assert schema["deliveries"] == ["security-template", "registry-pol",
+                                        "registry-preference"]
+        notes = " ".join(schema["notes"])
+        assert "Registry.xml" in notes
+        assert "TATTOOS" in notes
+        assert "policy-preference-disagreement" in notes
+        assert "no separate check_type for preferences" in notes
+        assert schema["check_types"] == ["gpo-security-template",
+                                        "gpo-registry-pol"], \
+            "delivery is evidence, not a new check type"
 
     def test_schema_info_advertises_the_unknown_evidence_source(self, tools):
         """Every ``evidence.source`` a finding can carry must be advertised.
