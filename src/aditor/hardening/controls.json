@@ -89,6 +89,7 @@
       "interim_expected": 1,
       "final_expected": 2,
       "os_default": 1,
+      "os_default_source": "Microsoft, 'Network security: LDAP client signing requirements', Default values table \u2014 the effective default setting is 'Negotiate signing' for domain controllers, member servers and client computers alike: https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-ldap-client-signing-requirements \u2014 cited separately from value_source because the numeric mapping and the default come from different statements, and only this one licenses judging an unset key against 1.",
       "presence_rollout_state": null,
       "missing_result": "fail",
       "missing_note": "No GPO sets the client requirement, so the effective value is the Windows default of Negotiate signing (1) — clients do request signing, but nothing in Group Policy holds it there and a GPO could lower it to 0.",

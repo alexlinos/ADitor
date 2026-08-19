@@ -429,8 +429,11 @@ class TestOsDefault:
     def default_control(self, **overrides):
         raw = dict(operator="gte", interim_expected=1, final_expected=2,
                    os_default=1, value_source=self.DEFAULT_SOURCE,
+                   os_default_source=self.DEFAULT_SOURCE,
                    missing_result="fail")
         raw.update(overrides)
+        if raw.get("os_default") is None:
+            raw.pop("os_default_source", None)
         return control(**raw)
 
     def test_an_unset_key_is_judged_against_the_documented_default(self):
@@ -446,9 +449,15 @@ class TestOsDefault:
 
         evidence = finding["evidence"]
         assert evidence["source"] == EVIDENCE_SOURCE_OS_DEFAULT
-        assert evidence["os_default"] == {"value": 1, "source": "os-default",
-                                          "enforced_by_gpo": False,
-                                          "value_source": self.DEFAULT_SOURCE}
+        assert evidence["os_default"] == {
+            "value": 1,
+            "source": "os-default",
+            "applied": True,
+            "enforced_by_gpo": False,
+            "meets_final_expected": False,
+            "rollout_state_capped": False,
+            "value_source": self.DEFAULT_SOURCE,
+        }
         assert evidence["expected"]["os_default"] == 1
 
     def test_a_finding_resting_on_a_default_never_reads_as_gpo_enforced(self):
@@ -487,11 +496,90 @@ class TestOsDefault:
         assert finding["result"] == RESULT_NOT_APPLICABLE
         assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
 
-    def test_a_default_that_meets_the_final_step_reads_as_enforced(self):
+    def test_a_default_that_meets_the_final_step_is_capped_at_audit(self):
+        """Nothing enforces a default, so no default may read as ``enforced``.
+
+        This test previously asserted the opposite (``STATE_ENFORCED``), which
+        contradicted the catalog-wide
+        ``test_a_control_with_an_os_default_is_judged_against_it_instead`` in
+        ``TestShippedCatalogAgainstAnEmptyDomain`` — whose docstring already said
+        "nothing enforces a default" and which passed only because the one shipped
+        ``os_default`` (1) happens to sit below its ``final_expected`` (2). Both now
+        assert the same rule, and this one exercises it directly instead of relying
+        on the catalog's current numbers to never change.
+
+        The result is still ``pass``: the default does meet the target. It is the
+        *rollout state* that must not claim Group Policy holds it there.
+        """
         finding = evaluate_control(self.default_control(os_default=2), [])
 
         assert finding["result"] == RESULT_PASS
-        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["rollout_state"] == STATE_AUDIT
+        assert finding["rollout_state"] != STATE_ENFORCED
+
+    def test_the_cap_is_recorded_in_the_evidence_not_just_applied(self):
+        """A reader must be able to see that the state was capped, and why."""
+        finding = evaluate_control(self.default_control(os_default=2), [])
+
+        os_default = finding["evidence"]["os_default"]
+        assert os_default["rollout_state_capped"] is True
+        assert os_default["meets_final_expected"] is True
+        assert os_default["enforced_by_gpo"] is False
+        assert any("capped at 'audit'" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_default_above_the_final_step_is_also_capped(self):
+        """The cap is on the state, not on an exact equality with the target."""
+        finding = evaluate_control(self.default_control(os_default=5), [])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+
+    def test_a_default_below_the_final_step_is_not_marked_capped(self):
+        """The shipped case: 1 against a final of 2 reaches audit on its own."""
+        finding = evaluate_control(self.default_control(), [])
+
+        assert finding["rollout_state"] == STATE_AUDIT
+        assert finding["evidence"]["os_default"]["rollout_state_capped"] is False
+        assert finding["evidence"]["os_default"]["meets_final_expected"] is False
+        assert not any("capped at 'audit'" in note
+                       for note in finding["evidence"]["notes"])
+
+    def test_the_cap_holds_for_the_equals_operator(self):
+        """``equals`` reaches ``enforced`` by a different path; cap it too."""
+        finding = evaluate_control(
+            self.default_control(operator="equals", interim_expected=1,
+                                 final_expected=2, os_default=2), [])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+
+    def test_the_cap_holds_for_the_in_operator(self):
+        """``in`` was untested against ``os_default`` entirely."""
+        finding = evaluate_control(
+            self.default_control(operator="in", interim_expected=None,
+                                 final_expected=[2, 3], os_default=3), [])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+
+    def test_the_in_operator_fails_a_default_outside_the_option_set(self):
+        finding = evaluate_control(
+            self.default_control(operator="in", interim_expected=None,
+                                 final_expected=[2, 3], os_default=0), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+
+    def test_the_equals_operator_fails_a_default_that_does_not_match(self):
+        finding = evaluate_control(
+            self.default_control(operator="equals", interim_expected=None,
+                                 final_expected=2, os_default=0), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
 
     def test_a_control_without_a_default_keeps_the_old_unset_behaviour(self):
         """Absent ``os_default`` must change nothing."""
@@ -567,8 +655,12 @@ class TestUnreadableGposCannotProduceAnOsDefaultPass:
         raw = dict(operator="gte", interim_expected=1, final_expected=2,
                    os_default=1,
                    value_source="Microsoft, 'LDAP client signing requirements'.",
+                   os_default_source=("Microsoft, 'LDAP client signing "
+                                      "requirements', Default values table."),
                    missing_result="fail")
         raw.update(overrides)
+        if raw.get("os_default") is None:
+            raw.pop("os_default_source", None)
         return control(**raw)
 
     def test_all_gpos_unreadable_is_an_error_not_a_pass(self):
@@ -1336,9 +1428,16 @@ class TestShippedCatalogAgainstSynthesizedGpos:
         """The other half of the empty-domain rule: no GPO, but a known default.
 
         ``rollout_state`` must stay below ``enforced``: nothing enforces a
-        default, so a control whose documented default equals its final step
-        should be a deliberate decision, not a quiet "enforced" on a domain
-        that configures nothing.
+        default, so a control whose documented default equals its final step must
+        not read as "enforced" on a domain that configures nothing.
+
+        This assertion used to hold only by luck — it passes trivially while the
+        one shipped ``os_default`` (1) sits below its ``final_expected`` (2), and
+        ``TestOsDefault`` simultaneously asserted the opposite for a default that
+        *did* meet its target. The rule is now enforced in
+        ``_os_default_finding``, which caps the state, so this test holds for any
+        future catalog value; ``TestOsDefault.test_a_default_that_meets_the_final_
+        step_is_capped_at_audit`` exercises the cap directly.
         """
         control_obj = load_catalog().by_id(control_id)
 
