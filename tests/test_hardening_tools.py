@@ -490,12 +490,239 @@ class TestScanHardeningFailureModes:
         assert mock_ldap_manager.search.called is False
 
 
+class TestWriteHardeningReport:
+    """The report tool's wiring: same scan, rendered, plus the path guard.
+
+    The rendering itself is covered exhaustively in ``test_hardening_report.py``.
+    What matters here is that the tool runs the identical scan, writes only where
+    it is allowed to, and never writes a file when the scan or the path is bad.
+    Still no network: the LDAP manager is a Mock and the SYSVOL read is patched.
+    """
+
+    def report(self, tools, contents_by_guid, output_path, **kwargs):
+        """Call write_hardening_report with SMB stubbed out; parse the JSON."""
+        def read_sysvol(sysvol_path, include_registry=True,
+                        max_value_chars=6000):
+            for guid, contents in contents_by_guid.items():
+                if guid in sysvol_path:
+                    if isinstance(contents, Exception):
+                        raise contents
+                    return contents
+            return sysvol_contents()
+
+        with patch.dict(sys.modules, {"smbclient": Mock()}), \
+             patch.object(GPOTools, "_read_gpo_sysvol",
+                          side_effect=read_sysvol):
+            result = tools.write_hardening_report(str(output_path), **kwargs)
+        return json.loads(result[0].text)
+
+    def test_writes_the_file_and_returns_path_and_headline_counts(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        target = tmp_path / "hardening.html"
+
+        response = self.report(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)},
+                               target)
+
+        assert response["success"] is True
+        assert response["output_path"] == str(target)
+        assert response["bytes_written"] == target.stat().st_size
+        assert response["format"] == "html"
+        assert response["self_contained"] is True
+        assert response["headline"]["gpos_scanned"] == 1
+        assert response["headline"]["total"] == response["counts"]["total"]
+        assert any("PDF is deliberately not produced" in note
+                   for note in response["notes"])
+
+    def test_the_written_file_is_valid_self_contained_html_with_provenance(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        target = tmp_path / "hardening.html"
+
+        self.report(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)}, target)
+        document = target.read_text(encoding="utf-8")
+
+        assert document.startswith("<!DOCTYPE html>")
+        assert document.rstrip().endswith("</html>")
+        for token in ("<script", "src=", "<link ", "@import"):
+            assert token not in document
+        # Provenance rendered in the document, not only in the JSON.
+        assert "Provenance" in document
+        assert SCAN_ENGINE_VERSION in document
+        assert BASE_DN in document
+        assert "Catalog version" in document
+
+    def test_the_document_renders_the_same_scan_the_json_tool_returns(
+            self, tools, mock_ldap_manager, tmp_path):
+        """One scan, two renderings: the report must not invent its own numbers."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        contents = {GUID_SIGNING: sysvol_contents(*LDAP_LINES)}
+
+        scan = run_scan(tools, contents, include_not_applicable=True)
+        response = self.report(tools, contents, tmp_path / "r.html")
+
+        assert response["counts"] == scan["counts"]
+        assert response["scan"]["catalog_version"] == \
+            scan["scan"]["catalog_version"]
+
+    def test_control_ids_narrow_the_report(self, tools, mock_ldap_manager,
+                                           tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+
+        response = self.report(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)},
+                               tmp_path / "one.html",
+                               control_ids=["DEVORE-03-LDAP-SERVER-SIGNING"])
+
+        assert response["counts"]["total"] == 1
+        document = (tmp_path / "one.html").read_text(encoding="utf-8")
+        assert "DEVORE-03-LDAP-SERVER-SIGNING" in document
+        assert "DEVORE-01-NTLM-LMCOMPATIBILITYLEVEL" not in document
+
+    def test_unreadable_gpos_reach_the_document_as_a_warning(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Readable"),
+                   gpo_entry(GUID_OVERRIDE, "Unreadable")],
+                  [link_entry(BASE_DN, GUID_SIGNING, GUID_OVERRIDE)])
+        target = tmp_path / "incomplete.html"
+
+        response = self.report(tools, {
+            GUID_SIGNING: sysvol_contents(*LDAP_LINES),
+            GUID_OVERRIDE: PermissionError("access denied reading SYSVOL"),
+        }, target)
+
+        assert response["headline"]["gpos_unreadable"] == 1
+        document = target.read_text(encoding="utf-8")
+        assert "GPO read failures" in document
+        assert "unknown, not clean" in document
+        # Ahead of every verdict section, per the WP's acceptance criteria.
+        assert document.index('id="read-failures"') < document.index('id="failures"')
+
+    def test_a_bad_path_writes_nothing_and_says_the_scan_succeeded(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+
+        response = self.report(tools, {}, tmp_path / "report.json")
+
+        assert response["success"] is False
+        assert ".html" in response["error"]
+        assert response["scan_succeeded"] is True
+        assert list(tmp_path.iterdir()) == []
+
+    def test_refuses_to_clobber_a_file_that_is_not_a_report(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        target = tmp_path / "someones-page.html"
+        target.write_text("<html>not ours</html>", encoding="utf-8")
+
+        response = self.report(tools, {}, target)
+
+        assert response["success"] is False
+        assert "not an ADitor" in response["error"]
+        assert target.read_text(encoding="utf-8") == "<html>not ours</html>"
+
+    def test_creates_missing_parent_directories(self, tools, mock_ldap_manager,
+                                                tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+
+        response = self.report(tools, {}, tmp_path / "reports" / "2026" / "r.html")
+
+        assert response["success"] is True
+        assert (tmp_path / "reports" / "2026" / "r.html").is_file()
+
+    def test_unknown_control_ids_fail_before_any_file_is_written(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+
+        response = self.report(tools, {}, tmp_path / "r.html",
+                               control_ids=["MADE-UP-1"])
+
+        assert response["success"] is False
+        assert "MADE-UP-1" in response["error"]
+        assert response["operation"] == "write_hardening_report"
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_broken_catalog_writes_nothing(self, tools, mock_ldap_manager,
+                                             tmp_path):
+        from aditor.hardening.catalog import CatalogError
+
+        with patch("aditor.tools.hardening.load_catalog",
+                   side_effect=CatalogError("duplicate control id 'X'")):
+            result = tools.write_hardening_report(str(tmp_path / "r.html"))
+        response = json.loads(result[0].text)
+
+        assert response["success"] is False
+        assert "catalog failed to load" in response["error"]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_ldap_failure_writes_nothing(self, tools, mock_ldap_manager,
+                                            tmp_path):
+        mock_ldap_manager.search.side_effect = RuntimeError("LDAP server down")
+
+        with patch.dict(sys.modules, {"smbclient": Mock()}):
+            result = tools.write_hardening_report(str(tmp_path / "r.html"))
+        response = json.loads(result[0].text)
+
+        assert response["success"] is False
+        assert "LDAP server down" in response["error"]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_missing_smbprotocol_names_this_tool_not_the_other_one(
+            self, tools, mock_ldap_manager, tmp_path):
+        """The error tells the reader which tool they called."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) \
+            else __builtins__.__import__
+
+        def no_smbclient(name, *args, **kwargs):
+            if name == "smbclient":
+                raise ImportError("No module named 'smbclient'")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=no_smbclient):
+            result = tools.write_hardening_report(str(tmp_path / "r.html"))
+        response = json.loads(result[0].text)
+
+        assert response["success"] is False
+        assert response["error"].startswith("write_hardening_report reads GPO")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_hostile_gpo_display_names_are_escaped_end_to_end(
+            self, tools, mock_ldap_manager, tmp_path):
+        """Directory data is untrusted all the way from LDAP to the browser."""
+        hostile = "Bad <script>alert(\"x\")</script> & 'GPO'"
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, hostile)],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        target = tmp_path / "escaped.html"
+
+        self.report(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)}, target)
+        document = target.read_text(encoding="utf-8")
+
+        assert "<script" not in document
+        assert "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;" in document
+
+    def test_the_scan_stays_read_only(self, tools, mock_ldap_manager, tmp_path):
+        """The one side effect is the file; the directory is not touched."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+
+        self.report(tools, {}, tmp_path / "r.html")
+
+        assert mock_ldap_manager.add.called is False
+        assert mock_ldap_manager.modify.called is False
+        assert mock_ldap_manager.delete.called is False
+
+
 class TestSchemaInfo:
 
     def test_schema_info_advertises_the_catalog_and_its_limits(self, tools):
         info = tools.get_schema_info()
 
-        assert info["operations"] == ["scan_hardening"]
+        assert info["operations"] == ["scan_hardening",
+                                      "write_hardening_report"]
         assert info["read_only"] is True
         assert info["catalog_version"]
         assert "DEVORE-03-LDAP-SERVER-SIGNING" in info["control_ids"]
