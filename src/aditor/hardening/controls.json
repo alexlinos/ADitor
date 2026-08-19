@@ -9,7 +9,8 @@
   "notes": [
     "Check types in this release: gpo-security-template (GptTmpl.inf [Registry Values]) and gpo-registry-pol (Registry.pol). The catalog's directory-state controls (DEVORE-02 SMBv1, DEVORE-04 msDS-SupportedEncryptionTypes, DEVORE-07 least privilege, DEVORE-08 Protected Users) have no evaluator yet and are deliberately absent rather than present-and-unevaluatable; they arrive with their own engine.",
     "registry_key is the full path including the value name (its last component). For gpo-registry-pol the evaluator splits the last component off to match Registry.pol's separate key/value fields; for gpo-security-template the whole path is one [Registry Values] key.",
-    "Rollout is phased, not binary: interim_expected is the audit/negotiate step and final_expected the enforced step, so a domain correctly mid-rollout reports rollout_state 'audit' and result 'pass', not a failure."
+    "Rollout is phased, not binary: interim_expected is the audit/negotiate step and final_expected the enforced step, so a domain correctly mid-rollout reports rollout_state 'audit' and result 'pass', not a failure.",
+    "os_default records the value Windows uses when no GPO sets the key, and only where a Microsoft document states it. Such a finding is evaluated against the default and marked 'source: os-default', so an assumed value is never mistaken for an enforced one. It is deliberately absent where there is no default to cite — LdapEnforceChannelBinding, for one, has no such key by default (channel binding is off), which is precisely why configuring it matters."
   ],
   "controls": [
     {
@@ -87,13 +88,15 @@
       "operator": "gte",
       "interim_expected": 1,
       "final_expected": 2,
+      "os_default": 1,
       "presence_rollout_state": null,
       "missing_result": "fail",
-      "missing_note": "No GPO sets the client requirement. The Windows default is already Negotiate (1), so this is usually a documentation gap rather than a live risk — but an unset policy cannot be shown to be 1, and a GPO elsewhere may have lowered it to 0.",
-      "value_source": "0/1/2 (None / Negotiate signing / Require signing) are quoted in Devore Part 3; the post also states the OS default is Negotiate.",
-      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: LDAP client signing requirements' = 'Negotiate signing' or 'Require signing'.",
+      "missing_note": "No GPO sets the client requirement, so the effective value is the Windows default of Negotiate signing (1) — clients do request signing, but nothing in Group Policy holds it there and a GPO could lower it to 0.",
+      "value_source": "0/1/2 (None / Negotiate signing / Require signing) are quoted in Devore Part 3. The OS default is 'Negotiate signing' per Microsoft, 'Network security: LDAP client signing requirements' (Default values table: DC, member server and client computer effective default settings are all 'Negotiate signing'): https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-ldap-client-signing-requirements",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: LDAP client signing requirements' = 'Require signing' (the OS already gives you 'Negotiate signing' without a GPO, so setting Negotiate explicitly buys documentation, not hardening).",
       "caveats": [
-        "Windows already defaults to Negotiate (1); Windows SASL binds will not break when DCs start requiring signing unless a GPO overrode that default with 0."
+        "Windows already defaults to Negotiate (1); Windows SASL binds will not break when DCs start requiring signing unless a GPO overrode that default with 0.",
+        "OS DEFAULT, NOT ENFORCEMENT: where no GPO sets this key the finding rests on the documented default and is marked 'source: os-default'. That is a pass at the Negotiate step, not evidence that anything prevents a future GPO from setting 0."
       ],
       "audit_before_enforce": null
     },

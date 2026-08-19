@@ -807,6 +807,80 @@ class TestLiveVerifiedLdapCase:
         assert {f["rollout_state"] for f in findings} == {STATE_NOT_STARTED}
 
 
+class TestLdapClientSigningOnTheShippedCatalog:
+    """The live defect: a domain that sets nothing is not an unsigned domain.
+
+    ``LdapClientIntegrity`` appeared in none of the real domain's GPOs, and the
+    scan called that ``fail`` / ``not_started``. Windows defaults it to
+    Negotiate (1), so the honest verdict is "at the OS default, not raised to
+    Require" — and it must stay distinguishable from a domain that configured
+    Require explicitly.
+    """
+
+    CLIENT_LINE = ("MACHINE\\System\\CurrentControlSet\\Services\\LDAP"
+                   "\\LdapClientIntegrity=4,{}")
+
+    @pytest.fixture
+    def control_obj(self):
+        return load_catalog().by_id("DEVORE-03-LDAP-CLIENT-SIGNING")
+
+    def test_a_domain_that_sets_nothing_reflects_the_negotiate_default(
+            self, control_obj):
+        finding = evaluate_control(
+            control_obj, [template_gpo(GUID_CONFLICT, "Unrelated Policy")])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+        assert finding["evidence"]["os_default"]["value"] == 1
+        assert finding["evidence"]["os_default"]["enforced_by_gpo"] is False
+
+    def test_the_default_pass_cites_the_microsoft_document_it_rests_on(
+            self, control_obj):
+        finding = evaluate_control(control_obj, [])
+
+        value_source = finding["evidence"]["os_default"]["value_source"]
+        assert "learn.microsoft.com" in value_source
+        assert "Negotiate signing" in value_source
+
+    def test_an_explicit_require_is_distinguishable_from_the_default(
+            self, control_obj):
+        """Same pass, different evidence: configured and enforced, not assumed."""
+        gpo = template_gpo(GUID_SIGNING, "Require LDAP Client Signing",
+                           self.CLIENT_LINE.format(2))
+
+        finding = evaluate_control(control_obj, [gpo])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+        assert finding["evidence"]["os_default"] is None
+        assert finding["evidence"]["found"][0]["gpo_dn"] == gpo_dn(GUID_SIGNING)
+
+    def test_a_gpo_that_lowers_the_setting_to_none_still_fails(self, control_obj):
+        """The default must not paper over a GPO that turned signing off."""
+        gpo = template_gpo(GUID_ENFORCED, "Legacy LDAP Exception",
+                           self.CLIENT_LINE.format(0),
+                           links=(GpoLink(BASE_DN, enforced=True),))
+
+        finding = evaluate_control(control_obj, [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+
+    def test_channel_binding_has_no_default_and_still_fails_when_unset(self):
+        """The deliberate contrast: no key by default means channel binding is off."""
+        control_obj = load_catalog().by_id("DEVORE-05-LDAP-CHANNEL-BINDING")
+
+        finding = evaluate_control(control_obj, [])
+
+        assert control_obj.os_default is None
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+
+
 class TestShippedCatalogAgainstSynthesizedGpos:
     """Every shipped active control, exercised once with a compliant GPO."""
 
@@ -834,7 +908,8 @@ class TestShippedCatalogAgainstSynthesizedGpos:
         assert finding["rollout_state"] in (STATE_ENFORCED, STATE_AUDIT)
 
     @pytest.mark.parametrize("control_id", [
-        c.id for c in load_catalog().scored_controls])
+        c.id for c in load_catalog().scored_controls
+        if c.os_default is None])
     def test_every_active_control_reports_something_on_an_empty_domain(
             self, control_id):
         control_obj = load_catalog().by_id(control_id)
@@ -843,7 +918,29 @@ class TestShippedCatalogAgainstSynthesizedGpos:
 
         assert finding["result"] in (RESULT_FAIL, RESULT_NOT_APPLICABLE)
         assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
         assert finding["evidence"]["notes"]
+
+    @pytest.mark.parametrize("control_id", [
+        c.id for c in load_catalog().scored_controls
+        if c.os_default is not None])
+    def test_a_control_with_an_os_default_is_judged_against_it_instead(
+            self, control_id):
+        """The other half of the empty-domain rule: no GPO, but a known default.
+
+        ``rollout_state`` must stay below ``enforced``: nothing enforces a
+        default, so a control whose documented default equals its final step
+        should be a deliberate decision, not a quiet "enforced" on a domain
+        that configures nothing.
+        """
+        control_obj = load_catalog().by_id(control_id)
+
+        finding = evaluate_control(control_obj, [])
+
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+        assert finding["evidence"]["os_default"]["value"] == control_obj.os_default
+        assert finding["evidence"]["found"] == []
+        assert finding["rollout_state"] != STATE_ENFORCED
 
     def test_the_whole_catalog_evaluates_against_an_empty_domain(self):
         catalog = load_catalog()

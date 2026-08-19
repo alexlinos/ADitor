@@ -77,7 +77,17 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
    **rollout state** (Not started / Audit / Enforced) per control, not a bare
    pass/fail, or it will read as failing an org that is correctly mid-rollout.
 
-4. **Least Privilege (Part 7) is a mini-product of its own** — group membership
+4. **An unset key is not automatically a failure.** Some settings have a
+   documented Windows default that is already partly compliant —
+   `LdapClientIntegrity` is Negotiate (1) on a machine no GPO has touched. Those
+   controls carry `os_default` (populated **only** where a Microsoft document
+   states the default) and are judged against it when no GPO sets the key, with
+   the evidence marked `source: os-default` so an assumed value never reads as
+   GPO-enforced. Where there is no default to cite, the field stays absent:
+   `LdapEnforceChannelBinding` has no key by default, which is exactly why
+   setting it matters.
+
+5. **Least Privilege (Part 7) is a mini-product of its own** — group membership
    that should be empty, URA-vs-baseline diff, delegation ACLs, `TrustedForDelegation`
    queries, Protected Users. Scope it as its own control group, not one check.
 
@@ -189,12 +199,15 @@ that touches the build.
     friendly_policy: "Network security: LDAP client signing requirements"
     registry_path: 'HKLM\System\CurrentControlSet\Services\LDAP\LdapClientIntegrity'
     type: REG_DWORD
-    default_expected: 1      # OS default = Negotiate
+    interim_expected: 1      # Negotiate signing
     final_expected: 2        # Require signing
+    os_default: 1            # SOURCED: MS "Network security: LDAP client signing
+                             # requirements" — effective default = Negotiate signing
     operator: gte
   severity: medium
   caveats:
     - "Windows default is already Negotiate (1); Windows SASL binds won't break on DC enforcement unless a GPO overrode the default."
+    - "OS DEFAULT, NOT ENFORCEMENT: unset ⇒ judged against os_default and marked `source: os-default`. A pass at the Negotiate step, not proof a GPO holds it there."
 
 - id: DEVORE-03-LDAP-DIAG-LOGGING     # audit enabler, not a hardening endpoint
   title: Enable LDAP Interface diagnostic logging (find unsigned binds)
