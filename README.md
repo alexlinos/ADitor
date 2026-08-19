@@ -115,6 +115,22 @@ precedence is not resolved — conflicting GPOs are reported as conflicts instea
 Controls whose exact expected value the source does not state are reported but
 never scored or guessed.
 
+`write_hardening_report` — runs the same read-only scan and writes it as a
+single self-contained HTML file: inline CSS, no external assets, no JavaScript,
+opens from a `file://` path, and a browser can print it to PDF. The JSON from
+`scan_hardening` stays the source of truth; the document renders it and adds
+nothing. It is ordered by actionability rather than catalog order — GPO read
+failures and unknown verdicts first (an unreadable GPO makes an unset key
+unknown, not clean), then failures with expected-vs-found evidence, the source
+GPO DN, the catalog's remediation and the rollout order (the interim audit step
+first where a control has one), then conflicts, then findings resting on a
+documented Windows default framed as hardening opportunities rather than as
+something Group Policy enforces, then unscored controls, then passes. Writing the
+file is the only side effect; the directory is not modified. Note that the file
+contains the domain's GPO display names, registry values and DNs. See
+[`examples/hardening-report-sample.html`](examples/hardening-report-sample.html)
+for the layout, rendered from synthetic data.
+
 **Directory management**
 - Users: `list_users`, `get_user`, `get_user_groups`, `create_user`, `modify_user`,
   `delete_user`, `enable_user`, `disable_user`, `reset_user_password`

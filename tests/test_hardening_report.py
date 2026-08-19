@@ -964,3 +964,50 @@ class TestHeadlineCounts:
     def test_missing_counts_become_zero_rather_than_raising(self):
         assert headline_counts({}) == {
             key: 0 for key in headline_counts({})}
+
+
+# --------------------------------------------------------------------------- #
+# Sample generator
+# --------------------------------------------------------------------------- #
+#
+# `examples/hardening-report-sample.html` is committed so the report's design can
+# be reviewed without running anything. It is regenerated from *these* synthetic
+# fixtures and never from a real scan:
+#
+#     python tests/test_hardening_report.py examples/hardening-report-sample.html
+#
+# That constraint is not cosmetic. A rendered report embeds the domain's GPO
+# display names, registry values and DNs, so a sample taken from a live scan
+# would commit exactly the environmental detail this repo keeps out of git.
+
+def sample_scan():
+    """The richest synthetic scan: a read failure, a conflict, and passes."""
+    catalog = load_catalog()
+    read_errors = [{
+        "gpo_dn": gpo_dn(GUID_C),
+        "display_name": "Unreadable Sample GPO",
+        "error": "SMB read failed: STATUS_ACCESS_DENIED",
+    }]
+    return scan_payload([
+        snapshot(GUID_A, HOSTILE_NAME, entries=[template_entry(LM_KEY, 1)],
+                 links=[GpoLink(target_dn=BASE_DN)]),
+        snapshot(GUID_B, "Sample Override GPO",
+                 entries=[
+                     template_entry(LM_KEY, 5),
+                     template_entry(r"MACHINE\System\CurrentControlSet\Services"
+                                    r"\NTDS\Parameters\LDAPServerIntegrity", 2),
+                 ],
+                 links=[GpoLink(target_dn=f"OU=Domain Controllers,{BASE_DN}",
+                                enforced=True)]),
+        snapshot(GUID_C, "Unreadable Sample GPO",
+                 read_error="SMB read failed: STATUS_ACCESS_DENIED"),
+    ], catalog=catalog, read_errors=read_errors)
+
+
+if __name__ == "__main__":  # pragma: no cover - a maintenance utility
+    import sys
+
+    destination = sys.argv[1] if len(sys.argv) > 1 else \
+        "examples/hardening-report-sample.html"
+    written, size = write_report(sample_scan(), destination)
+    print(f"wrote {size} bytes of synthetic sample report to {written}")
