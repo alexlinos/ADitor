@@ -575,8 +575,116 @@ class TestShippedCatalogInvariants:
         assert defaulted, "the catalog should model at least one OS default"
         for control in defaulted:
             assert control.scored, control.id
-            assert _cites_authoritative_source(control.value_source), control.id
+            assert _cites_authoritative_source(control.os_default_source), control.id
             assert any("OS DEFAULT" in caveat for caveat in control.caveats), control.id
+
+
+class TestCitationHonesty:
+    """A ``value_source`` must not assert two things that cannot both be true.
+
+    The WP's whole theme. Three NTLM audit controls claimed both that "the floor
+    comes from Microsoft" and that "Microsoft does not print the numerics" — but
+    asserting ``gte 1`` requires knowing that the off option is numerically ``0``
+    and that every other option sorts above it, which is precisely a numeric.
+    The sentence actually quoted ("Not defined ... is the same as Disable") is
+    about the *unset* case and establishes nothing on its own about a configured
+    ``0``.
+
+    The floor is still the right call. What must be true is that the wording
+    separates what is **cited** from what is **inferred**, and says why the
+    inference is safe to rest a floor on.
+    """
+
+    NTLM_AUDIT_IDS = ("DEVORE-08-NTLM-AUDIT-INCOMING",
+                      "DEVORE-08-NTLM-AUDIT-OUTGOING",
+                      "DEVORE-08-NTLM-AUDIT-INDOMAIN")
+
+    @pytest.fixture
+    def catalog(self):
+        return load_catalog()
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_the_floor_is_not_claimed_to_come_from_microsoft(
+            self, catalog, control_id):
+        """The specific contradiction, pinned so it cannot come back."""
+        value_source = catalog.by_id(control_id).value_source
+
+        assert "The floor comes from Microsoft" not in value_source
+        assert "does not print the numerics" not in value_source
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_cited_and_inferred_are_labelled_separately(
+            self, catalog, control_id):
+        value_source = catalog.by_id(control_id).value_source
+
+        assert "CITED" in value_source
+        assert "INFERRED" in value_source
+        assert "WHY THE INFERENCE IS SAFE" in value_source
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_the_inference_is_named_precisely(self, catalog, control_id):
+        """It must say *which* fact is unsourced: the 0-is-off ordering."""
+        value_source = catalog.by_id(control_id).value_source
+
+        assert "not printed by Microsoft" in value_source
+        assert "stored as the numeric 0" in value_source
+        assert "unset" in value_source
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_the_floor_is_still_asserted(self, catalog, control_id):
+        """Honest wording, not a reverted assertion."""
+        control = catalog.by_id(control_id)
+
+        assert control.operator == "gte"
+        assert control.final_expected == 1
+        assert control.status == "active"
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_the_inference_is_surfaced_in_the_caveats_too(
+            self, catalog, control_id):
+        """The report renders caveats; the inference must not hide in prose."""
+        caveats = catalog.by_id(control_id).caveats
+
+        assert any("INFERRED, NOT CITED" in caveat for caveat in caveats), caveats
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_each_audit_control_says_enforced_does_not_mean_blocked(
+            self, catalog, control_id):
+        """Present on two of the three; INDOMAIN was missing it."""
+        caveats = catalog.by_id(control_id).caveats
+
+        assert any("enforced" in caveat and "not that" in caveat
+                   for caveat in caveats), caveats
+
+    def test_block_outgoing_justifies_being_held_in_the_data(self, catalog):
+        """The same inference, the same value name, a different verdict.
+
+        AUDIT-OUTGOING scores ``gte 1`` on ``RestrictSendingNTLMTraffic`` while
+        BLOCK-OUTGOING is held ``needs_baseline_value`` on that very value name.
+        That is defensible — a floor needs only the zero point and the ordering,
+        an exact target needs the full mapping — but the reasoning has to live in
+        the catalog, not in a reviewer's head.
+        """
+        block = catalog.by_id("DEVORE-08-NTLM-BLOCK-OUTGOING")
+        audit = catalog.by_id("DEVORE-08-NTLM-AUDIT-OUTGOING")
+
+        assert block.status == STATUS_NEEDS_BASELINE_VALUE
+        assert block.registry_key is None
+        assert block.final_expected is None
+        assert "DEVORE-08-NTLM-AUDIT-OUTGOING" in block.baseline_gap
+        assert "floor" in block.baseline_gap
+        assert "exact" in block.baseline_gap
+        # And the audit control points back, so neither side reads alone.
+        assert "DEVORE-08-NTLM-BLOCK-OUTGOING" in audit.value_source
+        assert "never 'blocked'" in audit.value_source
+
+    def test_the_audit_and_block_controls_share_one_value_name(self, catalog):
+        """The fact that makes the distinction load-bearing rather than academic."""
+        audit = catalog.by_id("DEVORE-08-NTLM-AUDIT-OUTGOING")
+        block = catalog.by_id("DEVORE-08-NTLM-BLOCK-OUTGOING")
+
+        assert audit.registry_value_name == "RestrictSendingNTLMTraffic"
+        assert "RestrictSendingNTLMTraffic" in block.baseline_gap
 
     def test_every_control_cites_a_devore_part_and_url(self, catalog):
         for control in catalog.controls:

@@ -533,7 +533,24 @@ that touches the build.
   NTLM **blocking** value names/numbers.
 - **The NTLM numerics trap.** Third-party write-ups routinely conflate the `Audit*`
   and `Restrict*` mappings and will assert that `AuditReceivingNTLMTraffic=2` means
-  "deny all". Microsoft is explicit that the audit policies cannot block traffic at
-  all and that `2` is "Enable auditing for all accounts". Hence: `value_source` cites
-  Microsoft/CIS or the value is not scored, and the audit controls assert only the
-  floor Microsoft does document (off vs not-off) rather than a level it does not.
+  "deny all". It does not: Microsoft is explicit that the audit policies **cannot
+  block traffic at all**, so no value of this setting denies anything. Microsoft does
+  **not** print which numeric is which enabling level, so this document must not name
+  one either — an earlier revision of this paragraph asserted that Microsoft is
+  explicit that `2` is "Enable auditing for all accounts", which is the same numeric
+  conflation the paragraph warns against, one sentence later. Hence: `value_source`
+  cites Microsoft/CIS or the value is not scored, and the audit controls assert only a
+  **floor** (off vs not-off), reporting the exact level as evidence rather than
+  scoring it.
+- **Cited vs. inferred (the NTLM audit floor).** The floor itself is not a quoted
+  numeric — Microsoft prints none. What is **cited** is the option set, that the
+  unset policy behaves as the off option ("Not defined … is the same as Disable"),
+  and that audit policies cannot block. What is **inferred** is that the off option
+  is stored as `0` and every other option is `≥ 1`; the quoted sentence is about the
+  *unset* case and on its own says nothing about a configured `0`. Each control's
+  `value_source` labels the two halves and states why a floor — and only a floor —
+  is safe to rest on that inference. This is also why
+  `DEVORE-08-NTLM-BLOCK-OUTGOING` stays `needs_baseline_value` on the *same*
+  registry value name that `DEVORE-08-NTLM-AUDIT-OUTGOING` scores: a floor needs
+  only the zero point and the ordering, while "Deny all" is one specific numeric out
+  of three that no floor can express (`gte 1` is equally satisfied by "Audit all").
