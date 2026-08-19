@@ -568,11 +568,57 @@ class TestShippedCatalogInvariants:
         assert catalog.by_id("DEVORE-08-PRINT-RPCNAMEDPIPE").missing_result \
             == "not_applicable"
 
-    def test_presence_only_controls_declare_their_rollout_state_and_warn(self, catalog):
-        for control in catalog.scored_controls:
-            if control.operator in PRESENCE_OPERATORS:
-                assert control.presence_rollout_state == "audit", control.id
-                assert any("PRESENCE ONLY" in c for c in control.caveats), control.id
+    def test_no_scored_control_accepts_a_value_that_switches_it_off(self, catalog):
+        """Acceptance 5: a bare ``present`` passes a setting configured to 0.
+
+        The three NTLM audit controls used to do exactly that, so "8 passed"
+        could have included "auditing is disabled". Nothing scored may use a
+        presence operator now; if a genuinely presence-only control ever earns
+        its place, it must explain in ``caveats`` why no floor is needed, and
+        this assertion is the prompt to think about it.
+        """
+        presence_only = [c.id for c in catalog.scored_controls
+                         if c.operator in PRESENCE_OPERATORS]
+
+        assert presence_only == []
+
+    @pytest.mark.parametrize("control_id", [
+        "DEVORE-08-NTLM-AUDIT-INCOMING",
+        "DEVORE-08-NTLM-AUDIT-OUTGOING",
+        "DEVORE-08-NTLM-AUDIT-INDOMAIN",
+    ])
+    def test_the_ntlm_audit_controls_assert_a_sourced_floor(self, catalog,
+                                                            control_id):
+        control = catalog.by_id(control_id)
+
+        assert control.operator == "gte"
+        assert control.final_expected == 1
+        assert control.presence_rollout_state is None
+        assert _cites_authoritative_source(control.value_source)
+        assert any("FLOOR, NOT LEVEL" in caveat for caveat in control.caveats)
+
+    @pytest.mark.parametrize("control_id", [
+        "DEVORE-08-NTLM-BLOCK-INCOMING",
+        "DEVORE-08-NTLM-BLOCK-OUTGOING",
+        "DEVORE-08-NTLM-BLOCK-INDOMAIN",
+    ])
+    def test_the_ntlm_block_controls_stay_unscored_with_no_key(self, catalog,
+                                                               control_id):
+        """Acceptance 6: their numerics are unsourced, so nothing is asserted.
+
+        BLOCK-OUTGOING shares its value name with the outgoing *audit* control,
+        which is now scored on a floor of >= 1. Leaving a registry_key on the
+        unscored blocking control would invite a report to imply the deny level
+        had been checked, so the path stays prose in ``baseline_gap``.
+        """
+        control = catalog.by_id(control_id)
+
+        assert control.status == STATUS_NEEDS_BASELINE_VALUE
+        assert control.scored is False
+        assert control.registry_key is None
+        assert control.final_expected is None
+        assert control.interim_expected is None
+        assert control.baseline_gap
 
     def test_every_control_is_a_check_type_the_evaluator_can_run(self, catalog):
         for control in catalog.scored_controls:

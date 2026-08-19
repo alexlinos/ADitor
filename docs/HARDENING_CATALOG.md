@@ -42,11 +42,11 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 | DEVORE-06-LLMNR-DISABLE | 6 | gpo-registry-pol | ✅ =0 quoted |
 | DEVORE-06-NBTNS-NODETYPE | 6 | gpo-registry-pol | ✅ =2 quoted |
 | DEVORE-07-LEAST-PRIVILEGE | 7 | directory-state | ⚠️ membership/ACL/attr |
-| DEVORE-08-NTLM-AUDIT-INCOMING | 8 | gpo-security-template | ⚠️ path quoted, value not |
-| DEVORE-08-NTLM-AUDIT-OUTGOING | 8 | gpo-security-template | ⚠️ path quoted, value not |
-| DEVORE-08-NTLM-AUDIT-INDOMAIN | 8 | gpo-security-template | ⚠️ path quoted, value not |
+| DEVORE-08-NTLM-AUDIT-INCOMING | 8 | gpo-security-template | ✅ floor >=1 (MS option set) |
+| DEVORE-08-NTLM-AUDIT-OUTGOING | 8 | gpo-security-template | ✅ floor >=1 (MS option set) |
+| DEVORE-08-NTLM-AUDIT-INDOMAIN | 8 | gpo-security-template | ✅ floor >=1 (MS option set) |
 | DEVORE-08-NTLM-BLOCK-INCOMING | 8 | gpo-security-template | ❌ block path not stated |
-| DEVORE-08-NTLM-BLOCK-OUTGOING | 8 | gpo-security-template | ✅ shares outgoing value |
+| DEVORE-08-NTLM-BLOCK-OUTGOING | 8 | gpo-security-template | ❌ deny numeric not stated |
 | DEVORE-08-NTLM-BLOCK-INDOMAIN | 8 | gpo-security-template | ❌ block path not stated |
 | DEVORE-08-PRINT-RPCNAMEDPIPE | 8 | gpo-registry-pol | ✅ 0x2 quoted |
 | DEVORE-08-PROTECTED-USERS | 8 | directory-state | ⚠️ group membership |
@@ -379,10 +379,16 @@ that touches the build.
     friendly_policy: "Network security: Restrict NTLM: Audit Incoming NTLM Traffic"
     registry_path: 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0\AuditReceivingNTLMTraffic'
     type: REG_DWORD
-    expected: "Enable auditing for domain accounts (numeric not stated; baseline = 1)"
-    operator: present
+    final_expected: 1        # FLOOR: >=1 = some auditing enabled; 0 = Disable
+    operator: gte
+    value_source: MS "Network security: Restrict NTLM: Audit incoming NTLM traffic"
+                  — options Disable / domain accounts / all accounts; "Not defined ...
+                  is the same as Disable, and it results in no auditing"
   severity: medium
-  caveats: ["Path quoted; numeric value not. Generates 8002/8003 in Microsoft/Windows/NTLM/Operational."]
+  caveats:
+    - "FLOOR, NOT LEVEL: numerics are not printed by MS, so domain-vs-all-accounts is evidence, not a verdict."
+    - "TRAP: blogs conflate Audit*/Restrict* mappings. This audit policy 'doesn't actually block any traffic' (MS). Blocking = BLOCK-INCOMING (unscored)."
+    - "Generates 8002/8003 in Microsoft/Windows/NTLM/Operational."
 
 - id: DEVORE-08-NTLM-AUDIT-OUTGOING
   title: Audit outgoing NTLM traffic to remote servers
@@ -393,10 +399,15 @@ that touches the build.
     friendly_policy: "Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers"
     registry_path: 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0\RestrictSendingNTLMTraffic'
     type: REG_DWORD
-    expected: "Audit all (audit=1). SAME value governs blocking (Deny all=2)."
-    operator: present
+    final_expected: 1        # FLOOR: >=1 = at least audited; Allow-all zero state fails
+    operator: gte
+    value_source: MS "Network security: Restrict NTLM: Outgoing NTLM traffic to remote
+                  servers" — options Allow all / Audit all / Deny all; "Not defined ...
+                  is the same as Allow all"
   severity: medium
-  caveats: ["One value name for both audit and block."]
+  caveats:
+    - "One value name for both audit and block: a pass here means 'at least audited', NOT blocked."
+    - "The deny numeric is unsourced, so BLOCK-OUTGOING stays unscored with registry_key null."
 
 - id: DEVORE-08-NTLM-AUDIT-INDOMAIN
   title: Audit NTLM authentication in this domain (DCs)
@@ -407,10 +418,14 @@ that touches the build.
     friendly_policy: "Network security: Restrict NTLM: Audit NTLM authentication in this domain"
     registry_path: 'HKLM\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters\AuditNTLMInDomain'
     type: REG_DWORD
-    expected: "Enable all (numeric not stated)"
-    operator: present
+    final_expected: 1        # FLOOR: >=1 = some auditing enabled; 0 = Disable
+    operator: gte
+    value_source: MS "Network security: Restrict NTLM: Audit NTLM authentication in this
+                  domain" — options Disable + four Enable scopes; Disable "won't log events"
   severity: medium
-  caveats: ["Path quoted; numeric not. Generates 8004/8005/8006."]
+  caveats:
+    - "FLOOR, NOT LEVEL: five options, numerics not printed by MS; which Enable scope is set is evidence."
+    - "Audit only — MS: 'doesn't actually block any traffic'. Generates 8004/8005/8006."
 
 - id: DEVORE-08-NTLM-BLOCK-INCOMING
   title: Block incoming NTLM traffic (final phase)
@@ -435,9 +450,11 @@ that touches the build.
   check_type: gpo-security-template
   assert:
     friendly_policy: "Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers"
-    registry_path: 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0\RestrictSendingNTLMTraffic'
+    registry_path: "NOT ASSERTED"   # value name known (MSV1_0\RestrictSendingNTLMTraffic,
+                                    # shared with the outgoing audit control) but the
+                                    # 'Deny all' numeric is unsourced -> registry_key null
     type: REG_DWORD
-    expected: "Deny all (audit=1 / deny=2; same value as the outgoing audit control)"
+    expected: null                  # status: needs_baseline_value
     operator: present
   severity: high
   caveats: ["Same value name as the outgoing audit control — audit vs deny is a value change."]
@@ -499,6 +516,17 @@ that touches the build.
 - **Values quoted vs. not:** explicit in-post — LmCompatibilityLevel (0–5),
   LDAPServerIntegrity (1/2), LdapClientIntegrity (0/1/2), `16 LDAP Interface Events`=2,
   DefaultDomainSupportedEncTypes=0x38, EnableMulticast=0, NodeType=2, the three NTLM
-  audit paths, RpcNamedPipeAuthentication=0x2. Not stated (need baseline source):
-  SMB RequireSecuritySignature, Kerberos client SupportedEncryptionTypes, channel-binding
-  0/1/2 numerics, NTLM blocking value names/numbers.
+  audit paths, RpcNamedPipeAuthentication=0x2. Closed from Microsoft documentation
+  (P2-WP2): SMB `RequireSecuritySignature` (both keys, 0/1) from *Overview of Server
+  Message Block signing in Windows*; the NTLM audit **floor** (>=1, because "Not
+  defined ... is the same as Disable") from the three *Restrict NTLM* policy
+  references; the `LdapClientIntegrity` OS default (Negotiate = 1) from *Network
+  security: LDAP client signing requirements*. Still not stated (need a baseline
+  source): Kerberos client SupportedEncryptionTypes, channel-binding 0/1/2 numerics,
+  NTLM **blocking** value names/numbers.
+- **The NTLM numerics trap.** Third-party write-ups routinely conflate the `Audit*`
+  and `Restrict*` mappings and will assert that `AuditReceivingNTLMTraffic=2` means
+  "deny all". Microsoft is explicit that the audit policies cannot block traffic at
+  all and that `2` is "Enable auditing for all accounts". Hence: `value_source` cites
+  Microsoft/CIS or the value is not scored, and the audit controls assert only the
+  floor Microsoft does document (off vs not-off) rather than a level it does not.
