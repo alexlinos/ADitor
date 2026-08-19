@@ -472,8 +472,6 @@ class TestShippedCatalogInvariants:
 
     @pytest.mark.parametrize("control_id", [
         "DEVORE-04-KERB-CONFIGURE-ENCTYPES",
-        "DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
-        "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS",
         "DEVORE-08-NTLM-BLOCK-INCOMING",
         "DEVORE-08-NTLM-BLOCK-OUTGOING",
         "DEVORE-08-NTLM-BLOCK-INDOMAIN",
@@ -490,13 +488,36 @@ class TestShippedCatalogInvariants:
         assert control.final_expected is None
         assert control.baseline_gap
 
-    def test_the_smb_signing_gap_records_the_hint_without_asserting_it(self, catalog):
-        """The commonly cited path stays prose, never an assertion."""
-        control = catalog.by_id("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS")
+    @pytest.mark.parametrize("control_id,service", [
+        ("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS", "LanManWorkstation"),
+        ("DEVORE-06-SMB-SERVER-SIGNING-ALWAYS", "LanManServer"),
+    ])
+    def test_the_smb_controls_are_active_on_the_sourced_value(
+            self, catalog, control_id, service):
+        """Acceptance 4: promoted on a Microsoft document, not on a hint."""
+        control = catalog.by_id(control_id)
 
-        assert control.registry_key is None
-        assert "RequireSecuritySignature" in control.baseline_gap
-        assert "UNVERIFIED" in control.baseline_gap
+        assert control.status == STATUS_ACTIVE
+        assert control.baseline_gap is None
+        assert control.operator == "equals"
+        assert control.final_expected == 1
+        assert control.registry_value_name == "RequireSecuritySignature"
+        assert service.lower() in control.registry_key.lower()
+        assert _cites_authoritative_source(control.value_source)
+        assert "smb-signing-overview" in control.value_source
+
+    @pytest.mark.parametrize("control_id", [
+        "DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
+        "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS",
+    ])
+    def test_the_smb_controls_reject_the_legacy_weaker_setting(
+            self, catalog, control_id):
+        """EnableSecuritySignature ('if ... agrees') must not satisfy these."""
+        control = catalog.by_id(control_id)
+
+        assert "EnableSecuritySignature" not in control.registry_key
+        assert any("EnableSecuritySignature" in caveat and "SMBv1" in caveat
+                   for caveat in control.caveats), control.caveats
 
     def test_the_ldap_client_default_is_recorded_and_cited(self, catalog):
         """Acceptance 2/3: the one OS default a Microsoft document states."""

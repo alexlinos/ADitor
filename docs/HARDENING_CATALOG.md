@@ -31,14 +31,14 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 | DEVORE-01-NTLM-LMCOMPATIBILITYLEVEL | 1 | gpo-security-template | ✅ 0–5 quoted |
 | DEVORE-02-SMBV1-REMOVAL | 2 | directory-state | ⚠️ feature state, no reg |
 | DEVORE-03-LDAP-SERVER-SIGNING | 3 | gpo-security-template | ✅ 1/2 quoted |
-| DEVORE-03-LDAP-CLIENT-SIGNING | 3 | gpo-security-template | ✅ 0/1/2 quoted |
+| DEVORE-03-LDAP-CLIENT-SIGNING | 3 | gpo-security-template | ✅ 0/1/2 quoted; os_default 1 |
 | DEVORE-03-LDAP-DIAG-LOGGING | 3 | gpo-registry-pol | ✅ =2 (audit helper) |
 | DEVORE-04-KERB-CONFIGURE-ENCTYPES | 4 | gpo-security-template | ❌ reg path not stated |
 | DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES | 4 | gpo-registry-pol | ✅ 0x38 quoted |
 | DEVORE-04-MSDS-SUPPORTEDENCTYPES | 4 | directory-state | ⚠️ per-account attribute |
 | DEVORE-05-LDAP-CHANNEL-BINDING | 5 | gpo-security-template | ⚠️ path quoted, 0/1/2 not |
-| DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS | 6 | gpo-security-template | ❌ reg path not stated |
-| DEVORE-06-SMB-SERVER-SIGNING-ALWAYS | 6 | gpo-security-template | ❌ reg path not stated |
+| DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS | 6 | gpo-security-template | ✅ =1 (MS smb-signing-overview) |
+| DEVORE-06-SMB-SERVER-SIGNING-ALWAYS | 6 | gpo-security-template | ✅ =1 (MS smb-signing-overview) |
 | DEVORE-06-LLMNR-DISABLE | 6 | gpo-registry-pol | ✅ =0 quoted |
 | DEVORE-06-NBTNS-NODETYPE | 6 | gpo-registry-pol | ✅ =2 quoted |
 | DEVORE-07-LEAST-PRIVILEGE | 7 | directory-state | ⚠️ membership/ACL/attr |
@@ -291,14 +291,17 @@ that touches the build.
   check_type: gpo-security-template
   assert:
     friendly_policy: "Microsoft network client: Digitally sign communications (always)"
-    registry_path: "NOT STATED IN POST"   # baseline: LanmanWorkstation\Parameters\RequireSecuritySignature=1
+    registry_path: 'HKLM\System\CurrentControlSet\Services\LanManWorkstation\Parameters\RequireSecuritySignature'
     type: REG_DWORD
-    expected: 1
+    final_expected: 1
     operator: equals
+    value_source: MS "Overview of Server Message Block signing in Windows"
+                  (smb-signing-overview) — key, value name, REG_DWORD, 0=disable/1=enable
   severity: high
   caveats:
-    - "REGISTRY PATH NOT GIVEN (defers to linked articles). '(always)' applies to ALL SMB versions and terminates sessions if the peer can't sign."
-    - "Win11 24H2 & Server 2025 require SMB signing by default."
+    - "NOT THE LEGACY SETTING: EnableSecuritySignature ('if server agrees') is SMBv1-only, ignored by SMB2+, and does NOT satisfy this control."
+    - "'(always)' applies to ALL SMB versions and terminates sessions if the peer can't sign."
+    - "Win11 24H2 & Server 2025 require SMB signing by default, so no single os_default is asserted (version-dependent)."
 
 - id: DEVORE-06-SMB-SERVER-SIGNING-ALWAYS
   title: SMB server require signing (always)
@@ -307,12 +310,17 @@ that touches the build.
   check_type: gpo-security-template
   assert:
     friendly_policy: "Microsoft network server: Digitally sign communications (always)"
-    registry_path: "NOT STATED IN POST"   # baseline: LanmanServer\Parameters\RequireSecuritySignature=1
+    registry_path: 'HKLM\System\CurrentControlSet\Services\LanManServer\Parameters\RequireSecuritySignature'
     type: REG_DWORD
-    expected: 1
+    final_expected: 1
     operator: equals
+    value_source: MS "Overview of Server Message Block signing in Windows"
+                  (smb-signing-overview) — key, value name, REG_DWORD, 0=disable/1=enable
   severity: high
-  caveats: ["Post: 'Don't just require SMB signing on domain controllers' — endpoints/member servers too. 3rd-party appliances & MFPs are the usual unsigned culprits."]
+  caveats:
+    - "NOT THE LEGACY SETTING: EnableSecuritySignature ('if client agrees') is SMBv1-only, ignored by SMB2+, and does NOT satisfy this control."
+    - "Post: 'Don't just require SMB signing on domain controllers' — endpoints/member servers too. 3rd-party appliances & MFPs are the usual unsigned culprits."
+    - "No os_default: MS gives DC effective default = Enabled but member/client = Disabled, so the default is role-dependent."
 
 - id: DEVORE-06-LLMNR-DISABLE
   title: Turn off LLMNR (multicast name resolution)
