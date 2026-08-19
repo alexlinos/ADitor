@@ -207,6 +207,62 @@ class TestScanHardening:
             assert found["links"][0]["target_dn"] == DC_OU
             assert found["links"][0]["enforced"] is False
 
+    def test_an_os_default_verdict_travels_through_the_tool_labelled(
+            self, tools, mock_ldap_manager):
+        """No GPO sets LdapClientIntegrity: pass on the default, marked as such."""
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Example DC LDAP Signing")],
+                  [link_entry(DC_OU, GUID_SIGNING)])
+
+        response = run_scan(
+            tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)},
+            control_ids=["DEVORE-03-LDAP-CLIENT-SIGNING"])
+
+        finding = response["findings"][0]
+        assert finding["result"] == "pass"
+        assert finding["rollout_state"] == "audit"
+        assert finding["evidence"]["source"] == "os-default"
+        assert finding["evidence"]["os_default"]["value"] == 1
+        assert finding["evidence"]["found"] == []
+        assert response["counts"]["os_default"] == 1
+
+    def test_smb_signing_gpos_are_scored_end_to_end(self, tools,
+                                                    mock_ldap_manager):
+        """Previously unscored; the keys are spelled as GPOs spell them."""
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Example Client SMB Signing"),
+                   gpo_entry(GUID_OVERRIDE, "Example Server SMB Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING, GUID_OVERRIDE)])
+
+        response = run_scan(tools, {
+            GUID_SIGNING: sysvol_contents(
+                "MACHINE\\System\\CurrentControlSet\\Services"
+                "\\LanmanWorkstation\\Parameters\\RequireSecuritySignature=4,1"),
+            GUID_OVERRIDE: sysvol_contents(
+                "MACHINE\\System\\CurrentControlSet\\Services"
+                "\\LanManServer\\Parameters\\RequireSecuritySignature=4,1"),
+        }, control_ids=["DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
+                        "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS"])
+
+        assert response["counts"]["pass"] == 2
+        assert response["counts"]["needs_baseline_value"] == 0
+        assert response["unscored_control_ids"] == []
+
+    def test_ntlm_auditing_configured_off_reports_fail_through_the_tool(
+            self, tools, mock_ldap_manager):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "NTLM Auditing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+
+        response = run_scan(tools, {GUID_SIGNING: sysvol_contents(
+            "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
+            "\\AuditReceivingNTLMTraffic=4,0")},
+            control_ids=["DEVORE-08-NTLM-AUDIT-INCOMING"])
+
+        finding = response["findings"][0]
+        assert finding["result"] == "fail"
+        assert finding["evidence"]["found"][0]["value"] == 0
+        assert response["counts"]["fail"] == 1
+
     def test_the_provenance_header_is_audit_grade(self, tools, mock_ldap_manager):
         wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
 
@@ -446,3 +502,23 @@ class TestSchemaInfo:
         assert info["unscored_control_ids"]
         assert any("Precedence is not resolved" in note for note in info["notes"])
         assert any("needs_baseline_value" in note for note in info["notes"])
+
+    def test_schema_info_explains_what_an_os_default_verdict_means(self, tools):
+        info = tools.get_schema_info()
+
+        assert info["evidence_sources"] == ["gpo", "os-default",
+                                            "not-configured", "unknown"]
+        assert any("not evidence that Group Policy enforces" in note
+                   for note in info["notes"])
+
+    def test_schema_info_advertises_the_unknown_evidence_source(self, tools):
+        """Every ``evidence.source`` a finding can carry must be advertised.
+
+        ``unknown`` is what an unevaluated control and an unreadable-GPO error
+        both report, and a consumer that has not been told about it would have to
+        guess.
+        """
+        info = tools.get_schema_info()
+
+        assert "unknown" in info["evidence_sources"]
+        assert any("could not be read" in note for note in info["notes"])

@@ -31,22 +31,22 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 | DEVORE-01-NTLM-LMCOMPATIBILITYLEVEL | 1 | gpo-security-template | ✅ 0–5 quoted |
 | DEVORE-02-SMBV1-REMOVAL | 2 | directory-state | ⚠️ feature state, no reg |
 | DEVORE-03-LDAP-SERVER-SIGNING | 3 | gpo-security-template | ✅ 1/2 quoted |
-| DEVORE-03-LDAP-CLIENT-SIGNING | 3 | gpo-security-template | ✅ 0/1/2 quoted |
+| DEVORE-03-LDAP-CLIENT-SIGNING | 3 | gpo-security-template | ✅ 0/1/2 quoted; os_default 1 |
 | DEVORE-03-LDAP-DIAG-LOGGING | 3 | gpo-registry-pol | ✅ =2 (audit helper) |
 | DEVORE-04-KERB-CONFIGURE-ENCTYPES | 4 | gpo-security-template | ❌ reg path not stated |
 | DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES | 4 | gpo-registry-pol | ✅ 0x38 quoted |
 | DEVORE-04-MSDS-SUPPORTEDENCTYPES | 4 | directory-state | ⚠️ per-account attribute |
-| DEVORE-05-LDAP-CHANNEL-BINDING | 5 | gpo-security-template | ⚠️ path quoted, 0/1/2 not |
-| DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS | 6 | gpo-security-template | ❌ reg path not stated |
-| DEVORE-06-SMB-SERVER-SIGNING-ALWAYS | 6 | gpo-security-template | ❌ reg path not stated |
+| DEVORE-05-LDAP-CHANNEL-BINDING | 5 | gpo-security-template | ✅ path quoted; 0/1/2 from MS KB4034879 |
+| DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS | 6 | gpo-security-template | ✅ =1 (MS smb-signing-overview) |
+| DEVORE-06-SMB-SERVER-SIGNING-ALWAYS | 6 | gpo-security-template | ✅ =1 (MS smb-signing-overview) |
 | DEVORE-06-LLMNR-DISABLE | 6 | gpo-registry-pol | ✅ =0 quoted |
 | DEVORE-06-NBTNS-NODETYPE | 6 | gpo-registry-pol | ✅ =2 quoted |
 | DEVORE-07-LEAST-PRIVILEGE | 7 | directory-state | ⚠️ membership/ACL/attr |
-| DEVORE-08-NTLM-AUDIT-INCOMING | 8 | gpo-security-template | ⚠️ path quoted, value not |
-| DEVORE-08-NTLM-AUDIT-OUTGOING | 8 | gpo-security-template | ⚠️ path quoted, value not |
-| DEVORE-08-NTLM-AUDIT-INDOMAIN | 8 | gpo-security-template | ⚠️ path quoted, value not |
+| DEVORE-08-NTLM-AUDIT-INCOMING | 8 | gpo-security-template | ✅ floor >=1 (MS option set) |
+| DEVORE-08-NTLM-AUDIT-OUTGOING | 8 | gpo-security-template | ✅ floor >=1 (MS option set) |
+| DEVORE-08-NTLM-AUDIT-INDOMAIN | 8 | gpo-security-template | ✅ floor >=1 (MS option set) |
 | DEVORE-08-NTLM-BLOCK-INCOMING | 8 | gpo-security-template | ❌ block path not stated |
-| DEVORE-08-NTLM-BLOCK-OUTGOING | 8 | gpo-security-template | ✅ shares outgoing value |
+| DEVORE-08-NTLM-BLOCK-OUTGOING | 8 | gpo-security-template | ❌ deny numeric not stated |
 | DEVORE-08-NTLM-BLOCK-INDOMAIN | 8 | gpo-security-template | ❌ block path not stated |
 | DEVORE-08-PRINT-RPCNAMEDPIPE | 8 | gpo-registry-pol | ✅ 0x2 quoted |
 | DEVORE-08-PROTECTED-USERS | 8 | directory-state | ⚠️ group membership |
@@ -58,8 +58,11 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 1. **The posts are not a complete value source.** Devore frequently names only the
    friendly policy and defers to linked Microsoft articles — so SMB `RequireSecuritySignature`,
    the Kerberos client `SupportedEncryptionTypes`, the LDAP channel-binding 0/1/2
-   mapping, and most NTLM *blocking* values are **not printed**. To make checks
-   deterministic you need a **secondary authoritative source for exact values** —
+   mapping, and most NTLM *blocking* values are **not printed in the posts**. Three of
+   those were closed from Microsoft documentation in P2-WP2 (SMB signing, the
+   channel-binding numerics, the NTLM audit floor); the Kerberos client value and the
+   NTLM blocking numerics are still open. To make checks deterministic you need a
+   **secondary authoritative source for exact values** —
    the Microsoft Security Baselines (Security Compliance Toolkit) and/or CIS
    Benchmarks. Plan the catalog to cite two sources per control: Devore (the *why*
    / rollout) + baseline (the *exact value*).
@@ -77,7 +80,17 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
    **rollout state** (Not started / Audit / Enforced) per control, not a bare
    pass/fail, or it will read as failing an org that is correctly mid-rollout.
 
-4. **Least Privilege (Part 7) is a mini-product of its own** — group membership
+4. **An unset key is not automatically a failure.** Some settings have a
+   documented Windows default that is already partly compliant —
+   `LdapClientIntegrity` is Negotiate (1) on a machine no GPO has touched. Those
+   controls carry `os_default` (populated **only** where a Microsoft document
+   states the default) and are judged against it when no GPO sets the key, with
+   the evidence marked `source: os-default` so an assumed value never reads as
+   GPO-enforced. Where there is no default to cite, the field stays absent:
+   `LdapEnforceChannelBinding` has no key by default, which is exactly why
+   setting it matters.
+
+5. **Least Privilege (Part 7) is a mini-product of its own** — group membership
    that should be empty, URA-vs-baseline diff, delegation ACLs, `TrustedForDelegation`
    queries, Protected Users. Scope it as its own control group, not one check.
 
@@ -100,6 +113,29 @@ time). HTML/JSON for reuse; **PDF is the primary hand-off format.**
   enforcement / group membership) next to the **expected** value — plus the
   **source GPO DN and link path** (which GPO delivered it, enforced/blocked). An
   auditor must see *what was checked and what was found*, not just a verdict.
+- `evidence.source`: `gpo | os-default | not-configured | unknown` — what the
+  verdict rests on. `os-default` means no GPO sets the key and the control was
+  judged against a Microsoft-documented Windows default, with the value and its
+  citation in `evidence.os_default`. **The report must render that distinctly:** an
+  os-default pass is a hardening *opportunity* ("at the OS default, not raised"),
+  never a claim that Group Policy enforces the value — and its `rollout_state` is
+  capped at `audit`, because nothing enforces a default. `unknown` means the scan
+  did not establish the setting's state: either the control is not evaluated at all,
+  or GPOs could not be read. **`not-configured` is never used for a scan that
+  failed** — "we could not look" is not the same claim as "nothing sets it".
+- **Unreadable GPOs.** If any GPO's content could not be read, a control with a
+  documented `os_default` reports `error`, not a pass: an unread GPO could set the
+  key below the default, so "no GPO sets this key" is unproven and the default
+  cannot be assumed effective. This holds for a partial read as much as a total
+  one.
+- **Counting `os_default`.** `counts.os_default` is the number of findings whose
+  verdict rests on a documented default. It is **not** a number to subtract from
+  `pass`: an os-default finding can also be `fail` (a default below the floor),
+  `not_applicable` (a conditional control) or `error` (unreadable GPOs). Use
+  `counts.os_default_pass` — the subset that returned `pass` — to get "passes a GPO
+  actually configures". Every count describes what was **evaluated**, not what was
+  rendered; `counts.rendered` and `counts.hidden` reconcile the totals with the
+  length of the findings list when `include_not_applicable` is false.
 
 **Provenance header (required for auditability):** tool version; **baseline
 version** (Devore series rev + Microsoft/CIS baseline rev the exact values came
@@ -189,12 +225,15 @@ that touches the build.
     friendly_policy: "Network security: LDAP client signing requirements"
     registry_path: 'HKLM\System\CurrentControlSet\Services\LDAP\LdapClientIntegrity'
     type: REG_DWORD
-    default_expected: 1      # OS default = Negotiate
+    interim_expected: 1      # Negotiate signing
     final_expected: 2        # Require signing
+    os_default: 1            # SOURCED: MS "Network security: LDAP client signing
+                             # requirements" — effective default = Negotiate signing
     operator: gte
   severity: medium
   caveats:
     - "Windows default is already Negotiate (1); Windows SASL binds won't break on DC enforcement unless a GPO overrode the default."
+    - "OS DEFAULT, NOT ENFORCEMENT: unset ⇒ judged against os_default and marked `source: os-default`. A pass at the Negotiate step, not proof a GPO holds it there."
 
 - id: DEVORE-03-LDAP-DIAG-LOGGING     # audit enabler, not a hardening endpoint
   title: Enable LDAP Interface diagnostic logging (find unsigned binds)
@@ -266,7 +305,7 @@ that touches the build.
     operator: equals
   severity: high
   caveats:
-    - "NUMERIC 0/1/2 NOT in post (names only: Never/When supported/Always); mapping is the well-known KB4034879 one — confirm via baseline."
+    - "NUMERIC 0/1/2 not in the post (names only: Never/When supported/Always); the mapping is sourced from Microsoft KB4034879, which is what makes this control scorable — reconfirm against a Security Baseline / CIS Benchmark."
     - "Key absent by default => OFF. Only affects SASL binds over TLS. TLS-bridging LBs break CBT; VIP FQDN must be in DC cert SAN."
     - "AUDIT-FIRST: Server 2019+ logs 3075; 2016- only logs 3039 on rejection. Needs '16 LDAP Interface Events' >= 2."
 
@@ -278,14 +317,17 @@ that touches the build.
   check_type: gpo-security-template
   assert:
     friendly_policy: "Microsoft network client: Digitally sign communications (always)"
-    registry_path: "NOT STATED IN POST"   # baseline: LanmanWorkstation\Parameters\RequireSecuritySignature=1
+    registry_path: 'HKLM\System\CurrentControlSet\Services\LanManWorkstation\Parameters\RequireSecuritySignature'
     type: REG_DWORD
-    expected: 1
+    final_expected: 1
     operator: equals
+    value_source: MS "Overview of Server Message Block signing in Windows"
+                  (smb-signing-overview) — key, value name, REG_DWORD, 0=disable/1=enable
   severity: high
   caveats:
-    - "REGISTRY PATH NOT GIVEN (defers to linked articles). '(always)' applies to ALL SMB versions and terminates sessions if the peer can't sign."
-    - "Win11 24H2 & Server 2025 require SMB signing by default."
+    - "NOT THE LEGACY SETTING: EnableSecuritySignature ('if server agrees') is SMBv1-only, ignored by SMB2+, and does NOT satisfy this control."
+    - "'(always)' applies to ALL SMB versions and terminates sessions if the peer can't sign."
+    - "Win11 24H2 & Server 2025 require SMB signing by default, so no single os_default is asserted (version-dependent)."
 
 - id: DEVORE-06-SMB-SERVER-SIGNING-ALWAYS
   title: SMB server require signing (always)
@@ -294,12 +336,17 @@ that touches the build.
   check_type: gpo-security-template
   assert:
     friendly_policy: "Microsoft network server: Digitally sign communications (always)"
-    registry_path: "NOT STATED IN POST"   # baseline: LanmanServer\Parameters\RequireSecuritySignature=1
+    registry_path: 'HKLM\System\CurrentControlSet\Services\LanManServer\Parameters\RequireSecuritySignature'
     type: REG_DWORD
-    expected: 1
+    final_expected: 1
     operator: equals
+    value_source: MS "Overview of Server Message Block signing in Windows"
+                  (smb-signing-overview) — key, value name, REG_DWORD, 0=disable/1=enable
   severity: high
-  caveats: ["Post: 'Don't just require SMB signing on domain controllers' — endpoints/member servers too. 3rd-party appliances & MFPs are the usual unsigned culprits."]
+  caveats:
+    - "NOT THE LEGACY SETTING: EnableSecuritySignature ('if client agrees') is SMBv1-only, ignored by SMB2+, and does NOT satisfy this control."
+    - "Post: 'Don't just require SMB signing on domain controllers' — endpoints/member servers too. 3rd-party appliances & MFPs are the usual unsigned culprits."
+    - "No os_default: MS gives DC effective default = Enabled but member/client = Disabled, so the default is role-dependent."
 
 - id: DEVORE-06-LLMNR-DISABLE
   title: Turn off LLMNR (multicast name resolution)
@@ -358,10 +405,16 @@ that touches the build.
     friendly_policy: "Network security: Restrict NTLM: Audit Incoming NTLM Traffic"
     registry_path: 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0\AuditReceivingNTLMTraffic'
     type: REG_DWORD
-    expected: "Enable auditing for domain accounts (numeric not stated; baseline = 1)"
-    operator: present
+    final_expected: 1        # FLOOR: >=1 = some auditing enabled; 0 = Disable
+    operator: gte
+    value_source: MS "Network security: Restrict NTLM: Audit incoming NTLM traffic"
+                  — options Disable / domain accounts / all accounts; "Not defined ...
+                  is the same as Disable, and it results in no auditing"
   severity: medium
-  caveats: ["Path quoted; numeric value not. Generates 8002/8003 in Microsoft/Windows/NTLM/Operational."]
+  caveats:
+    - "FLOOR, NOT LEVEL: numerics are not printed by MS, so domain-vs-all-accounts is evidence, not a verdict."
+    - "TRAP: blogs conflate Audit*/Restrict* mappings. This audit policy 'doesn't actually block any traffic' (MS). Blocking = BLOCK-INCOMING (unscored)."
+    - "Generates 8002/8003 in Microsoft/Windows/NTLM/Operational."
 
 - id: DEVORE-08-NTLM-AUDIT-OUTGOING
   title: Audit outgoing NTLM traffic to remote servers
@@ -372,10 +425,15 @@ that touches the build.
     friendly_policy: "Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers"
     registry_path: 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0\RestrictSendingNTLMTraffic'
     type: REG_DWORD
-    expected: "Audit all (audit=1). SAME value governs blocking (Deny all=2)."
-    operator: present
+    final_expected: 1        # FLOOR: >=1 = at least audited; Allow-all zero state fails
+    operator: gte
+    value_source: MS "Network security: Restrict NTLM: Outgoing NTLM traffic to remote
+                  servers" — options Allow all / Audit all / Deny all; "Not defined ...
+                  is the same as Allow all"
   severity: medium
-  caveats: ["One value name for both audit and block."]
+  caveats:
+    - "One value name for both audit and block: a pass here means 'at least audited', NOT blocked."
+    - "The deny numeric is unsourced, so BLOCK-OUTGOING stays unscored with registry_key null."
 
 - id: DEVORE-08-NTLM-AUDIT-INDOMAIN
   title: Audit NTLM authentication in this domain (DCs)
@@ -386,10 +444,14 @@ that touches the build.
     friendly_policy: "Network security: Restrict NTLM: Audit NTLM authentication in this domain"
     registry_path: 'HKLM\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters\AuditNTLMInDomain'
     type: REG_DWORD
-    expected: "Enable all (numeric not stated)"
-    operator: present
+    final_expected: 1        # FLOOR: >=1 = some auditing enabled; 0 = Disable
+    operator: gte
+    value_source: MS "Network security: Restrict NTLM: Audit NTLM authentication in this
+                  domain" — options Disable + four Enable scopes; Disable "won't log events"
   severity: medium
-  caveats: ["Path quoted; numeric not. Generates 8004/8005/8006."]
+  caveats:
+    - "FLOOR, NOT LEVEL: five options, numerics not printed by MS; which Enable scope is set is evidence."
+    - "Audit only — MS: 'doesn't actually block any traffic'. Generates 8004/8005/8006."
 
 - id: DEVORE-08-NTLM-BLOCK-INCOMING
   title: Block incoming NTLM traffic (final phase)
@@ -414,9 +476,11 @@ that touches the build.
   check_type: gpo-security-template
   assert:
     friendly_policy: "Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers"
-    registry_path: 'HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0\RestrictSendingNTLMTraffic'
+    registry_path: "NOT ASSERTED"   # value name known (MSV1_0\RestrictSendingNTLMTraffic,
+                                    # shared with the outgoing audit control) but the
+                                    # 'Deny all' numeric is unsourced -> registry_key null
     type: REG_DWORD
-    expected: "Deny all (audit=1 / deny=2; same value as the outgoing audit control)"
+    expected: null                  # status: needs_baseline_value
     operator: present
   severity: high
   caveats: ["Same value name as the outgoing audit control — audit vs deny is a value change."]
@@ -478,6 +542,39 @@ that touches the build.
 - **Values quoted vs. not:** explicit in-post — LmCompatibilityLevel (0–5),
   LDAPServerIntegrity (1/2), LdapClientIntegrity (0/1/2), `16 LDAP Interface Events`=2,
   DefaultDomainSupportedEncTypes=0x38, EnableMulticast=0, NodeType=2, the three NTLM
-  audit paths, RpcNamedPipeAuthentication=0x2. Not stated (need baseline source):
-  SMB RequireSecuritySignature, Kerberos client SupportedEncryptionTypes, channel-binding
-  0/1/2 numerics, NTLM blocking value names/numbers.
+  audit paths, RpcNamedPipeAuthentication=0x2. Closed from Microsoft documentation
+  (P2-WP2): SMB `RequireSecuritySignature` (both keys, 0/1) from *Overview of Server
+  Message Block signing in Windows*; the NTLM audit **floor** (>=1 — see the
+  cited-vs-inferred bullet below; the floor rests on an inference, not a quoted
+  numeric) from the three *Restrict NTLM* policy references; the
+  `LdapClientIntegrity` OS default (Negotiate = 1) from *Network security: LDAP
+  client signing requirements*; the `LdapEnforceChannelBinding` 0/1/2 mapping
+  (Never / When supported / Always) from Microsoft **KB4034879**, which
+  `DEVORE-05-LDAP-CHANNEL-BINDING` is `status: active` and scores on — the Devore
+  post names the settings but not the numbers, and the control's caveats say the
+  mapping should be reconfirmed against a Security Baseline or CIS Benchmark. Still
+  not stated (need a baseline source): Kerberos client SupportedEncryptionTypes, NTLM
+  **blocking** value names/numbers.
+- **The NTLM numerics trap.** Third-party write-ups routinely conflate the `Audit*`
+  and `Restrict*` mappings and will assert that `AuditReceivingNTLMTraffic=2` means
+  "deny all". It does not: Microsoft is explicit that the audit policies **cannot
+  block traffic at all**, so no value of this setting denies anything. Microsoft does
+  **not** print which numeric is which enabling level, so this document must not name
+  one either — an earlier revision of this paragraph asserted that Microsoft is
+  explicit that `2` is "Enable auditing for all accounts", which is the same numeric
+  conflation the paragraph warns against, one sentence later. Hence: `value_source`
+  cites Microsoft/CIS or the value is not scored, and the audit controls assert only a
+  **floor** (off vs not-off), reporting the exact level as evidence rather than
+  scoring it.
+- **Cited vs. inferred (the NTLM audit floor).** The floor itself is not a quoted
+  numeric — Microsoft prints none. What is **cited** is the option set, that the
+  unset policy behaves as the off option ("Not defined … is the same as Disable"),
+  and that audit policies cannot block. What is **inferred** is that the off option
+  is stored as `0` and every other option is `≥ 1`; the quoted sentence is about the
+  *unset* case and on its own says nothing about a configured `0`. Each control's
+  `value_source` labels the two halves and states why a floor — and only a floor —
+  is safe to rest on that inference. This is also why
+  `DEVORE-08-NTLM-BLOCK-OUTGOING` stays `needs_baseline_value` on the *same*
+  registry value name that `DEVORE-08-NTLM-AUDIT-OUTGOING` scores: a floor needs
+  only the zero point and the ordering, while "Deny all" is one specific numeric out
+  of three that no floor can express (`gte 1` is equally satisfied by "Audit all").
