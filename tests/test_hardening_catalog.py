@@ -70,6 +70,19 @@ def a_catalog(*controls, **overrides):
     return {k: v for k, v in document.items() if v is not _OMIT}
 
 
+# Hosts whose documents may be cited for an *exact value*. The Devore series is
+# Microsoft-published but is a blog: it supplies the rationale and the rollout
+# order, never a number the catalog scores on. That is the dual-sourcing rule
+# the catalog was designed around, and the reason a search result claiming
+# "AuditReceivingNTLMTraffic=2 means deny all" can never reach a verdict.
+_AUTHORITATIVE_VALUE_HOSTS = ("learn.microsoft.com", "docs.microsoft.com",
+                              "support.microsoft.com", "cisecurity.org")
+
+
+def _cites_authoritative_source(value_source):
+    return any(host in (value_source or "") for host in _AUTHORITATIVE_VALUE_HOSTS)
+
+
 class TestLoaderAcceptsValidCatalogs:
 
     def test_minimal_catalog_builds(self):
@@ -484,6 +497,29 @@ class TestShippedCatalogInvariants:
         assert control.registry_key is None
         assert "RequireSecuritySignature" in control.baseline_gap
         assert "UNVERIFIED" in control.baseline_gap
+
+    def test_the_ldap_client_default_is_recorded_and_cited(self, catalog):
+        """Acceptance 2/3: the one OS default a Microsoft document states."""
+        control = catalog.by_id("DEVORE-03-LDAP-CLIENT-SIGNING")
+
+        assert control.os_default == 1
+        assert control.interim_expected == 1
+        assert control.final_expected == 2
+        assert "learn.microsoft.com" in control.value_source
+
+    def test_channel_binding_has_no_invented_default(self, catalog):
+        """It has no key by default — inventing one would hide a real gap."""
+        assert catalog.by_id("DEVORE-05-LDAP-CHANNEL-BINDING").os_default is None
+
+    def test_every_os_default_cites_a_microsoft_or_cis_document(self, catalog):
+        """A default that cannot be cited is a guess that reads as compliance."""
+        defaulted = [c for c in catalog.controls if c.os_default is not None]
+
+        assert defaulted, "the catalog should model at least one OS default"
+        for control in defaulted:
+            assert control.scored, control.id
+            assert _cites_authoritative_source(control.value_source), control.id
+            assert any("OS DEFAULT" in caveat for caveat in control.caveats), control.id
 
     def test_every_control_cites_a_devore_part_and_url(self, catalog):
         for control in catalog.controls:
