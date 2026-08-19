@@ -551,6 +551,21 @@ class TestNormalizeRegistryKey:
     def test_empty_and_non_string_input_returns_empty_string(self, empty):
         assert normalize_registry_key(empty) == ""
 
+    def test_default_hive_fills_in_for_a_hiveless_registry_pol_key(self):
+        """PReg keys carry no hive; the machine file is implicitly HKLM."""
+        pol_key = r"Software\Policies\Microsoft\Windows NT\DNSClient\EnableMulticast"
+
+        assert (normalize_registry_key(pol_key, "HKLM")
+                == normalize_registry_key(r"HKLM\Software\Policies\Microsoft"
+                                          r"\Windows NT\DNSClient\EnableMulticast"))
+
+    def test_default_hive_does_not_override_a_hive_that_is_present(self):
+        assert normalize_registry_key(r"MACHINE\Software\Test", "HKCU") == \
+            r"HKLM\SOFTWARE\TEST"
+
+    def test_without_a_default_hive_a_hiveless_key_is_left_hiveless(self):
+        assert normalize_registry_key(r"Software\Test") == r"SOFTWARE\TEST"
+
 
 def applocker_entry(collection, rule_id, xml):
     """A parsed machine-registry entry holding one AppLocker rule."""
