@@ -143,18 +143,14 @@ version** (Devore series rev + Microsoft/CIS baseline rev the exact values came
 from); scan timestamp; forest/domain + connection name; operator. A report that
 can't state "against which baseline, when, which forest" is not audit-grade.
 
-**PDF rendering — note the packaging interaction.** The renderer choice is
-constrained by the PyInstaller bundling (see brief §Packaging):
-- **WeasyPrint** (HTML/CSS → PDF, no browser): cleanest output, but its native
-  deps (Pango/Cairo/GDK-PixBuf) are notoriously fiddly to bundle in PyInstaller.
-- **Headless Chromium** (Playwright): most faithful, heaviest footprint.
-- **ReportLab** (programmatic, no HTML): trivial to bundle, but you hand-build
-  layout instead of reusing the HTML.
-- **pywebview print-to-PDF:** the desktop app already has a webview; the OS
-  print-to-PDF path can render the same HTML with no extra dependency.
-  Likely the pragmatic default for the packaged app.
-Decide this alongside packaging, not after — it is the one report requirement
-that touches the build.
+**PDF: decided against, background retained.** PDF is not built (see the pipeline
+note above). If it is ever revisited, the constraint is the PyInstaller bundling:
+WeasyPrint gives the cleanest output but its native deps (Pango/Cairo/GDK-PixBuf)
+are painful to bundle; headless Chromium is the most faithful and the heaviest;
+ReportLab bundles trivially but abandons the HTML; and the packaged desktop app's
+own webview can print-to-PDF with no extra dependency, which would be the
+pragmatic route. Until then, a browser printing the HTML covers the rare case —
+**do not build a PDF renderer as part of the report WP.**
 
 ---
 
