@@ -18,6 +18,9 @@ import struct
 import pytest
 
 from aditor.gpo.parsers import (
+    REGISTRY_XML_ACTIONS,
+    REGISTRY_XML_DRIFT_CORRECTING_ACTIONS,
+    REGISTRY_XML_WRITE_ACTIONS,
     applocker_rule_digest,
     decode_gpo_status,
     decode_version,
@@ -27,6 +30,7 @@ from aditor.gpo.parsers import (
     parse_gp_link,
     parse_ini,
     parse_registry_pol,
+    parse_registry_xml,
     parse_security_template_registry_values,
     summarize_applocker,
     summarize_gpo_contents,
@@ -499,6 +503,425 @@ class TestParseSecurityTemplateRegistryValues:
 
         assert {e["key"].rsplit("\\", 1)[1]: e["value"] for e in entries} == {
             "LdapEnforceChannelBinding": 2, "LDAPServerIntegrity": 2}
+
+
+class TestParseRegistryXml:
+    """parse_registry_xml on Group Policy Preferences Registry.xml shapes.
+
+    **Fixture hygiene.** Every document below is hand-written from the format's
+    documented shape — nothing here was copied out of a real domain's
+    ``Registry.xml``. The item names used (``DefaultDomainSupportedEncTypes``,
+    ``Start``, ``EnableCertPaddingCheck``) are Microsoft-documented registry
+    value names, not domain content: no GPO GUID, uid, ``changed`` timestamp,
+    domain name, DC hostname or SID appears anywhere in this class.
+
+    The class's centrepiece is
+    ``test_a_dword_value_is_hexadecimal_not_decimal``. Registry.xml stores
+    DWORD/QWORD data as a **hex** string, so ``value="00000038"`` is 0x38 = 56.
+    Reading it as decimal 38 (= 0x26) does not merely mis-report the number: for
+    ``DefaultDomainSupportedEncTypes`` it inverts the setting's meaning, turning
+    "RC4 and DES disabled" into "RC4 and DES enabled".
+    """
+
+    KDC_KEY = r"SYSTEM\CurrentControlSet\Services\Kdc"
+
+    @staticmethod
+    def item(properties, *, item_attrs="", children=""):
+        """One ``<Registry>`` item with the given ``<Properties>`` attributes."""
+        return (f'<Registry clsid="{{9CD4B2F4-0000-0000-0000-000000000001}}" '
+                f'name="Item" image="7"{item_attrs}>'
+                f'<Properties {properties}/>{children}</Registry>')
+
+    @classmethod
+    def document(cls, *items):
+        """A complete Registry.xml as bytes, UTF-8 with the XML declaration."""
+        body = "".join(items)
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<RegistrySettings clsid="{A3CCFC41-0000-0000-0000-000000000002}">'
+            f'{body}</RegistrySettings>'
+        ).encode("utf-8")
+
+    @classmethod
+    def kdc_document(cls, value="00000038", **extra):
+        """The live-observed shape: one REG_DWORD preference under Kdc."""
+        attrs = " ".join(f'{name}="{text}"' for name, text in extra.items())
+        return cls.document(cls.item(
+            f'action="U" displayDecimal="0" default="0" '
+            f'hive="HKEY_LOCAL_MACHINE" key="{cls.KDC_KEY}" '
+            f'name="DefaultDomainSupportedEncTypes" type="REG_DWORD" '
+            f'value="{value}" {attrs}'))
+
+    # --- the hex/decimal trap ---------------------------------------------
+
+    def test_a_dword_value_is_hexadecimal_not_decimal(self):
+        """``value="00000038"`` is 0x38 = 56. Decimal 38 would be 0x26.
+
+        0x38 = AES128 | AES256 | the "future types" bit, with the RC4 and DES
+        bits clear. 0x26 has the RC4 bit *set* — so parsing this field as decimal
+        reports the exact opposite of what the operator configured, and fails a
+        control on a domain that is correctly hardened.
+        """
+        entries = parse_registry_xml(self.kdc_document())
+
+        assert entries[0]["value"] == 56
+        assert entries[0]["value"] != 38, (
+            "0x38 parsed as decimal 38 is 0x26, which re-enables RC4 and DES")
+
+    def test_a_qword_value_is_hexadecimal_too(self):
+        entries = parse_registry_xml(self.document(self.item(
+            'hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" name="Big" '
+            'type="REG_QWORD" value="0000000100000038"')))
+
+        assert entries[0]["value"] == 0x100000038
+        assert entries[0]["value"] != 100000038
+        assert entries[0]["type"] == REG_QWORD
+
+    @pytest.mark.parametrize("written,expected", [
+        ("00000038", 56), ("38", 56), ("0x38", 56), ("0X0038", 56),
+        ("00000001", 1), ("00000004", 4), ("0000000f", 15), ("FFFFFFFF", 0xFFFFFFFF),
+        ("00000000", 0),
+    ])
+    def test_dword_hex_spellings(self, written, expected):
+        entries = parse_registry_xml(self.kdc_document(value=written))
+
+        assert entries[0]["value"] == expected
+
+    @pytest.mark.parametrize("display_decimal", ["0", "1"])
+    def test_displaydecimal_is_a_ui_hint_and_never_changes_the_parse(
+            self, display_decimal):
+        """GPMC's decimal/hex radio button changes the display, not the file."""
+        entries = parse_registry_xml(self.document(self.item(
+            f'action="U" displayDecimal="{display_decimal}" '
+            f'hive="HKEY_LOCAL_MACHINE" key="{self.KDC_KEY}" '
+            f'name="DefaultDomainSupportedEncTypes" type="REG_DWORD" '
+            f'value="00000038"')))
+
+        assert entries[0]["value"] == 56
+
+    def test_an_empty_dword_value_is_none_not_zero(self):
+        entries = parse_registry_xml(self.kdc_document(value=""))
+
+        assert entries[0]["value"] is None
+
+    def test_a_dword_value_that_is_not_hex_is_kept_as_the_literal_string(self):
+        """Kept as evidence rather than dropped: the evaluator reports it."""
+        entries = parse_registry_xml(self.kdc_document(value="not-a-number"))
+
+        assert entries[0]["value"] == "not-a-number"
+
+    # --- the live-observed case, end to end -------------------------------
+
+    def test_the_live_observed_kdc_item_parses_completely(self):
+        entries = parse_registry_xml(self.kdc_document())
+
+        assert entries == [{
+            "hive": "HKEY_LOCAL_MACHINE",
+            "key": self.KDC_KEY,
+            "value_name": "DefaultDomainSupportedEncTypes",
+            "type": REG_DWORD,
+            "type_name": "REG_DWORD",
+            "value": 56,
+            "action": "U",
+            "order": 1,
+            "has_filters": False,
+            "disabled": False,
+        }]
+
+    def test_the_full_hive_name_folds_onto_hklm_for_comparison(self):
+        """HKEY_LOCAL_MACHINE must compare equal to the catalog's HKLM."""
+        entry = parse_registry_xml(self.kdc_document())[0]
+        full_key = "\\".join([entry["hive"], entry["key"], entry["value_name"]])
+
+        assert normalize_registry_key(full_key) == normalize_registry_key(
+            r"HKLM\System\CurrentControlSet\services\KDC"
+            r"\DefaultDomainSupportedEncTypes")
+
+    # --- string and list types --------------------------------------------
+
+    def test_a_reg_sz_value_stays_the_literal_string(self):
+        """``value="1"`` on a REG_SZ is the string "1", not the number 1."""
+        entries = parse_registry_xml(self.document(self.item(
+            'action="U" hive="HKEY_LOCAL_MACHINE" '
+            'key="SOFTWARE\\Microsoft\\Cryptography\\Wintrust\\Config" '
+            'name="EnableCertPaddingCheck" type="REG_SZ" value="1"')))
+
+        assert entries[0]["value"] == "1"
+        assert isinstance(entries[0]["value"], str)
+        assert entries[0]["type"] == REG_SZ
+
+    def test_a_reg_expand_sz_value_is_not_expanded(self):
+        entries = parse_registry_xml(self.document(self.item(
+            'hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" name="Path" '
+            'type="REG_EXPAND_SZ" value="%SystemRoot%\\System32"')))
+
+        assert entries[0]["value"] == r"%SystemRoot%\System32"
+
+    def test_a_reg_binary_value_stays_the_literal_hex_string(self):
+        """Binary data is not a number and must not be decoded as one."""
+        entries = parse_registry_xml(self.document(self.item(
+            'hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" name="Blob" '
+            'type="REG_BINARY" value="00ff10"')))
+
+        assert entries[0]["value"] == "00ff10"
+        assert entries[0]["type"] == REG_BINARY
+
+    def test_a_reg_multi_sz_value_collects_its_value_children(self):
+        entries = parse_registry_xml(self.document(
+            '<Registry name="Item"><Properties hive="HKEY_LOCAL_MACHINE" '
+            'key="SOFTWARE\\Test" name="List" type="REG_MULTI_SZ">'
+            '<Values><Value>alpha</Value><Value>beta</Value></Values>'
+            '</Properties></Registry>'))
+
+        assert entries[0]["value"] == ["alpha", "beta"]
+        assert entries[0]["type"] == REG_MULTI_SZ
+
+    def test_an_unknown_type_name_keeps_the_name_and_has_no_code(self):
+        entries = parse_registry_xml(self.document(self.item(
+            'hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" name="Odd" '
+            'type="REG_SOMETHING_NEW" value="x"')))
+
+        assert entries[0]["type"] is None
+        assert entries[0]["type_name"] == "REG_SOMETHING_NEW"
+        assert entries[0]["value"] == "x"
+
+    # --- action semantics -------------------------------------------------
+
+    @pytest.mark.parametrize("written,expected", [
+        ("C", "C"), ("R", "R"), ("U", "U"), ("D", "D"),
+        ("c", "C"), ("d", "D"), (" U ", "U"),
+    ])
+    def test_the_action_attribute_is_normalised_to_upper_case(self, written,
+                                                              expected):
+        entries = parse_registry_xml(self.document(self.item(
+            f'action="{written}" hive="HKEY_LOCAL_MACHINE" '
+            f'key="SOFTWARE\\Test" name="Flag" type="REG_DWORD" '
+            f'value="00000001"')))
+
+        assert entries[0]["action"] == expected
+
+    def test_a_missing_action_attribute_means_update(self):
+        """MS-GPPREF defaults the optional ``action`` attribute to Update."""
+        entries = parse_registry_xml(self.document(self.item(
+            'hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" name="Flag" '
+            'type="REG_DWORD" value="00000001"')))
+
+        assert entries[0]["action"] == "U"
+
+    def test_a_delete_item_is_returned_and_labelled_delete(self):
+        """The parser reports it; the evaluator is what must not count it.
+
+        A ``D`` item removes the value, so a caller that treats it as
+        configuring the value would report hardening that the GPO is actively
+        undoing. The parser's job is to say plainly which action it is.
+        """
+        entries = parse_registry_xml(self.document(self.item(
+            f'action="D" hive="HKEY_LOCAL_MACHINE" key="{self.KDC_KEY}" '
+            f'name="DefaultDomainSupportedEncTypes" type="REG_DWORD" '
+            f'value="00000038"')))
+
+        assert entries[0]["action"] == "D"
+        assert entries[0]["action"] not in REGISTRY_XML_WRITE_ACTIONS
+
+    def test_create_is_a_write_but_not_drift_correcting(self):
+        entries = parse_registry_xml(self.document(self.item(
+            'action="C" hive="HKEY_LOCAL_MACHINE" '
+            'key="SYSTEM\\CurrentControlSet\\Services\\WinHttpAutoProxySvc" '
+            'name="Start" type="REG_DWORD" value="00000004"')))
+
+        assert entries[0]["value"] == 4
+        assert entries[0]["action"] in REGISTRY_XML_WRITE_ACTIONS
+        assert entries[0]["action"] not in REGISTRY_XML_DRIFT_CORRECTING_ACTIONS
+
+    @pytest.mark.parametrize("action", ["R", "U"])
+    def test_replace_and_update_correct_drift(self, action):
+        entries = parse_registry_xml(self.document(self.item(
+            f'action="{action}" hive="HKEY_LOCAL_MACHINE" '
+            f'key="SOFTWARE\\Test" name="Flag" type="REG_DWORD" '
+            f'value="00000001"')))
+
+        assert entries[0]["action"] in REGISTRY_XML_DRIFT_CORRECTING_ACTIONS
+
+    def test_an_unrecognised_action_is_passed_through_not_guessed_at(self):
+        entries = parse_registry_xml(self.document(self.item(
+            'action="Z" hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" '
+            'name="Flag" type="REG_DWORD" value="00000001"')))
+
+        assert entries[0]["action"] == "Z"
+        assert entries[0]["action"] not in REGISTRY_XML_ACTIONS
+
+    # --- bare key-creation items ------------------------------------------
+
+    def test_a_bare_key_creation_item_is_skipped(self):
+        """Creating a key configures no value, so it must not become one."""
+        entries = parse_registry_xml(self.document(self.item(
+            'action="C" default="0" hive="HKEY_LOCAL_MACHINE" '
+            'key="SOFTWARE\\Microsoft\\Cryptography\\Wintrust\\Config"')))
+
+        assert entries == []
+
+    def test_a_bare_key_item_with_empty_name_and_type_is_skipped(self):
+        entries = parse_registry_xml(self.document(self.item(
+            'action="C" hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" '
+            'name="" type="" value=""')))
+
+        assert entries == []
+
+    def test_bare_key_items_are_skipped_around_the_real_value(self):
+        """The observed CVE-2013-3900 shape: key creations plus two values."""
+        entries = parse_registry_xml(self.document(
+            self.item('action="C" hive="HKEY_LOCAL_MACHINE" '
+                      'key="SOFTWARE\\Microsoft\\Cryptography\\Wintrust"'),
+            self.item('action="C" hive="HKEY_LOCAL_MACHINE" '
+                      'key="SOFTWARE\\Microsoft\\Cryptography\\Wintrust\\Config"'),
+            self.item('action="U" hive="HKEY_LOCAL_MACHINE" '
+                      'key="SOFTWARE\\Microsoft\\Cryptography\\Wintrust\\Config" '
+                      'name="EnableCertPaddingCheck" type="REG_SZ" value="1"'),
+            self.item('action="U" hive="HKEY_LOCAL_MACHINE" '
+                      'key="SOFTWARE\\WOW6432Node\\Microsoft\\Cryptography'
+                      '\\Wintrust\\Config" '
+                      'name="EnableCertPaddingCheck" type="REG_SZ" value="1"'),
+        ))
+
+        assert [entry["value_name"] for entry in entries] == [
+            "EnableCertPaddingCheck", "EnableCertPaddingCheck"]
+        assert [entry["order"] for entry in entries] == [1, 2], \
+            "order counts emitted values, so skipped key items leave no gaps"
+        assert "WOW6432Node" in entries[1]["key"]
+
+    def test_an_item_with_a_name_but_no_type_is_still_reported(self):
+        """Half-written is not the same as absent — report it, type unknown."""
+        entries = parse_registry_xml(self.document(self.item(
+            'action="U" hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" '
+            'name="Flag" value="00000001"')))
+
+        assert entries[0]["value_name"] == "Flag"
+        assert entries[0]["type"] is None
+        assert entries[0]["value"] == "00000001", \
+            "with no declared type the data cannot be assumed to be hex"
+
+    def test_a_registry_item_with_no_properties_child_is_skipped(self):
+        entries = parse_registry_xml(self.document(
+            '<Registry name="Item" clsid="{9CD4B2F4-0000-0000-0000-0000}"/>'))
+
+        assert entries == []
+
+    # --- nesting ----------------------------------------------------------
+
+    def test_items_inside_a_collection_are_found(self):
+        entries = parse_registry_xml(self.document(
+            '<Collection clsid="{53B533F5-0000-0000-0000-000000000003}" '
+            'name="Wintrust">'
+            + self.item('hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" '
+                        'name="Inner" type="REG_DWORD" value="00000010"')
+            + '</Collection>'))
+
+        assert [entry["value_name"] for entry in entries] == ["Inner"]
+        assert entries[0]["value"] == 16
+
+    def test_items_nested_several_collections_deep_are_found(self):
+        inner = self.item('hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" '
+                          'name="Deep" type="REG_DWORD" value="00000038"')
+        nested = inner
+        for level in range(4):
+            nested = f'<Collection name="Level{level}">{nested}</Collection>'
+
+        entries = parse_registry_xml(self.document(nested))
+
+        assert [entry["value_name"] for entry in entries] == ["Deep"]
+        assert entries[0]["value"] == 56
+
+    def test_order_follows_document_order_across_collections(self):
+        entries = parse_registry_xml(self.document(
+            self.item('hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" '
+                      'name="First" type="REG_DWORD" value="00000001"'),
+            '<Collection name="Group">'
+            + self.item('hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" '
+                        'name="Second" type="REG_DWORD" value="00000002"')
+            + '</Collection>',
+            self.item('hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" '
+                      'name="Third" type="REG_DWORD" value="00000003"'),
+        ))
+
+        assert [(entry["value_name"], entry["order"]) for entry in entries] == [
+            ("First", 1), ("Second", 2), ("Third", 3)]
+
+    def test_a_namespaced_document_still_parses(self):
+        entries = parse_registry_xml(
+            b'<RegistrySettings xmlns="http://example.invalid/gpp">'
+            b'<Registry><Properties hive="HKEY_LOCAL_MACHINE" '
+            b'key="SOFTWARE\\Test" name="Flag" type="REG_DWORD" '
+            b'value="00000038"/></Registry></RegistrySettings>')
+
+        assert [entry["value"] for entry in entries] == [56]
+
+    # --- item-level targeting and disabled items --------------------------
+
+    def test_a_filtered_item_is_flagged_as_carrying_targeting(self):
+        entries = parse_registry_xml(self.document(self.item(
+            'hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" name="Flag" '
+            'type="REG_DWORD" value="00000038"',
+            children='<Filters><FilterGroup bool="AND" not="0" '
+                     'name="Placeholder Group"/></Filters>')))
+
+        assert entries[0]["has_filters"] is True
+
+    def test_an_empty_filters_element_is_not_targeting(self):
+        entries = parse_registry_xml(self.document(self.item(
+            'hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" name="Flag" '
+            'type="REG_DWORD" value="00000038"',
+            children='<Filters/>')))
+
+        assert entries[0]["has_filters"] is False
+
+    def test_an_item_with_no_filters_element_is_not_targeting(self):
+        entries = parse_registry_xml(self.kdc_document())
+
+        assert entries[0]["has_filters"] is False
+
+    @pytest.mark.parametrize("written,expected", [
+        ('1', True), ('true', True), ('TRUE', True), ('yes', True),
+        ('0', False), ('false', False), ('', False),
+    ])
+    def test_the_disabled_attribute_is_read(self, written, expected):
+        entries = parse_registry_xml(self.document(self.item(
+            'hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" name="Flag" '
+            'type="REG_DWORD" value="00000038"',
+            item_attrs=f' disabled="{written}"')))
+
+        assert entries[0]["disabled"] is expected
+
+    def test_an_item_without_a_disabled_attribute_is_enabled(self):
+        assert parse_registry_xml(self.kdc_document())[0]["disabled"] is False
+
+    # --- malformed input --------------------------------------------------
+
+    @pytest.mark.parametrize("bad", [
+        b"<RegistrySettings><Registry>",                 # truncated
+        b"not xml at all",
+        b"<RegistrySettings>&nope;</RegistrySettings>",  # bad entity
+        b"\x00\x01\x02\x03",
+        b"<?xml version='1.0' encoding='not-a-codec'?><RegistrySettings/>",
+    ])
+    def test_malformed_xml_returns_an_empty_list_and_never_raises(self, bad):
+        assert parse_registry_xml(bad) == []
+
+    @pytest.mark.parametrize("empty", [None, b"", "", 0, [], {}])
+    def test_empty_and_falsy_input_returns_an_empty_list(self, empty):
+        assert parse_registry_xml(empty) == []
+
+    def test_a_non_bytes_non_string_object_returns_an_empty_list(self):
+        assert parse_registry_xml(object()) == []
+
+    def test_a_document_with_no_registry_items_returns_an_empty_list(self):
+        assert parse_registry_xml(self.document()) == []
+
+    def test_text_input_is_accepted_as_well_as_bytes(self):
+        assert parse_registry_xml(
+            '<RegistrySettings><Registry><Properties '
+            'hive="HKEY_LOCAL_MACHINE" key="SOFTWARE\\Test" name="Flag" '
+            'type="REG_DWORD" value="00000038"/></Registry>'
+            '</RegistrySettings>')[0]["value"] == 56
 
 
 class TestNormalizeRegistryKey:
