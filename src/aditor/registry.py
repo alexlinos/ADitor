@@ -328,6 +328,37 @@ reported but not scored — never guessed.
 Pass control_ids to scan a subset; include_not_applicable to see controls that
 did not apply."""
 
+WRITE_HARDENING_REPORT_DESC = """Run the hardening scan and write it as a self-contained HTML report.
+
+Runs the same read-only scan as scan_hardening and renders it to a single .html
+file: inline CSS, no external assets, no CDN, no JavaScript. It opens from a
+file:// path, survives being emailed or attached to a ticket, and a browser can
+print it to PDF. The JSON from scan_hardening remains the source of truth; the
+document renders it and adds nothing to it.
+
+The report is ordered by actionability, not catalog order:
+1. GPO read failures and 'unknown' verdicts first — an unreadable GPO makes an
+   unset key unknown rather than clean, so this leads the document
+2. Failures, each with expected vs every value found, the source GPO DN and link
+   path, severity, the catalog's remediation, and the rollout order (the interim
+   audit step first where the control has one — jumping straight to enforcement
+   causes lockouts)
+3. Conflicts, with both GPO names and values and the reminder that precedence is
+   unresolved and must be confirmed with gpresult / RSoP
+4. Findings resting on a documented Windows default, as hardening opportunities —
+   never as something Group Policy enforces
+5. Controls with no sourced baseline value, marked not judged, never as passes
+6. Passes last, compact, evidence retained
+
+Writing the file is this tool's only side effect; the directory is not modified.
+Parent directories are created as needed, the path must end in .html, and an
+existing file is overwritten only if it is a previous ADitor report. The written
+file contains this domain's GPO display names, registry values and DNs, so treat
+it as containing directory content when sharing it.
+
+Returns the written path, the byte count, the provenance header and the headline
+counts. Pass control_ids to report on a subset of the catalog."""
+
 TEST_CONNECTION_DESC = """Test the LDAP connection and return server information.
 
 Validates Active Directory connectivity and reports server status."""
@@ -952,6 +983,35 @@ TOOLS: List[ToolSpec] = [
         },
         lambda t, a: t.hardening.scan_hardening(
             a.get("control_ids"), a.get("include_not_applicable", False),
+        ),
+    ),
+    ToolSpec(
+        "write_hardening_report",
+        WRITE_HARDENING_REPORT_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "output_path": {
+                    "type": "string",
+                    "description": "Where to write the .html report. '~' is "
+                                   "expanded; a relative path resolves against "
+                                   "the server's working directory. Missing "
+                                   "parent directories are created. An existing "
+                                   "file is overwritten only if it is a previous "
+                                   "ADitor report.",
+                },
+                "control_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Report on only these control ids (e.g. "
+                                   "DEVORE-03-LDAP-SERVER-SIGNING). Omit for the "
+                                   "whole catalog.",
+                },
+            },
+            "required": ["output_path"],
+        },
+        lambda t, a: t.hardening.write_hardening_report(
+            a.get("output_path"), a.get("control_ids"),
         ),
     ),
     # ----- System -----
