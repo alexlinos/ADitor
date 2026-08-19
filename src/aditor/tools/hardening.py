@@ -257,6 +257,7 @@ class HardeningTools(BaseTool):
             "check_types": ["gpo-security-template", "gpo-registry-pol"],
             "results": ["pass", "fail", "not_applicable", "error"],
             "rollout_states": ["not_started", "audit", "enforced"],
+            "evidence_sources": ["gpo", "os-default", "not-configured"],
             "notes": [
                 "Reads GPO settings from SYSVOL over SMB; needs the optional "
                 "'smbprotocol' package and SYSVOL read access.",
@@ -264,6 +265,11 @@ class HardeningTools(BaseTool):
                 "Controls flagged needs_baseline_value are reported but not "
                 "scored: their exact expected value is not stated by the source "
                 "and is never guessed.",
+                "evidence.source says what a verdict rests on. 'os-default' means "
+                "no GPO sets the key and the control was judged against a "
+                "Microsoft-documented Windows default — a pass there is not "
+                "evidence that Group Policy enforces the value. counts.os_default "
+                "reports how many findings are in that position.",
             ],
             **catalog_info,
         }
