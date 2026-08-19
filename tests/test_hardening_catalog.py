@@ -678,6 +678,23 @@ class TestCitationHonesty:
         assert "DEVORE-08-NTLM-BLOCK-OUTGOING" in audit.value_source
         assert "never 'blocked'" in audit.value_source
 
+    def test_channel_binding_is_scored_on_a_named_microsoft_source(self, catalog):
+        """The doc used to call these numerics unsourced while the control scored.
+
+        ``HARDENING_CATALOG.md`` listed the LDAP channel-binding 0/1/2 mapping as
+        "not stated (need a baseline source)" in two places while
+        ``DEVORE-05-LDAP-CHANNEL-BINDING`` was ``status: active`` and scoring on
+        it. The doc now names KB4034879 as the source, which is only honest if the
+        control actually cites it.
+        """
+        control = catalog.by_id("DEVORE-05-LDAP-CHANNEL-BINDING")
+
+        assert control.status == "active"
+        assert control.interim_expected == 1
+        assert control.final_expected == 2
+        assert "KB4034879" in control.value_source
+        assert any("KB4034879" in caveat for caveat in control.caveats)
+
     def test_the_audit_and_block_controls_share_one_value_name(self, catalog):
         """The fact that makes the distinction load-bearing rather than academic."""
         audit = catalog.by_id("DEVORE-08-NTLM-AUDIT-OUTGOING")

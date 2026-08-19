@@ -36,7 +36,7 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 | DEVORE-04-KERB-CONFIGURE-ENCTYPES | 4 | gpo-security-template | ❌ reg path not stated |
 | DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES | 4 | gpo-registry-pol | ✅ 0x38 quoted |
 | DEVORE-04-MSDS-SUPPORTEDENCTYPES | 4 | directory-state | ⚠️ per-account attribute |
-| DEVORE-05-LDAP-CHANNEL-BINDING | 5 | gpo-security-template | ⚠️ path quoted, 0/1/2 not |
+| DEVORE-05-LDAP-CHANNEL-BINDING | 5 | gpo-security-template | ✅ path quoted; 0/1/2 from MS KB4034879 |
 | DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS | 6 | gpo-security-template | ✅ =1 (MS smb-signing-overview) |
 | DEVORE-06-SMB-SERVER-SIGNING-ALWAYS | 6 | gpo-security-template | ✅ =1 (MS smb-signing-overview) |
 | DEVORE-06-LLMNR-DISABLE | 6 | gpo-registry-pol | ✅ =0 quoted |
@@ -58,8 +58,11 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 1. **The posts are not a complete value source.** Devore frequently names only the
    friendly policy and defers to linked Microsoft articles — so SMB `RequireSecuritySignature`,
    the Kerberos client `SupportedEncryptionTypes`, the LDAP channel-binding 0/1/2
-   mapping, and most NTLM *blocking* values are **not printed**. To make checks
-   deterministic you need a **secondary authoritative source for exact values** —
+   mapping, and most NTLM *blocking* values are **not printed in the posts**. Three of
+   those were closed from Microsoft documentation in P2-WP2 (SMB signing, the
+   channel-binding numerics, the NTLM audit floor); the Kerberos client value and the
+   NTLM blocking numerics are still open. To make checks deterministic you need a
+   **secondary authoritative source for exact values** —
    the Microsoft Security Baselines (Security Compliance Toolkit) and/or CIS
    Benchmarks. Plan the catalog to cite two sources per control: Devore (the *why*
    / rollout) + baseline (the *exact value*).
@@ -286,7 +289,7 @@ that touches the build.
     operator: equals
   severity: high
   caveats:
-    - "NUMERIC 0/1/2 NOT in post (names only: Never/When supported/Always); mapping is the well-known KB4034879 one — confirm via baseline."
+    - "NUMERIC 0/1/2 not in the post (names only: Never/When supported/Always); the mapping is sourced from Microsoft KB4034879, which is what makes this control scorable — reconfirm against a Security Baseline / CIS Benchmark."
     - "Key absent by default => OFF. Only affects SASL binds over TLS. TLS-bridging LBs break CBT; VIP FQDN must be in DC cert SAN."
     - "AUDIT-FIRST: Server 2019+ logs 3075; 2016- only logs 3039 on rejection. Needs '16 LDAP Interface Events' >= 2."
 
@@ -525,12 +528,17 @@ that touches the build.
   DefaultDomainSupportedEncTypes=0x38, EnableMulticast=0, NodeType=2, the three NTLM
   audit paths, RpcNamedPipeAuthentication=0x2. Closed from Microsoft documentation
   (P2-WP2): SMB `RequireSecuritySignature` (both keys, 0/1) from *Overview of Server
-  Message Block signing in Windows*; the NTLM audit **floor** (>=1, because "Not
-  defined ... is the same as Disable") from the three *Restrict NTLM* policy
-  references; the `LdapClientIntegrity` OS default (Negotiate = 1) from *Network
-  security: LDAP client signing requirements*. Still not stated (need a baseline
-  source): Kerberos client SupportedEncryptionTypes, channel-binding 0/1/2 numerics,
-  NTLM **blocking** value names/numbers.
+  Message Block signing in Windows*; the NTLM audit **floor** (>=1 — see the
+  cited-vs-inferred bullet below; the floor rests on an inference, not a quoted
+  numeric) from the three *Restrict NTLM* policy references; the
+  `LdapClientIntegrity` OS default (Negotiate = 1) from *Network security: LDAP
+  client signing requirements*; the `LdapEnforceChannelBinding` 0/1/2 mapping
+  (Never / When supported / Always) from Microsoft **KB4034879**, which
+  `DEVORE-05-LDAP-CHANNEL-BINDING` is `status: active` and scores on — the Devore
+  post names the settings but not the numbers, and the control's caveats say the
+  mapping should be reconfirmed against a Security Baseline or CIS Benchmark. Still
+  not stated (need a baseline source): Kerberos client SupportedEncryptionTypes, NTLM
+  **blocking** value names/numbers.
 - **The NTLM numerics trap.** Third-party write-ups routinely conflate the `Audit*`
   and `Restrict*` mappings and will assert that `AuditReceivingNTLMTraffic=2` means
   "deny all". It does not: Microsoft is explicit that the audit policies **cannot
