@@ -881,6 +881,128 @@ class TestLdapClientSigningOnTheShippedCatalog:
         assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
 
 
+class TestSmbSigningOnTheShippedCatalog:
+    """The SMB controls, now active, against the shapes a real GPO writes.
+
+    Both were unscored while domains were configuring SMB signing all along, so
+    the scan reported nothing about a control an auditor cares about. The keys
+    are written with the service name cased differently in the wild
+    (``LanmanWorkstation`` / ``LanManServer``) than in Microsoft's own
+    documentation, and registry paths are case-insensitive, so key normalisation
+    has to absorb that — these fixtures spell it the way the GPOs do.
+    """
+
+    CLIENT_LINE = ("MACHINE\\System\\CurrentControlSet\\Services"
+                   "\\LanmanWorkstation\\Parameters\\RequireSecuritySignature=4,{}")
+    SERVER_LINE = ("MACHINE\\System\\CurrentControlSet\\Services"
+                   "\\LanManServer\\Parameters\\RequireSecuritySignature=4,{}")
+
+    @pytest.mark.parametrize("control_id,line_template", [
+        ("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS", CLIENT_LINE),
+        ("DEVORE-06-SMB-SERVER-SIGNING-ALWAYS", SERVER_LINE),
+    ])
+    def test_a_require_signing_gpo_passes(self, control_id, line_template):
+        gpo = template_gpo(GUID_SIGNING, "SMB Signing", line_template.format(1))
+
+        finding = evaluate_control(load_catalog().by_id(control_id), [gpo])
+
+        assert finding["result"] == RESULT_PASS, finding["evidence"]
+        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["scored"] is True
+        assert finding["evidence"]["found"][0]["value"] == 1
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+
+    @pytest.mark.parametrize("service_casing", ["LanmanWorkstation",
+                                                "LANMANWORKSTATION",
+                                                "lanmanworkstation"])
+    def test_the_client_key_matches_whatever_casing_the_gpo_used(self,
+                                                                service_casing):
+        """Registry paths are case-insensitive; the verdict must not depend on it."""
+        gpo = template_gpo(
+            GUID_SIGNING, "Example Client SMB Signing",
+            f"MACHINE\\System\\CurrentControlSet\\Services\\{service_casing}"
+            f"\\Parameters\\RequireSecuritySignature=4,1")
+
+        finding = evaluate_control(
+            load_catalog().by_id("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS"), [gpo])
+
+        assert finding["result"] == RESULT_PASS, finding["evidence"]
+
+    def test_the_server_control_reads_the_server_key_not_the_client_one(self):
+        """Two controls, two services: a client-only GPO must not pass the server."""
+        gpo = template_gpo(GUID_SIGNING, "Example Client SMB Signing",
+                           self.CLIENT_LINE.format(1))
+
+        finding = evaluate_control(
+            load_catalog().by_id("DEVORE-06-SMB-SERVER-SIGNING-ALWAYS"), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"] == []
+
+    def test_signing_disabled_fails(self):
+        gpo = template_gpo(GUID_SIGNING, "SMB Signing Off",
+                           self.CLIENT_LINE.format(0))
+
+        finding = evaluate_control(
+            load_catalog().by_id("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS"), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["found"][0]["value"] == 0
+
+    def test_the_legacy_if_agrees_setting_does_not_satisfy_the_control(self):
+        """EnableSecuritySignature is SMBv1-only and must not count as signing."""
+        gpo = template_gpo(
+            GUID_SIGNING, "Legacy SMB Signing",
+            "MACHINE\\System\\CurrentControlSet\\Services\\LanmanWorkstation"
+            "\\Parameters\\EnableSecuritySignature=4,1")
+
+        finding = evaluate_control(
+            load_catalog().by_id("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS"), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"] == []
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+
+    def test_three_gpos_setting_signing_consistently_raise_no_conflict(self):
+        """The live shape: client GPO, server GPO, and the DC policy agreeing."""
+        catalog = load_catalog()
+        gpos = [
+            template_gpo(GUID_SIGNING, "Example Client SMB Signing",
+                         self.CLIENT_LINE.format(1), links=(GpoLink(BASE_DN),)),
+            template_gpo(GUID_CONFLICT, "Example Server SMB Signing",
+                         self.SERVER_LINE.format(1), links=(GpoLink(BASE_DN),)),
+            template_gpo(GUID_ENFORCED, "Domain Controllers Policy",
+                         self.SERVER_LINE.format(1), links=(GpoLink(DC_OU),)),
+        ]
+        controls, _ = catalog.select(["DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
+                                      "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS"])
+
+        findings, counts = evaluate_controls(controls, gpos)
+
+        assert counts[RESULT_PASS] == 2
+        assert counts[RESULT_FAIL] == 0
+        assert counts["needs_baseline_value"] == 0
+        assert counts["conflicts"] == 0
+        server = next(f for f in findings
+                      if f["control_id"] == "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS")
+        assert server["evidence"]["found_count"] == 2
+
+    def test_a_domain_that_configures_no_smb_signing_now_fails_instead_of_hiding(self):
+        """Previously unscored: the scan said nothing at all about these."""
+        catalog = load_catalog()
+        controls, _ = catalog.select(["DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
+                                      "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS"])
+
+        findings, counts = evaluate_controls(
+            controls, [template_gpo(GUID_CONFLICT, "Unrelated Policy")])
+
+        assert counts[RESULT_FAIL] == 2
+        assert counts["scored"] == 2
+        assert counts["needs_baseline_value"] == 0
+        assert all(f["evidence"]["expected"]["final"] == 1 for f in findings)
+
+
 class TestShippedCatalogAgainstSynthesizedGpos:
     """Every shipped active control, exercised once with a compliant GPO."""
 
