@@ -320,12 +320,57 @@ class TestNeedsBaselineValueGuard:
             build_catalog(a_catalog(self.unscored(missing_result="fail")))
 
     def test_an_unscored_control_may_still_carry_a_known_registry_key(self):
-        """Path known, value not — DEVORE-08-NTLM-BLOCK-OUTGOING's situation."""
+        """Path known, value not: still unscored, because the value is the gap."""
         catalog = build_catalog(a_catalog(self.unscored(
             registry_key="HKLM\\Software\\Test\\Flag")))
 
         assert catalog.controls[0].registry_key
         assert catalog.controls[0].scored is False
+
+    def test_an_os_default_on_an_unscored_control_is_a_load_error(self):
+        """A flagged control carries no values at all, defaults included."""
+        with pytest.raises(CatalogError, match="never guessed"):
+            build_catalog(a_catalog(self.unscored(os_default=1)))
+
+
+class TestOsDefaultField:
+    """``os_default`` lets an unset key be judged — only when it is sourced."""
+
+    def defaulted(self, **overrides):
+        base = dict(operator="gte", final_expected=2, os_default=1,
+                    value_source="Microsoft doc: effective default is 1.")
+        base.update(overrides)
+        return a_control(**base)
+
+    def test_a_sourced_os_default_loads_and_is_exposed_on_the_control(self):
+        catalog = build_catalog(a_catalog(self.defaulted()))
+
+        control = catalog.controls[0]
+        assert control.os_default == 1
+        assert control.final_expected == 2
+        assert control.scored is True
+
+    def test_absent_os_default_stays_none_so_behaviour_is_unchanged(self):
+        catalog = build_catalog(a_catalog(a_control()))
+
+        assert catalog.controls[0].os_default is None
+
+    def test_an_os_default_without_a_value_source_is_a_load_error(self):
+        """An uncitable default would let an unset key report as compliant."""
+        with pytest.raises(CatalogError, match="os_default' needs a 'value_source"):
+            build_catalog(a_catalog(self.defaulted(value_source=_OMIT)))
+
+    def test_an_os_default_on_a_presence_operator_is_a_load_error(self):
+        with pytest.raises(CatalogError, match="needs a value operator"):
+            build_catalog(a_catalog(self.defaulted(
+                operator="present", final_expected=_OMIT,
+                presence_rollout_state="audit")))
+
+    def test_an_os_default_of_zero_is_kept_rather_than_treated_as_absent(self):
+        """``0`` is a real documented default, not a missing field."""
+        catalog = build_catalog(a_catalog(self.defaulted(os_default=0)))
+
+        assert catalog.controls[0].os_default == 0
 
 
 class TestLoadCatalogFromDisk:

@@ -25,6 +25,9 @@ from aditor.gpo.parsers import (
 )
 from aditor.hardening.catalog import build_catalog, load_catalog
 from aditor.hardening.evaluator import (
+    EVIDENCE_SOURCE_GPO,
+    EVIDENCE_SOURCE_NOT_CONFIGURED,
+    EVIDENCE_SOURCE_OS_DEFAULT,
     RESULT_ERROR,
     RESULT_FAIL,
     RESULT_NOT_APPLICABLE,
@@ -399,6 +402,117 @@ class TestPresenceOperators:
 
         assert finding["result"] == RESULT_FAIL
         assert finding["evidence"]["found"][0]["gpo_dn"] == gpo_dn(GUID_SIGNING)
+
+
+class TestOsDefault:
+    """Unset is not the same as insecure — but an assumed value must say so.
+
+    A control that documents a Windows default (``os_default``) is judged
+    against that default when no GPO sets its key. The point of the field is
+    accuracy in *both* directions: the domain is not reported as unsigned when
+    the OS already negotiates signing, and the finding never reads as though a
+    GPO enforced anything.
+    """
+
+    DEFAULT_SOURCE = ("Microsoft, 'Network security: LDAP client signing "
+                      "requirements' — effective default: Negotiate signing.")
+
+    def default_control(self, **overrides):
+        raw = dict(operator="gte", interim_expected=1, final_expected=2,
+                   os_default=1, value_source=self.DEFAULT_SOURCE,
+                   missing_result="fail")
+        raw.update(overrides)
+        return control(**raw)
+
+    def test_an_unset_key_is_judged_against_the_documented_default(self):
+        finding = evaluate_control(self.default_control(),
+                                  [template_gpo(GUID_SIGNING, "Unrelated Policy")])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+        assert finding["scored"] is True
+
+    def test_the_evidence_marks_the_value_as_assumed_not_configured(self):
+        finding = evaluate_control(self.default_control(), [])
+
+        evidence = finding["evidence"]
+        assert evidence["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+        assert evidence["os_default"] == {"value": 1, "source": "os-default",
+                                          "enforced_by_gpo": False,
+                                          "value_source": self.DEFAULT_SOURCE}
+        assert evidence["expected"]["os_default"] == 1
+
+    def test_a_finding_resting_on_a_default_never_reads_as_gpo_enforced(self):
+        """The accuracy requirement: no GPO is credited with this value."""
+        finding = evaluate_control(self.default_control(),
+                                  [template_gpo(GUID_SIGNING, "Unrelated Policy")])
+
+        assert finding["evidence"]["found"] == []
+        assert finding["evidence"]["found_count"] == 0
+        assert finding["rollout_state"] != STATE_ENFORCED
+        assert any("not a configured one" in note
+                   for note in finding["evidence"]["notes"])
+        assert any("Nothing in Group Policy enforces it" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_default_that_does_not_meet_the_floor_still_fails(self):
+        """The field is not a free pass: a weak default fails, labelled."""
+        finding = evaluate_control(self.default_control(os_default=0), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+
+    def test_a_default_that_meets_the_final_step_reads_as_enforced(self):
+        finding = evaluate_control(self.default_control(os_default=2), [])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_ENFORCED
+
+    def test_a_control_without_a_default_keeps_the_old_unset_behaviour(self):
+        """Absent ``os_default`` must change nothing."""
+        finding = evaluate_control(self.default_control(os_default=None), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+        assert finding["evidence"]["os_default"] is None
+
+    def test_a_gpo_value_overrides_the_default_downwards(self):
+        """A GPO that lowers the setting must beat the optimistic default."""
+        gpo = template_gpo(GUID_SIGNING, "Legacy Exception", TEST_FLAG_LINE.format(0))
+
+        finding = evaluate_control(self.default_control(), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+        assert finding["evidence"]["os_default"] is None
+        assert finding["evidence"]["found"][0]["value"] == 0
+        assert finding["evidence"]["expected"]["os_default"] == 1
+
+    def test_a_gpo_value_overrides_the_default_upwards(self):
+        gpo = template_gpo(GUID_SIGNING, "Require Signing", TEST_FLAG_LINE.format(2))
+
+        finding = evaluate_control(self.default_control(), [gpo])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+        assert finding["evidence"]["found"][0]["gpo_dn"] == gpo_dn(GUID_SIGNING)
+
+    def test_the_counts_separate_os_default_verdicts_from_configured_ones(self):
+        """A summary must not lump assumed passes in with enforced ones."""
+        gpo = template_gpo(GUID_SIGNING, "Require Signing", TEST_FLAG_LINE.format(2))
+        assumed = self.default_control(id="TEST-ASSUMED")
+        configured = self.default_control(id="TEST-CONFIGURED")
+
+        _, both = evaluate_controls([assumed], [])
+        _, neither = evaluate_controls([configured], [gpo])
+
+        assert both["os_default"] == 1
+        assert both[RESULT_PASS] == 1
+        assert neither["os_default"] == 0
+        assert neither[RESULT_PASS] == 1
 
 
 class TestConflictDetection:
