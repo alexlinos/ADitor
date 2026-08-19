@@ -6,9 +6,9 @@ The enumeration tools (``get_gpos``/``get_gpo``/``get_linked_gpos``) query
 LDAP metadata only — the ``groupPolicyContainer`` objects under
 ``CN=Policies,CN=System,<base_dn>`` and the ``gPLink`` attribute on linkable
 objects. ``get_gpo_contents`` additionally reads the GPO's files from SYSVOL
-over SMB and parses the common policy formats (Registry.pol, GptTmpl.inf,
-scripts.ini, AppLocker rules). SMB support requires the optional
-``smbprotocol`` dependency.
+over SMB and parses the common policy formats (Registry.pol, Group Policy
+Preferences ``Registry.xml``, GptTmpl.inf, scripts.ini, AppLocker rules). SMB
+support requires the optional ``smbprotocol`` dependency.
 
 This module is orchestration only: LDAP queries, SMB reads, and response
 shaping. All parsing/decoding lives in :mod:`aditor.gpo.parsers` as pure,
@@ -31,7 +31,16 @@ from ..gpo.parsers import (
     parse_gp_link,
     parse_ini,
     parse_registry_pol,
+    parse_registry_xml,
     summarize_gpo_contents,
+)
+
+# The Registry preferences file, per side. Group Policy Preferences deliver
+# registry values that have no ADMX policy behind them, so a GPO's real
+# hardening often lives here rather than in Registry.pol.
+_REGISTRY_XML_FILES = (
+    (r"machine\preferences\registry\registry.xml", "machine_registry_xml"),
+    (r"user\preferences\registry\registry.xml", "user_registry_xml"),
 )
 
 
@@ -200,9 +209,21 @@ class GPOTools(BaseTool):
 
         Resolves the GPO, then reads and parses the policy files under its
         ``gPCFileSysPath``: GPT.INI, Machine/User ``Registry.pol`` (admin
-        template + AppLocker settings), ``GptTmpl.inf`` security templates,
-        and script registrations. Requires the optional ``smbprotocol``
-        dependency and SYSVOL read access for the bind account.
+        template + AppLocker settings), Machine/User
+        ``Preferences\\Registry\\Registry.xml`` (Group Policy Preferences
+        registry items), ``GptTmpl.inf`` security templates, and script
+        registrations. Requires the optional ``smbprotocol`` dependency and
+        SYSVOL read access for the bind account.
+
+        ``machine_registry_xml`` / ``user_registry_xml`` appear **only when the
+        GPO actually has a preferences file**. A GPO with no Registry
+        preferences returns exactly what it returned before this file was read,
+        which keeps the common case byte-identical; a GPO that has one gains a
+        block shaped like the ``Registry.pol`` ones
+        (``{entry_count, entries}``). There is no ``entries_truncated`` because
+        nothing in a Registry.xml is truncated — a preference item's value is a
+        single registry value, where one ``Registry.pol`` value can be an
+        AppLocker rule set of tens of KB.
 
         Args:
             identifier: GPO GUID (with or without braces) or exact display name.
@@ -211,7 +232,8 @@ class GPOTools(BaseTool):
                 than this (default 6000).
             summary: Return the same top-level shape with the heavy bodies
                 dropped (default False). Registry ``entries[]`` are omitted
-                (their ``entry_count``/``entries_truncated`` are kept), each
+                (their ``entry_count``/``entries_truncated`` are kept, and a
+                Registry.xml block keeps its ``entry_count``), each
                 AppLocker rule's full XML becomes a
                 ``{type, id, name, action, sid}`` digest, and security
                 template / script sections are reduced to section names. The
@@ -371,6 +393,20 @@ class GPOTools(BaseTool):
                     if side.startswith("machine"):
                         machine_entries = entries
 
+                # Group Policy Preferences registry items. Deliberately only
+                # added to the response when the file exists, so a GPO with no
+                # preferences returns exactly the shape it returned before this
+                # was read at all — the common case must not change.
+                for rel, key in _REGISTRY_XML_FILES:
+                    data = read_bytes(rel)
+                    if data is None:
+                        continue
+                    preferences = parse_registry_xml(data)
+                    out[key] = {
+                        "entry_count": len(preferences),
+                        "entries": preferences,
+                    }
+
             # AppLocker rules (live inside the machine Registry.pol as SrpV2)
             applocker = extract_applocker(machine_entries)
             if applocker:
@@ -477,9 +513,18 @@ class GPOTools(BaseTool):
             "notes": [
                 "get_gpos/get_gpo/get_linked_gpos read LDAP metadata only.",
                 "get_gpo_contents additionally reads SYSVOL over SMB and parses "
-                "Registry.pol (PReg), GptTmpl.inf, scripts.ini, and AppLocker "
-                "rules; requires the optional 'smbprotocol' package plus SYSVOL "
-                "read access.",
+                "Registry.pol (PReg), Preferences\\Registry\\Registry.xml "
+                "(Group Policy Preferences registry items), GptTmpl.inf, "
+                "scripts.ini, and AppLocker rules; requires the optional "
+                "'smbprotocol' package plus SYSVOL read access.",
+                "machine_registry_xml / user_registry_xml carry Group Policy "
+                "Preferences registry items and are present only when the GPO has "
+                "a Preferences\\Registry\\Registry.xml at all. A preference "
+                "item's action is C(reate)/R(eplace)/U(pdate)/D(elete): a Delete "
+                "item removes the value rather than setting it, and Create writes "
+                "only when the value is absent, so it does not correct drift. "
+                "DWORD/QWORD values in that file are stored as hexadecimal "
+                "strings (value=\"00000038\" is 56).",
                 "get_gpo_contents(summary=True) keeps the same shape but drops "
                 "registry entries, digests AppLocker rule XML, and reduces "
                 "template/script sections to section names.",

@@ -1303,6 +1303,29 @@ class TestSummarizeGpoContents:
         assert len(contents["machine_registry_pol"]["entries"]) == 2
         assert isinstance(contents["security_templates"][0]["sections"], dict)
 
+    def test_registry_xml_blocks_reduce_to_their_count(self):
+        contents = self._contents()
+        contents["machine_registry_xml"] = {
+            "entry_count": 1,
+            "entries": [{"hive": "HKEY_LOCAL_MACHINE", "key": r"SOFTWARE\Test",
+                         "value_name": "Flag", "type": 4,
+                         "type_name": "REG_DWORD", "value": 56, "action": "U",
+                         "order": 1, "has_filters": False, "disabled": False}],
+        }
+
+        summarized = summarize_gpo_contents(contents)
+
+        assert summarized["machine_registry_xml"] == {"entry_count": 1}
+        assert len(contents["machine_registry_xml"]["entries"]) == 1, \
+            "the input dict must not be mutated"
+
+    def test_a_gpo_with_no_registry_xml_block_gains_none(self):
+        """The key is absent for a GPO with no preferences; keep it absent."""
+        summarized = summarize_gpo_contents(self._contents())
+
+        assert "machine_registry_xml" not in summarized
+        assert "user_registry_xml" not in summarized
+
     def test_missing_and_none_sections_are_tolerated(self):
         summarized = summarize_gpo_contents({
             "files": [],
