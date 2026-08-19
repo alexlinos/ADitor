@@ -13,6 +13,16 @@ separator — so the fields that would have been YAML comments (``value_source``
 ``baseline_gap``, ``caveats``, ``missing_note``) are first-class data instead,
 which is strictly better for a report that has to cite its sources anyway.
 
+**Unset is not the same as insecure.** Some settings have a documented Windows
+default that is already partly compliant — ``LdapClientIntegrity`` defaults to
+``1`` (Negotiate signing) whether or not a GPO says so. Those controls carry an
+optional ``os_default``, and the evaluator compares it against the assertion when
+no GPO sets the key, instead of reporting a bare ``fail``. ``os_default`` is
+populated **only where a Microsoft document states the default**, which the loader
+enforces by requiring a ``value_source`` alongside it; a control without one keeps
+the original behaviour (unset -> ``missing_result``). A default is an *assumption*,
+never enforcement, so the evaluator marks such evidence ``source: "os-default"``.
+
 **Only known values are asserted.** A control whose exact expected value the
 source does not state is carried with ``status: "needs_baseline_value"``, no
 expected values at all, and a ``baseline_gap`` explaining what is missing and
@@ -70,9 +80,9 @@ ROLLOUT_STATES = frozenset({"not_started", "audit", "enforced"})
 _CONTROL_FIELDS = frozenset({
     "id", "title", "source", "scope", "check_type", "severity", "status",
     "friendly_policy", "registry_key", "registry_type", "operator",
-    "interim_expected", "final_expected", "presence_rollout_state",
-    "missing_result", "missing_note", "value_source", "baseline_gap",
-    "remediation", "caveats", "audit_before_enforce",
+    "interim_expected", "final_expected", "os_default",
+    "presence_rollout_state", "missing_result", "missing_note", "value_source",
+    "baseline_gap", "remediation", "caveats", "audit_before_enforce",
 })
 
 _REQUIRED_CONTROL_FIELDS = ("id", "title", "source", "scope", "check_type",
@@ -105,6 +115,7 @@ class Control:
     friendly_policy: Optional[str] = None
     interim_expected: Any = None
     final_expected: Any = None
+    os_default: Any = None
     presence_rollout_state: Optional[str] = None
     missing_result: Optional[str] = None
     missing_note: Optional[str] = None
@@ -353,6 +364,7 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
     registry_key = raw.get("registry_key")
     interim = raw.get("interim_expected")
     final = raw.get("final_expected")
+    os_default = raw.get("os_default")
     presence_state = raw.get("presence_rollout_state")
     missing_result = raw.get("missing_result")
 
@@ -371,7 +383,7 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
                 f"{operator!r}")
 
     if status == STATUS_NEEDS_BASELINE_VALUE:
-        if interim is not None or final is not None:
+        if interim is not None or final is not None or os_default is not None:
             raise CatalogError(
                 f"{where} is flagged {STATUS_NEEDS_BASELINE_VALUE} but carries "
                 f"an expected value — expected values must be null for a "
@@ -409,6 +421,18 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
                 f"{where} is active but carries a 'baseline_gap'; a control with "
                 f"an unresolved baseline gap must be flagged "
                 f"{STATUS_NEEDS_BASELINE_VALUE}")
+        if os_default is not None:
+            if operator not in VALUE_OPERATORS:
+                raise CatalogError(
+                    f"{where}: 'os_default' is a value to compare, so it needs a "
+                    f"value operator ({', '.join(sorted(VALUE_OPERATORS))}), not "
+                    f"{operator!r}")
+            if not raw.get("value_source"):
+                raise CatalogError(
+                    f"{where}: 'os_default' needs a 'value_source' stating which "
+                    f"Microsoft document gives that default — an OS default that "
+                    f"cannot be cited is a guess, and a guessed default would let "
+                    f"an unset key report as compliant")
 
     return Control(
         id=control_id.strip(),
@@ -425,6 +449,7 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
         friendly_policy=raw.get("friendly_policy"),
         interim_expected=interim,
         final_expected=final,
+        os_default=os_default,
         presence_rollout_state=presence_state,
         missing_result=missing_result,
         missing_note=raw.get("missing_note"),
