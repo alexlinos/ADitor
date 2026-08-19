@@ -520,6 +520,12 @@ def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
     value with the source that documents it, and a note spells out that no GPO
     enforces it. ``found`` stays empty and ``found_count`` zero, because no GPO
     was found; the default is not fabricated into a match.
+
+    A default that does *not* meet the assertion falls back to the control's own
+    ``missing_result``. Knowing the default cannot make a control apply that its
+    author said does not apply when nothing sets the key, so a conditional
+    control keeps reporting ``not_applicable`` rather than being upgraded to a
+    failure by an unset key it already excused.
     """
     try:
         rollout_state = _state_for(control, control.os_default)
@@ -527,7 +533,8 @@ def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
         return _error_finding(control, f"os_default {control.os_default!r} "
                                        f"could not be compared: {exc}", [])
 
-    result = RESULT_FAIL if rollout_state == STATE_NOT_STARTED else RESULT_PASS
+    result = (control.missing_result or RESULT_FAIL
+              if rollout_state == STATE_NOT_STARTED else RESULT_PASS)
     return _finding(
         control, result, rollout_state, [], gpos,
         notes=[missing_note, _OS_DEFAULT_NOTE.format(value=control.os_default)],

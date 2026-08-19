@@ -110,6 +110,13 @@ time). HTML/JSON for reuse; **PDF is the primary hand-off format.**
   enforcement / group membership) next to the **expected** value — plus the
   **source GPO DN and link path** (which GPO delivered it, enforced/blocked). An
   auditor must see *what was checked and what was found*, not just a verdict.
+- `evidence.source`: `gpo | os-default | not-configured` — what the verdict rests
+  on. `os-default` means no GPO sets the key and the control was judged against a
+  Microsoft-documented Windows default, with the value and its citation in
+  `evidence.os_default`. **The report must render that distinctly:** an
+  os-default pass is a hardening *opportunity* ("at the OS default, not raised"),
+  never a claim that Group Policy enforces the value. `counts.os_default` gives
+  the total, so a summary can keep assumed passes out of the enforced tally.
 
 **Provenance header (required for auditability):** tool version; **baseline
 version** (Devore series rev + Microsoft/CIS baseline rev the exact values came

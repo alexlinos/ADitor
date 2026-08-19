@@ -486,7 +486,11 @@ class TestShippedCatalogInvariants:
         assert control.scored is False
         assert control.interim_expected is None
         assert control.final_expected is None
+        assert control.os_default is None
         assert control.baseline_gap
+        assert any(phrase in control.baseline_gap.lower()
+                   or any(phrase in caveat.lower() for caveat in control.caveats)
+                   for phrase in ("unscored", "excluded from scoring")), control.id
 
     @pytest.mark.parametrize("control_id,service", [
         ("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS", "LanManWorkstation"),
