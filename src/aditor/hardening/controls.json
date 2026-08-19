@@ -1,5 +1,5 @@
 {
-  "catalog_version": "2026.08.1",
+  "catalog_version": "2026.08.2",
   "spec": "docs/HARDENING_CATALOG.md",
   "baseline": {
     "primary_source": "Jerry Devore, \"Active Directory Hardening Series\" Parts 1-8, Microsoft Core Infrastructure and Security Blog (series verified Aug 2026; there is no Part 9).",
@@ -9,7 +9,8 @@
   "notes": [
     "Check types in this release: gpo-security-template (GptTmpl.inf [Registry Values]) and gpo-registry-pol (Registry.pol). The catalog's directory-state controls (DEVORE-02 SMBv1, DEVORE-04 msDS-SupportedEncryptionTypes, DEVORE-07 least privilege, DEVORE-08 Protected Users) have no evaluator yet and are deliberately absent rather than present-and-unevaluatable; they arrive with their own engine.",
     "registry_key is the full path including the value name (its last component). For gpo-registry-pol the evaluator splits the last component off to match Registry.pol's separate key/value fields; for gpo-security-template the whole path is one [Registry Values] key.",
-    "Rollout is phased, not binary: interim_expected is the audit/negotiate step and final_expected the enforced step, so a domain correctly mid-rollout reports rollout_state 'audit' and result 'pass', not a failure."
+    "Rollout is phased, not binary: interim_expected is the audit/negotiate step and final_expected the enforced step, so a domain correctly mid-rollout reports rollout_state 'audit' and result 'pass', not a failure.",
+    "os_default records the value Windows uses when no GPO sets the key, and only where a Microsoft document states it. Such a finding is evaluated against the default and marked 'source: os-default', so an assumed value is never mistaken for an enforced one. It is deliberately absent where there is no default to cite — LdapEnforceChannelBinding, for one, has no such key by default (channel binding is off), which is precisely why configuring it matters. Two limitations are deliberate. A finding resting on a default is capped at rollout_state 'audit', because 'enforced' means Group Policy holds the value and nothing enforces a default. And os_default is a single value, so a default that depends on the machine's role cannot be expressed: DEVORE-06-SMB-SERVER-SIGNING-ALWAYS is 'Enabled' by Microsoft's table for domain controllers but 'Disabled' for member servers and clients. Making that expressible would need the evaluator to know which machines a GPO lands on, which a SYSVOL/GPO scan cannot see at all — so those controls carry no default and say why in missing_note, rather than asserting one role's default over the whole domain."
   ],
   "controls": [
     {
@@ -87,13 +88,16 @@
       "operator": "gte",
       "interim_expected": 1,
       "final_expected": 2,
+      "os_default": 1,
+      "os_default_source": "Microsoft, 'Network security: LDAP client signing requirements', Default values table — the effective default setting is 'Negotiate signing' for domain controllers, member servers and client computers alike: https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-ldap-client-signing-requirements — cited separately from value_source because the numeric mapping and the default come from different statements, and only this one licenses judging an unset key against 1.",
       "presence_rollout_state": null,
       "missing_result": "fail",
-      "missing_note": "No GPO sets the client requirement. The Windows default is already Negotiate (1), so this is usually a documentation gap rather than a live risk — but an unset policy cannot be shown to be 1, and a GPO elsewhere may have lowered it to 0.",
-      "value_source": "0/1/2 (None / Negotiate signing / Require signing) are quoted in Devore Part 3; the post also states the OS default is Negotiate.",
-      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: LDAP client signing requirements' = 'Negotiate signing' or 'Require signing'.",
+      "missing_note": "No GPO sets the client requirement, so the effective value is the Windows default of Negotiate signing (1) — clients do request signing, but nothing in Group Policy holds it there and a GPO could lower it to 0.",
+      "value_source": "0/1/2 (None / Negotiate signing / Require signing) are quoted in Devore Part 3. The OS default is 'Negotiate signing' per Microsoft, 'Network security: LDAP client signing requirements' (Default values table: DC, member server and client computer effective default settings are all 'Negotiate signing'): https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-ldap-client-signing-requirements",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: LDAP client signing requirements' = 'Require signing' (the OS already gives you 'Negotiate signing' without a GPO, so setting Negotiate explicitly buys documentation, not hardening).",
       "caveats": [
-        "Windows already defaults to Negotiate (1); Windows SASL binds will not break when DCs start requiring signing unless a GPO overrode that default with 0."
+        "Windows already defaults to Negotiate (1); Windows SASL binds will not break when DCs start requiring signing unless a GPO overrode that default with 0.",
+        "OS DEFAULT, NOT ENFORCEMENT: where no GPO sets this key the finding rests on the documented default and is marked 'source: os-default'. That is a pass at the Negotiate step, not evidence that anything prevents a future GPO from setting 0."
       ],
       "audit_before_enforce": null
     },
@@ -220,23 +224,22 @@
       "scope": "all",
       "check_type": "gpo-security-template",
       "severity": "high",
-      "status": "needs_baseline_value",
+      "status": "active",
       "friendly_policy": "Microsoft network client: Digitally sign communications (always)",
-      "registry_key": null,
+      "registry_key": "HKLM\\System\\CurrentControlSet\\Services\\LanManWorkstation\\Parameters\\RequireSecuritySignature",
       "registry_type": "REG_DWORD",
-      "operator": "present",
+      "operator": "equals",
       "interim_expected": null,
-      "final_expected": null,
+      "final_expected": 1,
       "presence_rollout_state": null,
-      "missing_result": null,
-      "missing_note": null,
-      "value_source": null,
-      "baseline_gap": "Devore Part 6 defers to linked Microsoft articles and prints no registry path. The commonly cited path is LanmanWorkstation\\Parameters\\RequireSecuritySignature = 1, but that is UNVERIFIED here and deliberately not asserted; confirm against the Microsoft Security Baseline or CIS Benchmark first.",
+      "missing_result": "fail",
+      "missing_note": "No GPO requires SMB signing on the client side, so outbound SMB is signed only when the server requires it. No os_default is asserted: the policy's documented default is Disabled, but Windows 11 24H2 and Server 2025 require signing by default, so what an unset key means depends on the OS version — which a GPO scan cannot see.",
+      "value_source": "Microsoft, 'Overview of Server Message Block signing in Windows' — 'Microsoft network client: Digitally sign communications (always)' | Registry key: HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\LanManWorkstation\\Parameters | Registry value: RequireSecuritySignature | Data Type: REG_DWORD | Data: 0 (disable), 1 (enable): https://learn.microsoft.com/en-us/windows-server/storage/file-server/smb-signing-overview — policy semantics ('always' = required) in Microsoft, 'Microsoft network client: Digitally sign communications (always)': https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/microsoft-network-client-digitally-sign-communications-always CASING IS VERBATIM: the page writes the registry path with 'LanMan' (capital M), which is what is quoted here. Elsewhere on the same page the *Administrative Templates* auditing policy paths are written 'Lanman Server' / 'Lanman Workstation' — a different thing from the registry key, and not a reason to re-case this quote. Real GPOs spell the service names inconsistently too; normalize_registry_key handles that, so the catalog keeps the source's casing rather than the wire's.",
       "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Microsoft network client: Digitally sign communications (always)' = Enabled, on endpoints and member servers as well as domain controllers.",
       "caveats": [
-        "Registry path not given by the source: excluded from scoring until a baseline value is sourced.",
+        "NOT THE LEGACY SETTING: 'Digitally sign communications (if server agrees)' / EnableSecuritySignature is a different, weaker setting that applies to SMBv1 only — Microsoft states it is ignored by SMB2 and later ('does nothing unless you're using SMB1') and recommends against using it. A GPO setting EnableSecuritySignature = 1 does NOT satisfy this control, and this control does not look at that value name.",
         "'(always)' applies to all SMB versions and terminates sessions where the peer cannot sign.",
-        "Windows 11 24H2 and Server 2025 require SMB signing by default."
+        "Windows 11 24H2 and Server 2025 require SMB signing by default, so an unset key is not necessarily unsigned traffic on those builds — but it is also not enforced by policy, which is what this control asserts."
       ],
       "audit_before_enforce": null
     },
@@ -250,22 +253,22 @@
       "scope": "all",
       "check_type": "gpo-security-template",
       "severity": "high",
-      "status": "needs_baseline_value",
+      "status": "active",
       "friendly_policy": "Microsoft network server: Digitally sign communications (always)",
-      "registry_key": null,
+      "registry_key": "HKLM\\System\\CurrentControlSet\\Services\\LanManServer\\Parameters\\RequireSecuritySignature",
       "registry_type": "REG_DWORD",
-      "operator": "present",
+      "operator": "equals",
       "interim_expected": null,
-      "final_expected": null,
+      "final_expected": 1,
       "presence_rollout_state": null,
-      "missing_result": null,
-      "missing_note": null,
-      "value_source": null,
-      "baseline_gap": "As with the client control, Part 6 prints no registry path. The commonly cited path is LanmanServer\\Parameters\\RequireSecuritySignature = 1 — UNVERIFIED here and not asserted; source it from the Microsoft Security Baseline or CIS Benchmark.",
+      "missing_result": "fail",
+      "missing_note": "No GPO requires SMB signing on the server side, so inbound SMB is signed only when the client requires it. No os_default is asserted: Microsoft's default table gives 'Enabled' for DC effective defaults but 'Disabled' for member servers and clients, so the default is role-dependent and cannot be expressed as one value.",
+      "value_source": "Microsoft, 'Overview of Server Message Block signing in Windows' — 'Microsoft network server: Digitally sign communications (always)' | Registry key: HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\LanManServer\\Parameters | Registry value: RequireSecuritySignature | Data Type: REG_DWORD | Data: 0 (disable), 1 (enable): https://learn.microsoft.com/en-us/windows-server/storage/file-server/smb-signing-overview — policy semantics ('always' = required) in Microsoft, 'Microsoft network server: Digitally sign communications (always)': https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/microsoft-network-server-digitally-sign-communications-always CASING IS VERBATIM: the page writes the registry path with 'LanMan' (capital M), which is what is quoted here. Elsewhere on the same page the *Administrative Templates* auditing policy paths are written 'Lanman Server' / 'Lanman Workstation' — a different thing from the registry key, and not a reason to re-case this quote. Real GPOs spell the service names inconsistently too; normalize_registry_key handles that, so the catalog keeps the source's casing rather than the wire's.",
       "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Microsoft network server: Digitally sign communications (always)' = Enabled — not only on domain controllers.",
       "caveats": [
-        "Registry path not given by the source: excluded from scoring until a baseline value is sourced.",
-        "The post is explicit that this belongs on endpoints and member servers too. Third-party appliances and multifunction printers are the usual unsigned culprits."
+        "NOT THE LEGACY SETTING: 'Digitally sign communications (if client agrees)' / EnableSecuritySignature is a different, weaker setting that Microsoft says is ignored by SMB2 and later and recommends against; it affects SMBv1 only. A GPO setting EnableSecuritySignature = 1 does NOT satisfy this control, and this control does not look at that value name.",
+        "The post is explicit that this belongs on endpoints and member servers too. Third-party appliances and multifunction printers are the usual unsigned culprits.",
+        "Domain controllers already require SMB signing for SYSVOL and NETLOGON; this control is about the policy that requires it everywhere else."
       ],
       "audit_before_enforce": null
     },
@@ -337,16 +340,19 @@
       "friendly_policy": "Network security: Restrict NTLM: Audit Incoming NTLM Traffic",
       "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\AuditReceivingNTLMTraffic",
       "registry_type": "REG_DWORD",
-      "operator": "present",
+      "operator": "gte",
       "interim_expected": null,
-      "final_expected": null,
-      "presence_rollout_state": "audit",
+      "final_expected": 1,
+      "presence_rollout_state": null,
       "missing_result": "fail",
-      "missing_note": "Incoming NTLM auditing is not configured, so there is no inventory of which clients still use NTLM against this system.",
-      "value_source": "Registry path quoted in Devore Part 8; the numeric level is not. The assertion is therefore presence only.",
-      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Audit Incoming NTLM Traffic' = 'Enable auditing for domain accounts'.",
+      "missing_note": "Incoming NTLM auditing is not configured, so there is no inventory of which clients still use NTLM against this system. Microsoft: 'Not defined ... is the same as Disable, and it results in no auditing of NTLM traffic.'",
+      "value_source": "Registry path quoted in Devore Part 8. CITED — Microsoft, 'Network security: Restrict NTLM: Audit incoming NTLM traffic': the option set is Disable / Enable auditing for domain accounts / Enable auditing for all accounts; 'Not defined ... is the same as Disable, and it results in no auditing of NTLM traffic'; and this policy 'doesn't actually block any traffic': https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-restrict-ntlm-audit-incoming-ntlm-traffic — INFERRED, not printed by Microsoft: that Disable is the option stored as the numeric 0 and that every enabling option is >= 1. That inference, not the quoted sentence, is what licenses 'gte 1' — the quote is about the *unset* policy and on its own establishes nothing about a configured 0. WHY THE INFERENCE IS SAFE — the setting is a REG_DWORD enumeration and an absent REG_DWORD reads as 0, so for 'not defined' and 'Disable' to name the same state, as Microsoft says they do, 'Disable' must be the option stored as 0; the remaining options therefore occupy 1 upwards. The assertion is only a floor, so it never has to know which enabled option a non-zero value denotes — the exact level is reported as evidence rather than scored. If the inference were wrong the cost would be a mislabelled level, which this control does not score; it cannot turn 'Disable' into a pass unless Microsoft's own unset-equals-'Disable' statement is itself wrong.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Audit Incoming NTLM Traffic' = 'Enable auditing for domain accounts' (or 'for all accounts').",
       "caveats": [
-        "PRESENCE ONLY: the post does not print the numeric level, so any configured value satisfies this control. Read the value in the finding's evidence — a value of 0 would mean auditing is configured off. Sourcing the exact numeric from a baseline would upgrade this to a value assertion.",
+        "FLOOR, NOT LEVEL: >= 1 means some auditing is enabled; 0 fails as 'auditing configured off'. Microsoft documents the option set (Disable / domain accounts / all accounts) but not the numerics, so the domain-vs-all-accounts distinction is reported in the evidence rather than scored — read the found value if you need to know which level is set.",
+        "INFERRED, NOT CITED: that the off option ('Disable') is stored as the numeric 0, and every other option at 1 or above, is not printed by Microsoft — it is an inference from Microsoft's statement that the unset policy behaves as 'Disable'. See value_source for the inference and why a floor (and only a floor) is safe to rest on it; the exact level is never scored.",
+        "TRAP: third-party write-ups conflate the Audit* and Restrict* value mappings and will tell you a value of 2 here means 'deny all'. It does not — Microsoft is explicit that this audit policy 'doesn't actually block any traffic'. Blocking is DEVORE-08-NTLM-BLOCK-INCOMING, which stays unscored for want of a sourced numeric.",
+        "rollout_state 'enforced' means the audit policy is fully configured, not that NTLM is blocked; blocking is tracked by the DEVORE-08-NTLM-BLOCK-* controls.",
         "Generates 8002/8003 in Microsoft/Windows/NTLM/Operational."
       ],
       "audit_before_enforce": null
@@ -365,17 +371,19 @@
       "friendly_policy": "Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers",
       "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\RestrictSendingNTLMTraffic",
       "registry_type": "REG_DWORD",
-      "operator": "present",
+      "operator": "gte",
       "interim_expected": null,
-      "final_expected": null,
-      "presence_rollout_state": "audit",
+      "final_expected": 1,
+      "presence_rollout_state": null,
       "missing_result": "fail",
-      "missing_note": "Outgoing NTLM traffic is neither audited nor restricted, so the outbound NTLM inventory needed before blocking does not exist.",
-      "value_source": "Registry path quoted in Devore Part 8; the numeric level is not. Presence only.",
+      "missing_note": "Outgoing NTLM traffic is neither audited nor restricted, so the outbound NTLM inventory needed before blocking does not exist. Microsoft: 'Not defined ... is the same as Allow all, and the device will allow all NTLM authentication requests.'",
+      "value_source": "Registry path quoted in Devore Part 8. CITED — Microsoft, 'Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers': the option set is Allow all / Audit all / Deny all, and 'Not defined ... is the same as Allow all': https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-restrict-ntlm-outgoing-ntlm-traffic-to-remote-servers — INFERRED, not printed by Microsoft: that Allow all is the option stored as the numeric 0 and that both Audit all and Deny all are >= 1. That inference, not the quoted sentence, is what licenses 'gte 1' — the quote is about the *unset* policy and on its own establishes nothing about a configured 0. WHY THE INFERENCE IS SAFE — the setting is a REG_DWORD enumeration and an absent REG_DWORD reads as 0, so for 'not defined' and 'Allow all' to name the same state, as Microsoft says they do, 'Allow all' must be the option stored as 0; the remaining options therefore occupy 1 upwards. The assertion is only a floor, so it never has to know which enabled option a non-zero value denotes — the exact level is reported as evidence rather than scored. If the inference were wrong the cost would be a mislabelled level, which this control does not score; it cannot turn 'Allow all' into a pass unless Microsoft's own unset-equals-'Allow all' statement is itself wrong. Note what a floor therefore cannot do: 'Deny all' is one specific numeric out of three and 'gte 1' is equally satisfied by 'Audit all', so this control means 'at least audited' and never 'blocked'. Blocking on this same value name is DEVORE-08-NTLM-BLOCK-OUTGOING, which stays needs_baseline_value precisely because an exact target needs the full mapping that a floor does not.",
       "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers' = 'Audit all' during the audit phase.",
       "caveats": [
-        "PRESENCE ONLY: the numeric level is not printed in the post, so any configured value satisfies this control; read the found value in the evidence.",
-        "One value name governs both audit and block for outgoing NTLM — see DEVORE-08-NTLM-BLOCK-OUTGOING, which needs a baseline value for the deny level."
+        "FLOOR, NOT LEVEL: >= 1 means outgoing NTLM is at least being logged; the Allow-all zero state fails. Which enabled level is set (Audit all vs Deny all) is reported in the evidence, not scored, because Microsoft does not print the numerics.",
+        "INFERRED, NOT CITED: that the off option ('Allow all') is stored as the numeric 0, and every other option at 1 or above, is not printed by Microsoft — it is an inference from Microsoft's statement that the unset policy behaves as 'Allow all'. See value_source for the inference and why a floor (and only a floor) is safe to rest on it; the exact level is never scored.",
+        "One value name governs both audit and block for outgoing NTLM — see DEVORE-08-NTLM-BLOCK-OUTGOING, which stays unscored because the deny numeric is unsourced. A pass here therefore means 'at least audited'; it is NOT evidence that outgoing NTLM is blocked.",
+        "rollout_state 'enforced' means this audit control's target is met, not that outgoing NTLM is denied."
       ],
       "audit_before_enforce": null
     },
@@ -393,16 +401,19 @@
       "friendly_policy": "Network security: Restrict NTLM: Audit NTLM authentication in this domain",
       "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Netlogon\\Parameters\\AuditNTLMInDomain",
       "registry_type": "REG_DWORD",
-      "operator": "present",
+      "operator": "gte",
       "interim_expected": null,
-      "final_expected": null,
-      "presence_rollout_state": "audit",
+      "final_expected": 1,
+      "presence_rollout_state": null,
       "missing_result": "fail",
-      "missing_note": "In-domain NTLM auditing is not configured on domain controllers, so domain-wide NTLM usage is not being inventoried.",
-      "value_source": "Registry path quoted in Devore Part 8; the numeric level is not. Presence only.",
+      "missing_note": "In-domain NTLM auditing is not configured on domain controllers, so domain-wide NTLM usage is not being inventoried. Microsoft gives 'Not defined' as the default for every server type, and Disable as the state in which no events are logged.",
+      "value_source": "Registry path quoted in Devore Part 8. CITED — Microsoft, 'Network security: Restrict NTLM: Audit NTLM authentication in this domain': the option set is Disable / Enable for domain accounts to domain servers / Enable for domain accounts / Enable for domain servers / Enable all, with Disable defined as the state that 'won't log events for incoming NTLM traffic', 'Not defined' given as the default for every server type, and the policy documented as one that does not block traffic: https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-restrict-ntlm-audit-ntlm-authentication-in-this-domain — INFERRED, not printed by Microsoft: that Disable is the option stored as the numeric 0 and that all four Enable options are >= 1. That inference, not the cited option list, is what licenses 'gte 1'. WHY THE INFERENCE IS SAFE — the setting is a REG_DWORD enumeration and an absent REG_DWORD reads as 0, so for 'not defined' and 'Disable' to name the same state, as Microsoft says they do, 'Disable' must be the option stored as 0; the remaining options therefore occupy 1 upwards. The assertion is only a floor, so it never has to know which enabled option a non-zero value denotes — the exact level is reported as evidence rather than scored. If the inference were wrong the cost would be a mislabelled level, which this control does not score; it cannot turn 'Disable' into a pass unless Microsoft's own unset-equals-'Disable' statement is itself wrong. With five options the level matters more here than elsewhere, which is a further reason it is reported rather than scored: 'Enable all' is the only one that inventories everything.",
       "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Audit NTLM authentication in this domain' = 'Enable all', in a GPO linked to the Domain Controllers OU.",
       "caveats": [
-        "PRESENCE ONLY: the numeric level is not printed in the post; read the found value in the evidence.",
+        "FLOOR, NOT LEVEL: >= 1 means some in-domain auditing is enabled; 0 fails as 'auditing configured off'. This policy has five documented options (Disable plus four Enable scopes) and Microsoft does not print their numerics, so which scope is configured is reported in the evidence rather than scored — 'Enable all' is the level that inventories everything.",
+        "INFERRED, NOT CITED: that the off option ('Disable') is stored as the numeric 0, and every other option at 1 or above, is not printed by Microsoft — it is an inference from Microsoft's statement that the unset policy behaves as 'Disable'. See value_source for the inference and why a floor (and only a floor) is safe to rest on it; the exact level is never scored.",
+        "TRAP: this is an audit policy. Microsoft states it 'doesn't actually block any traffic'; the deny variants belong to DEVORE-08-NTLM-BLOCK-INDOMAIN, which stays unscored. Do not read any value here as blocking.",
+        "rollout_state 'enforced' means this audit policy's target is met, not that in-domain NTLM is blocked; blocking is tracked by DEVORE-08-NTLM-BLOCK-INDOMAIN.",
         "Generates 8004/8005/8006."
       ],
       "audit_before_enforce": null
@@ -448,7 +459,7 @@
       "severity": "high",
       "status": "needs_baseline_value",
       "friendly_policy": "Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers",
-      "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\RestrictSendingNTLMTraffic",
+      "registry_key": null,
       "registry_type": "REG_DWORD",
       "operator": "present",
       "interim_expected": null,
@@ -457,10 +468,11 @@
       "missing_result": null,
       "missing_note": null,
       "value_source": null,
-      "baseline_gap": "The path is known (it is the same value name as the outgoing audit control) but the post does not print the numeric that means 'Deny all' — audit-vs-deny is a value change on one value name, so scoring this control without the exact number would risk reporting an audit-only domain as blocking. Source the deny numeric from the Microsoft Security Baseline or CIS Benchmark.",
+      "baseline_gap": "The value name is known — MSV1_0\\RestrictSendingNTLMTraffic, the same one the outgoing audit control reads — but no Microsoft or CIS document consulted prints the numeric that means 'Deny all'. WHY THIS IS HELD WHILE DEVORE-08-NTLM-AUDIT-OUTGOING SCORES ON THE SAME VALUE NAME: the two controls need different amounts of the mapping. A *floor* needs only two facts — that the permissive option is stored as 0, and that every other option is >= 1 — and both follow from Microsoft's statement that an unset policy behaves as 'Allow all' (an absent REG_DWORD reads as 0). It never has to know which number is 'Audit all' and which is 'Deny all', and it claims nothing about them. An *exact* target has no such luxury: 'Deny all' is one specific numeric out of three, no floor can express it ('gte 1' is equally satisfied by 'Audit all'), and guessing it would report an audit-only domain as blocking outgoing NTLM. So the audit control asserts exactly what the inference supports and stops there, while this control cannot be stated at all without the numeric Microsoft does not print. registry_key is left null so that no part of the pipeline can present this control as checked. Source the deny numeric from a Microsoft Security Baseline or CIS Benchmark to activate it.",
       "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers' = 'Deny all', after the audit phase is clean.",
       "caveats": [
-        "Same value name as the outgoing audit control (DEVORE-08-NTLM-AUDIT-OUTGOING): audit versus deny is a value change, which is exactly why the deny numeric must come from a baseline rather than be inferred."
+        "Same value name as the outgoing audit control (DEVORE-08-NTLM-AUDIT-OUTGOING), which asserts only a floor of >= 1 ('at least audited'). A pass there is NOT evidence of blocking, and this control stays unscored until the deny numeric is sourced.",
+        "TRAP: third-party write-ups conflate the Audit* and Restrict* mappings and confidently assign a 'deny all' numeric. That is exactly the guess this status exists to prevent."
       ],
       "audit_before_enforce": "8001/8002 outbound inventory must be clean for the in-scope systems."
     },

@@ -14,6 +14,20 @@ real SID, domain, DC hostname or file path appears.
 The centrepiece is ``TestLiveVerifiedLdapCase``: the two ``[Registry Values]``
 lines a real GPO was observed to contain must satisfy *both* LDAP controls. That
 reproduces the live-verified case entirely offline.
+
+Three further classes pin the accuracy fixes, each of which changes a verdict:
+``TestOsDefault`` and ``TestLdapClientSigningOnTheShippedCatalog`` (an unset key
+with a documented Windows default is judged against it, and labelled so it never
+reads as GPO-enforced), ``TestSmbSigningOnTheShippedCatalog`` (the newly active
+SMB controls, spelled the way real GPOs spell the service names), and
+``TestNtlmAuditFloorOnTheShippedCatalog`` (auditing configured *off* must fail
+rather than pass as "the policy is configured").
+
+``TestUnreadableGposCannotProduceAnOsDefaultPass`` pins the review fix that
+matters most: an empty match list means "no GPO *that we read* sets this key", so
+a scan with any unreadable GPO must not conclude the Windows default is effective.
+It reported ``pass`` / ``audit`` / ``source: os-default`` off a scan that read
+nothing at all.
 """
 
 import pytest
@@ -25,6 +39,10 @@ from aditor.gpo.parsers import (
 )
 from aditor.hardening.catalog import build_catalog, load_catalog
 from aditor.hardening.evaluator import (
+    EVIDENCE_SOURCE_GPO,
+    EVIDENCE_SOURCE_NOT_CONFIGURED,
+    EVIDENCE_SOURCE_OS_DEFAULT,
+    EVIDENCE_SOURCE_UNKNOWN,
     RESULT_ERROR,
     RESULT_FAIL,
     RESULT_NOT_APPLICABLE,
@@ -401,6 +419,483 @@ class TestPresenceOperators:
         assert finding["evidence"]["found"][0]["gpo_dn"] == gpo_dn(GUID_SIGNING)
 
 
+class TestOsDefault:
+    """Unset is not the same as insecure — but an assumed value must say so.
+
+    A control that documents a Windows default (``os_default``) is judged
+    against that default when no GPO sets its key. The point of the field is
+    accuracy in *both* directions: the domain is not reported as unsigned when
+    the OS already negotiates signing, and the finding never reads as though a
+    GPO enforced anything.
+    """
+
+    DEFAULT_SOURCE = ("Microsoft, 'Network security: LDAP client signing "
+                      "requirements' — effective default: Negotiate signing.")
+
+    def default_control(self, **overrides):
+        raw = dict(operator="gte", interim_expected=1, final_expected=2,
+                   os_default=1, value_source=self.DEFAULT_SOURCE,
+                   os_default_source=self.DEFAULT_SOURCE,
+                   missing_result="fail")
+        raw.update(overrides)
+        if raw.get("os_default") is None:
+            raw.pop("os_default_source", None)
+        return control(**raw)
+
+    def test_an_unset_key_is_judged_against_the_documented_default(self):
+        finding = evaluate_control(self.default_control(),
+                                  [template_gpo(GUID_SIGNING, "Unrelated Policy")])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+        assert finding["scored"] is True
+
+    def test_the_evidence_marks_the_value_as_assumed_not_configured(self):
+        finding = evaluate_control(self.default_control(), [])
+
+        evidence = finding["evidence"]
+        assert evidence["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+        assert evidence["os_default"] == {
+            "value": 1,
+            "source": "os-default",
+            "applied": True,
+            "enforced_by_gpo": False,
+            "meets_final_expected": False,
+            "rollout_state_capped": False,
+            "value_source": self.DEFAULT_SOURCE,
+        }
+        assert evidence["expected"]["os_default"] == 1
+
+    def test_a_finding_resting_on_a_default_never_reads_as_gpo_enforced(self):
+        """The accuracy requirement: no GPO is credited with this value."""
+        finding = evaluate_control(self.default_control(),
+                                  [template_gpo(GUID_SIGNING, "Unrelated Policy")])
+
+        assert finding["evidence"]["found"] == []
+        assert finding["evidence"]["found_count"] == 0
+        assert finding["rollout_state"] != STATE_ENFORCED
+        assert any("not a configured one" in note
+                   for note in finding["evidence"]["notes"])
+        assert any("Nothing in Group Policy enforces it" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_default_that_does_not_meet_the_floor_still_fails(self):
+        """The field is not a free pass: a weak default fails, labelled."""
+        finding = evaluate_control(self.default_control(os_default=0), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+
+    def test_a_weak_default_respects_a_conditional_controls_semantics(self):
+        """Knowing the default cannot make a control apply that says it does not.
+
+        A control whose ``missing_result`` is ``not_applicable`` has declared
+        that an unset key means "does not apply here". A documented default that
+        falls below the floor must not silently upgrade that to a failure.
+        """
+        finding = evaluate_control(
+            self.default_control(os_default=0, missing_result="not_applicable",
+                                 missing_note="Only applies where X is retained."),
+            [])
+
+        assert finding["result"] == RESULT_NOT_APPLICABLE
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+
+    def test_a_strong_default_also_respects_a_conditional_controls_semantics(self):
+        """The other half of the same rule, which used to be missing.
+
+        ``missing_result: not_applicable`` was honoured only when the default fell
+        *below* the floor. A default that met the floor returned a scored ``pass``
+        — making a control apply that its author said does not, which is exactly
+        what the rule's own docstring forbade.
+        """
+        finding = evaluate_control(
+            self.default_control(os_default=1, missing_result="not_applicable",
+                                 missing_note="Only applies where X is retained."),
+            [])
+
+        assert finding["result"] == RESULT_NOT_APPLICABLE
+        assert finding["result"] != RESULT_PASS
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+        assert any("cannot make a control apply" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_conditional_control_reports_the_default_for_information(self):
+        """Out of scope is not a reason to hide what the default is."""
+        finding = evaluate_control(
+            self.default_control(os_default=2, missing_result="not_applicable",
+                                 missing_note="Only applies where X is retained."),
+            [])
+
+        assert finding["result"] == RESULT_NOT_APPLICABLE
+        assert finding["evidence"]["os_default"]["value"] == 2
+        assert finding["evidence"]["os_default"]["applied"] is True
+
+    @pytest.mark.parametrize("os_default,expected", [
+        (0, RESULT_FAIL), (1, RESULT_PASS), (2, RESULT_PASS)])
+    def test_a_fail_missing_result_still_judges_the_default_on_its_merits(
+            self, os_default, expected):
+        """The two-sided rule must not change the ``missing_result: fail`` case."""
+        finding = evaluate_control(self.default_control(os_default=os_default), [])
+
+        assert finding["result"] == expected
+
+    def test_a_default_that_meets_the_final_step_is_capped_at_audit(self):
+        """Nothing enforces a default, so no default may read as ``enforced``.
+
+        This test previously asserted the opposite (``STATE_ENFORCED``), which
+        contradicted the catalog-wide
+        ``test_a_control_with_an_os_default_is_judged_against_it_instead`` in
+        ``TestShippedCatalogAgainstAnEmptyDomain`` — whose docstring already said
+        "nothing enforces a default" and which passed only because the one shipped
+        ``os_default`` (1) happens to sit below its ``final_expected`` (2). Both now
+        assert the same rule, and this one exercises it directly instead of relying
+        on the catalog's current numbers to never change.
+
+        The result is still ``pass``: the default does meet the target. It is the
+        *rollout state* that must not claim Group Policy holds it there.
+        """
+        finding = evaluate_control(self.default_control(os_default=2), [])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+        assert finding["rollout_state"] != STATE_ENFORCED
+
+    def test_the_cap_is_recorded_in_the_evidence_not_just_applied(self):
+        """A reader must be able to see that the state was capped, and why."""
+        finding = evaluate_control(self.default_control(os_default=2), [])
+
+        os_default = finding["evidence"]["os_default"]
+        assert os_default["rollout_state_capped"] is True
+        assert os_default["meets_final_expected"] is True
+        assert os_default["enforced_by_gpo"] is False
+        assert any("capped at 'audit'" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_default_above_the_final_step_is_also_capped(self):
+        """The cap is on the state, not on an exact equality with the target."""
+        finding = evaluate_control(self.default_control(os_default=5), [])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+
+    def test_a_default_below_the_final_step_is_not_marked_capped(self):
+        """The shipped case: 1 against a final of 2 reaches audit on its own."""
+        finding = evaluate_control(self.default_control(), [])
+
+        assert finding["rollout_state"] == STATE_AUDIT
+        assert finding["evidence"]["os_default"]["rollout_state_capped"] is False
+        assert finding["evidence"]["os_default"]["meets_final_expected"] is False
+        assert not any("capped at 'audit'" in note
+                       for note in finding["evidence"]["notes"])
+
+    def test_the_cap_holds_for_the_equals_operator(self):
+        """``equals`` reaches ``enforced`` by a different path; cap it too."""
+        finding = evaluate_control(
+            self.default_control(operator="equals", interim_expected=1,
+                                 final_expected=2, os_default=2), [])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+
+    def test_the_cap_holds_for_the_in_operator(self):
+        """``in`` was untested against ``os_default`` entirely."""
+        finding = evaluate_control(
+            self.default_control(operator="in", interim_expected=None,
+                                 final_expected=[2, 3], os_default=3), [])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+
+    def test_the_in_operator_fails_a_default_outside_the_option_set(self):
+        finding = evaluate_control(
+            self.default_control(operator="in", interim_expected=None,
+                                 final_expected=[2, 3], os_default=0), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+
+    def test_the_equals_operator_fails_a_default_that_does_not_match(self):
+        finding = evaluate_control(
+            self.default_control(operator="equals", interim_expected=None,
+                                 final_expected=2, os_default=0), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+
+    def test_a_control_without_a_default_keeps_the_old_unset_behaviour(self):
+        """Absent ``os_default`` must change nothing."""
+        finding = evaluate_control(self.default_control(os_default=None), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+        assert finding["evidence"]["os_default"] is None
+
+    def test_a_gpo_value_overrides_the_default_downwards(self):
+        """A GPO that lowers the setting must beat the optimistic default."""
+        gpo = template_gpo(GUID_SIGNING, "Legacy Exception", TEST_FLAG_LINE.format(0))
+
+        finding = evaluate_control(self.default_control(), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+        assert finding["evidence"]["os_default"] is None
+        assert finding["evidence"]["found"][0]["value"] == 0
+        assert finding["evidence"]["expected"]["os_default"] == 1
+
+    def test_a_gpo_value_overrides_the_default_upwards(self):
+        gpo = template_gpo(GUID_SIGNING, "Require Signing", TEST_FLAG_LINE.format(2))
+
+        finding = evaluate_control(self.default_control(), [gpo])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+        assert finding["evidence"]["found"][0]["gpo_dn"] == gpo_dn(GUID_SIGNING)
+
+    def test_the_counts_separate_os_default_verdicts_from_configured_ones(self):
+        """A summary must not lump assumed passes in with enforced ones."""
+        gpo = template_gpo(GUID_SIGNING, "Require Signing", TEST_FLAG_LINE.format(2))
+        assumed = self.default_control(id="TEST-ASSUMED")
+        configured = self.default_control(id="TEST-CONFIGURED")
+
+        _, both = evaluate_controls([assumed], [])
+        _, neither = evaluate_controls([configured], [gpo])
+
+        assert both["os_default"] == 1
+        assert both[RESULT_PASS] == 1
+        assert neither["os_default"] == 0
+        assert neither[RESULT_PASS] == 1
+
+    def test_os_default_pass_is_the_number_to_subtract_from_pass(self):
+        """``os_default`` alone cannot be subtracted: it includes non-passes.
+
+        The doc used to say "subtract it from pass". Since an os-default finding
+        can be ``fail`` or ``not_applicable``, that would understate configured
+        passes. ``os_default_pass`` is the subset that actually passed.
+        """
+        passing = self.default_control(id="TEST-ASSUMED-PASS", os_default=1)
+        failing = self.default_control(id="TEST-ASSUMED-FAIL", os_default=0)
+
+        _, counts = evaluate_controls([passing, failing], [])
+
+        assert counts["os_default"] == 2
+        assert counts["os_default_pass"] == 1
+        assert counts[RESULT_PASS] == 1
+        assert counts[RESULT_FAIL] == 1
+        # The only subtraction that is correct.
+        assert counts[RESULT_PASS] - counts["os_default_pass"] == 0
+
+    def test_a_conditional_os_default_is_counted_but_is_not_a_pass(self):
+        conditional = self.default_control(
+            id="TEST-ASSUMED-NA", os_default=1, missing_result="not_applicable",
+            missing_note="Only applies where X is retained.")
+
+        _, counts = evaluate_controls([conditional], [],
+                                      include_not_applicable=True)
+
+        assert counts["os_default"] == 1
+        assert counts["os_default_pass"] == 0
+        assert counts[RESULT_NOT_APPLICABLE] == 1
+
+    def test_the_counts_reconcile_with_the_filtered_findings_list(self):
+        """The review's complaint: a count with zero rendered findings.
+
+        ``counts.os_default == 1`` alongside an empty findings list looked like a
+        bug. It is not — every count describes what was *evaluated* — but nothing
+        said so. ``rendered`` and ``hidden`` now make the reconciliation explicit
+        instead of leaving a reader to guess at the discrepancy.
+        """
+        hidden_control = self.default_control(
+            id="TEST-HIDDEN", os_default=1, missing_result="not_applicable",
+            missing_note="Only applies where X is retained.")
+
+        findings, counts = evaluate_controls([hidden_control], [],
+                                             include_not_applicable=False)
+
+        assert findings == []
+        assert counts["os_default"] == 1
+        assert counts["total"] == 1
+        assert counts["hidden"] == 1
+        assert counts["rendered"] == 0
+        assert counts["rendered"] == len(findings)
+        assert counts["rendered"] + counts["hidden"] == counts["total"]
+
+    def test_rendered_and_hidden_always_sum_to_total(self):
+        gpo = template_gpo(GUID_SIGNING, "Require Signing", TEST_FLAG_LINE.format(2))
+        controls = [
+            self.default_control(id="TEST-PASS"),
+            self.default_control(id="TEST-FAIL", os_default=0),
+            self.default_control(id="TEST-NA", os_default=1,
+                                 missing_result="not_applicable",
+                                 missing_note="Only applies where X is retained."),
+        ]
+
+        findings, counts = evaluate_controls(controls, [gpo])
+
+        assert counts["rendered"] == len(findings)
+        assert counts["rendered"] + counts["hidden"] == counts["total"] == 3
+
+
+def unreadable_gpo(guid, name="Unreadable Policy",
+                   read_error="SMB access denied"):
+    """A GPO whose content could not be read: no entries, and a read_error.
+
+    This is the shape the tool layer produces when a SYSVOL read fails — the
+    snapshot exists (it was found in the directory) but nothing could be parsed
+    out of it.
+    """
+    return GpoSnapshot(dn=gpo_dn(guid), display_name=name, guid=guid,
+                       security_template_entries=[], registry_pol_entries=[],
+                       links=(GpoLink(DC_OU),), read_error=read_error)
+
+
+class TestUnreadableGposCannotProduceAnOsDefaultPass:
+    """"We could not look" is not "nothing sets this key".
+
+    ``find_matches`` can only report keys it managed to read, so an empty match
+    list conflates two very different claims. The os-default branch rests on the
+    strong one — it concludes the Windows default is the *effective* value — so an
+    unreadable GPO must invalidate it. Reporting ``pass`` / ``audit`` /
+    ``source: os-default`` off a scan that read nothing is the exact failure this
+    class exists to prevent.
+    """
+
+    def default_control(self, **overrides):
+        raw = dict(operator="gte", interim_expected=1, final_expected=2,
+                   os_default=1,
+                   value_source="Microsoft, 'LDAP client signing requirements'.",
+                   os_default_source=("Microsoft, 'LDAP client signing "
+                                      "requirements', Default values table."),
+                   missing_result="fail")
+        raw.update(overrides)
+        if raw.get("os_default") is None:
+            raw.pop("os_default_source", None)
+        return control(**raw)
+
+    def test_all_gpos_unreadable_is_an_error_not_a_pass(self):
+        """The reported defect: two unreadable GPOs and nothing else."""
+        gpos = [unreadable_gpo(GUID_SIGNING), unreadable_gpo(GUID_CONFLICT)]
+
+        finding = evaluate_control(self.default_control(), gpos)
+
+        assert finding["result"] == RESULT_ERROR
+        assert finding["result"] != RESULT_PASS
+        assert finding["rollout_state"] is None
+
+    def test_all_gpos_unreadable_does_not_assert_the_default_is_effective(self):
+        gpos = [unreadable_gpo(GUID_SIGNING), unreadable_gpo(GUID_CONFLICT)]
+
+        finding = evaluate_control(self.default_control(), gpos)
+        evidence = finding["evidence"]
+
+        assert evidence["source"] == EVIDENCE_SOURCE_UNKNOWN
+        assert evidence["source"] != EVIDENCE_SOURCE_OS_DEFAULT
+        assert evidence["source"] != EVIDENCE_SOURCE_NOT_CONFIGURED
+        assert evidence["os_default"]["applied"] is False
+        assert evidence["os_default"]["value"] == 1
+        assert evidence["os_default"]["not_applied_reason"]
+
+    def test_the_error_names_the_gpos_that_could_not_be_read(self):
+        """An auditor must be able to act on this: which GPOs, and why."""
+        gpos = [unreadable_gpo(GUID_SIGNING, read_error="SMB access denied")]
+
+        finding = evaluate_control(self.default_control(), gpos)
+
+        notes = " ".join(finding["evidence"]["notes"])
+        assert gpo_dn(GUID_SIGNING) in notes
+        assert "SMB access denied" in notes
+        assert "1 of 1" in notes
+        assert finding["evidence"]["gpos_searched"] == 1
+
+    def test_partially_unreadable_also_refuses_the_default(self):
+        """One unreadable GPO is enough, even when others read cleanly.
+
+        The judgement call: the os-default branch concludes "the OS default is
+        what is in effect", which requires knowing that *no* GPO sets the key.
+        Reading 1 of 2 GPOs does not establish that — the unread one could set the
+        value below the default — so the conservative rule is that any unreadable
+        GPO blocks the branch.
+        """
+        gpos = [template_gpo(GUID_SIGNING, "Readable, Unrelated Policy"),
+                unreadable_gpo(GUID_CONFLICT)]
+
+        finding = evaluate_control(self.default_control(), gpos)
+
+        assert finding["result"] == RESULT_ERROR
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_UNKNOWN
+        assert finding["evidence"]["os_default"]["applied"] is False
+        assert finding["evidence"]["gpos_searched"] == 2
+        assert "1 of 2" in " ".join(finding["evidence"]["notes"])
+
+    def test_a_readable_gpo_that_sets_the_key_still_wins(self):
+        """An unreadable GPO must not suppress evidence we actually have.
+
+        Where a readable GPO *does* set the key there is a real found value to
+        report, so the verdict stands on it (with the unread GPOs noted) rather
+        than collapsing to an error.
+        """
+        gpos = [template_gpo(GUID_SIGNING, "Require Signing",
+                             TEST_FLAG_LINE.format(2)),
+                unreadable_gpo(GUID_CONFLICT)]
+
+        finding = evaluate_control(self.default_control(), gpos)
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+        assert finding["evidence"]["found"][0]["value"] == 2
+        assert any("could not be read" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_control_without_a_default_keeps_its_missing_result(self):
+        """Scope: this fix targets the unsound pass, not every unread GPO.
+
+        Without ``os_default`` an unset key already returns ``missing_result``
+        (never a pass), and the unread GPOs are already noted, so the verdict is
+        left alone rather than turning every fail on an imperfectly-read domain
+        into an error.
+        """
+        gpos = [unreadable_gpo(GUID_SIGNING)]
+
+        finding = evaluate_control(self.default_control(os_default=None), gpos)
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+        assert any("could not be read" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_the_shipped_ldap_client_control_refuses_to_pass(self):
+        """The defect as reported, against the real shipped catalog control."""
+        control_obj = load_catalog().by_id("DEVORE-03-LDAP-CLIENT-SIGNING")
+        gpos = [unreadable_gpo(GUID_SIGNING), unreadable_gpo(GUID_CONFLICT)]
+
+        findings, counts = evaluate_controls([control_obj], gpos)
+
+        assert findings[0]["result"] == RESULT_ERROR
+        assert findings[0]["evidence"]["source"] == EVIDENCE_SOURCE_UNKNOWN
+        assert counts[RESULT_PASS] == 0
+        assert counts[RESULT_ERROR] == 1
+        assert counts["os_default"] == 0
+
+    def test_an_unreadable_scan_is_never_hidden_from_the_report(self):
+        """Why ``error`` and not ``not_applicable``: visibility.
+
+        ``not_applicable`` findings are filtered out by default, which would hide
+        the very thing the reader needs to see.
+        """
+        gpos = [unreadable_gpo(GUID_SIGNING)]
+
+        findings, _ = evaluate_controls([self.default_control()], gpos,
+                                        include_not_applicable=False)
+
+        assert len(findings) == 1
+        assert findings[0]["result"] == RESULT_ERROR
+
+
 class TestConflictDetection:
     """The honest substitute for RSoP."""
 
@@ -693,6 +1188,312 @@ class TestLiveVerifiedLdapCase:
         assert {f["rollout_state"] for f in findings} == {STATE_NOT_STARTED}
 
 
+class TestLdapClientSigningOnTheShippedCatalog:
+    """The live defect: a domain that sets nothing is not an unsigned domain.
+
+    ``LdapClientIntegrity`` appeared in none of the real domain's GPOs, and the
+    scan called that ``fail`` / ``not_started``. Windows defaults it to
+    Negotiate (1), so the honest verdict is "at the OS default, not raised to
+    Require" — and it must stay distinguishable from a domain that configured
+    Require explicitly.
+    """
+
+    CLIENT_LINE = ("MACHINE\\System\\CurrentControlSet\\Services\\LDAP"
+                   "\\LdapClientIntegrity=4,{}")
+
+    @pytest.fixture
+    def control_obj(self):
+        return load_catalog().by_id("DEVORE-03-LDAP-CLIENT-SIGNING")
+
+    def test_a_domain_that_sets_nothing_reflects_the_negotiate_default(
+            self, control_obj):
+        finding = evaluate_control(
+            control_obj, [template_gpo(GUID_CONFLICT, "Unrelated Policy")])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_AUDIT
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+        assert finding["evidence"]["os_default"]["value"] == 1
+        assert finding["evidence"]["os_default"]["enforced_by_gpo"] is False
+
+    def test_the_default_pass_cites_the_microsoft_document_it_rests_on(
+            self, control_obj):
+        finding = evaluate_control(control_obj, [])
+
+        value_source = finding["evidence"]["os_default"]["value_source"]
+        assert "learn.microsoft.com" in value_source
+        assert "Negotiate signing" in value_source
+
+    def test_an_explicit_require_is_distinguishable_from_the_default(
+            self, control_obj):
+        """Same pass, different evidence: configured and enforced, not assumed."""
+        gpo = template_gpo(GUID_SIGNING, "Require LDAP Client Signing",
+                           self.CLIENT_LINE.format(2))
+
+        finding = evaluate_control(control_obj, [gpo])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+        assert finding["evidence"]["os_default"] is None
+        assert finding["evidence"]["found"][0]["gpo_dn"] == gpo_dn(GUID_SIGNING)
+
+    def test_a_gpo_that_lowers_the_setting_to_none_still_fails(self, control_obj):
+        """The default must not paper over a GPO that turned signing off."""
+        gpo = template_gpo(GUID_ENFORCED, "Legacy LDAP Exception",
+                           self.CLIENT_LINE.format(0),
+                           links=(GpoLink(BASE_DN, enforced=True),))
+
+        finding = evaluate_control(control_obj, [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+
+    def test_channel_binding_has_no_default_and_still_fails_when_unset(self):
+        """The deliberate contrast: no key by default means channel binding is off."""
+        control_obj = load_catalog().by_id("DEVORE-05-LDAP-CHANNEL-BINDING")
+
+        finding = evaluate_control(control_obj, [])
+
+        assert control_obj.os_default is None
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+
+
+class TestSmbSigningOnTheShippedCatalog:
+    """The SMB controls, now active, against the shapes a real GPO writes.
+
+    Both were unscored while domains were configuring SMB signing all along, so
+    the scan reported nothing about a control an auditor cares about. The keys
+    are written with the service name cased differently in the wild
+    (``LanmanWorkstation`` / ``LanManServer``) than in Microsoft's own
+    documentation, and registry paths are case-insensitive, so key normalisation
+    has to absorb that — these fixtures spell it the way the GPOs do.
+    """
+
+    CLIENT_LINE = ("MACHINE\\System\\CurrentControlSet\\Services"
+                   "\\LanmanWorkstation\\Parameters\\RequireSecuritySignature=4,{}")
+    SERVER_LINE = ("MACHINE\\System\\CurrentControlSet\\Services"
+                   "\\LanManServer\\Parameters\\RequireSecuritySignature=4,{}")
+
+    @pytest.mark.parametrize("control_id,line_template", [
+        ("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS", CLIENT_LINE),
+        ("DEVORE-06-SMB-SERVER-SIGNING-ALWAYS", SERVER_LINE),
+    ])
+    def test_a_require_signing_gpo_passes(self, control_id, line_template):
+        gpo = template_gpo(GUID_SIGNING, "SMB Signing", line_template.format(1))
+
+        finding = evaluate_control(load_catalog().by_id(control_id), [gpo])
+
+        assert finding["result"] == RESULT_PASS, finding["evidence"]
+        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["scored"] is True
+        assert finding["evidence"]["found"][0]["value"] == 1
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+
+    @pytest.mark.parametrize("service_casing", ["LanmanWorkstation",
+                                                "LANMANWORKSTATION",
+                                                "lanmanworkstation"])
+    def test_the_client_key_matches_whatever_casing_the_gpo_used(self,
+                                                                service_casing):
+        """Registry paths are case-insensitive; the verdict must not depend on it."""
+        gpo = template_gpo(
+            GUID_SIGNING, "Example Client SMB Signing",
+            f"MACHINE\\System\\CurrentControlSet\\Services\\{service_casing}"
+            f"\\Parameters\\RequireSecuritySignature=4,1")
+
+        finding = evaluate_control(
+            load_catalog().by_id("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS"), [gpo])
+
+        assert finding["result"] == RESULT_PASS, finding["evidence"]
+
+    def test_the_server_control_reads_the_server_key_not_the_client_one(self):
+        """Two controls, two services: a client-only GPO must not pass the server."""
+        gpo = template_gpo(GUID_SIGNING, "Example Client SMB Signing",
+                           self.CLIENT_LINE.format(1))
+
+        finding = evaluate_control(
+            load_catalog().by_id("DEVORE-06-SMB-SERVER-SIGNING-ALWAYS"), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"] == []
+
+    def test_signing_disabled_fails(self):
+        gpo = template_gpo(GUID_SIGNING, "SMB Signing Off",
+                           self.CLIENT_LINE.format(0))
+
+        finding = evaluate_control(
+            load_catalog().by_id("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS"), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["found"][0]["value"] == 0
+
+    def test_the_legacy_if_agrees_setting_does_not_satisfy_the_control(self):
+        """EnableSecuritySignature is SMBv1-only and must not count as signing."""
+        gpo = template_gpo(
+            GUID_SIGNING, "Legacy SMB Signing",
+            "MACHINE\\System\\CurrentControlSet\\Services\\LanmanWorkstation"
+            "\\Parameters\\EnableSecuritySignature=4,1")
+
+        finding = evaluate_control(
+            load_catalog().by_id("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS"), [gpo])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"] == []
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+
+    def test_three_gpos_setting_signing_consistently_raise_no_conflict(self):
+        """The live shape: client GPO, server GPO, and the DC policy agreeing."""
+        catalog = load_catalog()
+        gpos = [
+            template_gpo(GUID_SIGNING, "Example Client SMB Signing",
+                         self.CLIENT_LINE.format(1), links=(GpoLink(BASE_DN),)),
+            template_gpo(GUID_CONFLICT, "Example Server SMB Signing",
+                         self.SERVER_LINE.format(1), links=(GpoLink(BASE_DN),)),
+            template_gpo(GUID_ENFORCED, "Domain Controllers Policy",
+                         self.SERVER_LINE.format(1), links=(GpoLink(DC_OU),)),
+        ]
+        controls, _ = catalog.select(["DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
+                                      "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS"])
+
+        findings, counts = evaluate_controls(controls, gpos)
+
+        assert counts[RESULT_PASS] == 2
+        assert counts[RESULT_FAIL] == 0
+        assert counts["needs_baseline_value"] == 0
+        assert counts["conflicts"] == 0
+        server = next(f for f in findings
+                      if f["control_id"] == "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS")
+        assert server["evidence"]["found_count"] == 2
+
+    def test_a_domain_that_configures_no_smb_signing_now_fails_instead_of_hiding(self):
+        """Previously unscored: the scan said nothing at all about these."""
+        catalog = load_catalog()
+        controls, _ = catalog.select(["DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
+                                      "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS"])
+
+        findings, counts = evaluate_controls(
+            controls, [template_gpo(GUID_CONFLICT, "Unrelated Policy")])
+
+        assert counts[RESULT_FAIL] == 2
+        assert counts["scored"] == 2
+        assert counts["needs_baseline_value"] == 0
+        assert all(f["evidence"]["expected"]["final"] == 1 for f in findings)
+
+
+class TestNtlmAuditFloorOnTheShippedCatalog:
+    """Acceptance 5: auditing configured *off* must not score as a pass.
+
+    These three controls used ``operator: present``, so any configured value
+    passed — including 0, which Microsoft documents as Disable / "no auditing".
+    A summary line of "8 passed" that can include "auditing is disabled" is the
+    plausible-wrong-answer class this tool exists to prevent, so the controls
+    now assert a floor of >= 1 and report which enabled level is set as
+    evidence rather than scoring it.
+    """
+
+    KEYS = {
+        "DEVORE-08-NTLM-AUDIT-INCOMING":
+            "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
+            "\\AuditReceivingNTLMTraffic",
+        "DEVORE-08-NTLM-AUDIT-OUTGOING":
+            "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
+            "\\RestrictSendingNTLMTraffic",
+        "DEVORE-08-NTLM-AUDIT-INDOMAIN":
+            "MACHINE\\System\\CurrentControlSet\\Services\\Netlogon\\Parameters"
+            "\\AuditNTLMInDomain",
+    }
+
+    def audit_gpo(self, control_id, value):
+        return template_gpo(GUID_SIGNING, "NTLM Auditing",
+                            f"{self.KEYS[control_id]}=4,{value}")
+
+    @pytest.mark.parametrize("control_id", sorted(KEYS))
+    def test_auditing_configured_off_fails(self, control_id):
+        """The defect: value 0 used to pass as 'the policy is configured'."""
+        finding = evaluate_control(load_catalog().by_id(control_id),
+                                  [self.audit_gpo(control_id, 0)])
+
+        assert finding["result"] == RESULT_FAIL, finding["evidence"]
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["found"][0]["value"] == 0
+        assert finding["evidence"]["expected"]["final"] == 1
+
+    @pytest.mark.parametrize("control_id", sorted(KEYS))
+    @pytest.mark.parametrize("value", [1, 2])
+    def test_any_enabled_auditing_level_passes(self, control_id, value):
+        finding = evaluate_control(load_catalog().by_id(control_id),
+                                  [self.audit_gpo(control_id, value)])
+
+        assert finding["result"] == RESULT_PASS, finding["evidence"]
+        assert finding["evidence"]["found"][0]["value"] == value
+
+    @pytest.mark.parametrize("control_id", sorted(KEYS))
+    def test_the_exact_level_is_reported_rather_than_scored(self, control_id):
+        """1 vs 2 (domain accounts vs all accounts) is evidence, not a verdict."""
+        control_obj = load_catalog().by_id(control_id)
+
+        domain_accounts = evaluate_control(control_obj,
+                                          [self.audit_gpo(control_id, 1)])
+        all_accounts = evaluate_control(control_obj,
+                                       [self.audit_gpo(control_id, 2)])
+
+        assert domain_accounts["result"] == all_accounts["result"] == RESULT_PASS
+        assert domain_accounts["evidence"]["found"][0]["value"] == 1
+        assert all_accounts["evidence"]["found"][0]["value"] == 2
+        assert any("FLOOR, NOT LEVEL" in caveat
+                   for caveat in domain_accounts["caveats"])
+
+    @pytest.mark.parametrize("control_id", sorted(KEYS))
+    def test_unset_still_fails_as_no_auditing(self, control_id):
+        """Microsoft: 'Not defined ... is the same as Disable'."""
+        finding = evaluate_control(load_catalog().by_id(control_id), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+        assert finding["evidence"]["os_default"] is None
+
+    def test_a_domain_auditing_at_mixed_levels_is_not_reported_as_blocking(self):
+        """The observed live shape (incoming 2, outgoing 1) passes as audited."""
+        catalog = load_catalog()
+        gpos = [self.audit_gpo("DEVORE-08-NTLM-AUDIT-INCOMING", 2),
+                template_gpo(GUID_CONFLICT, "NTLM Outgoing Audit",
+                             f"{self.KEYS['DEVORE-08-NTLM-AUDIT-OUTGOING']}=4,1")]
+        controls, _ = catalog.select(["DEVORE-08-NTLM-AUDIT-OUTGOING",
+                                      "DEVORE-08-NTLM-BLOCK-OUTGOING"])
+
+        findings, counts = evaluate_controls(controls, gpos,
+                                             include_not_applicable=True)
+
+        audit = next(f for f in findings
+                     if f["control_id"] == "DEVORE-08-NTLM-AUDIT-OUTGOING")
+        block = next(f for f in findings
+                     if f["control_id"] == "DEVORE-08-NTLM-BLOCK-OUTGOING")
+        assert audit["result"] == RESULT_PASS
+        assert block["result"] == RESULT_NOT_APPLICABLE
+        assert block["scored"] is False
+        assert block["unscored_reason"] == UNSCORED_NEEDS_BASELINE_VALUE
+        assert block["evidence"]["registry_key"] is None
+        assert counts["needs_baseline_value"] == 1
+        assert any("NOT evidence that outgoing NTLM is blocked" in caveat
+                   for caveat in audit["caveats"])
+
+    def test_two_gpos_disagreeing_about_the_audit_level_follow_the_worst(self):
+        """One GPO auditing, another switching it off: the off value wins."""
+        control_obj = load_catalog().by_id("DEVORE-08-NTLM-AUDIT-INCOMING")
+        key = self.KEYS["DEVORE-08-NTLM-AUDIT-INCOMING"]
+        gpos = [template_gpo(GUID_SIGNING, "NTLM Auditing On", f"{key}=4,2"),
+                template_gpo(GUID_CONFLICT, "NTLM Auditing Off", f"{key}=4,0")]
+
+        finding = evaluate_control(control_obj, gpos)
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["conflict"]["kind"] == "value-disagreement"
+
+
 class TestShippedCatalogAgainstSynthesizedGpos:
     """Every shipped active control, exercised once with a compliant GPO."""
 
@@ -720,7 +1521,8 @@ class TestShippedCatalogAgainstSynthesizedGpos:
         assert finding["rollout_state"] in (STATE_ENFORCED, STATE_AUDIT)
 
     @pytest.mark.parametrize("control_id", [
-        c.id for c in load_catalog().scored_controls])
+        c.id for c in load_catalog().scored_controls
+        if c.os_default is None])
     def test_every_active_control_reports_something_on_an_empty_domain(
             self, control_id):
         control_obj = load_catalog().by_id(control_id)
@@ -729,7 +1531,36 @@ class TestShippedCatalogAgainstSynthesizedGpos:
 
         assert finding["result"] in (RESULT_FAIL, RESULT_NOT_APPLICABLE)
         assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
         assert finding["evidence"]["notes"]
+
+    @pytest.mark.parametrize("control_id", [
+        c.id for c in load_catalog().scored_controls
+        if c.os_default is not None])
+    def test_a_control_with_an_os_default_is_judged_against_it_instead(
+            self, control_id):
+        """The other half of the empty-domain rule: no GPO, but a known default.
+
+        ``rollout_state`` must stay below ``enforced``: nothing enforces a
+        default, so a control whose documented default equals its final step must
+        not read as "enforced" on a domain that configures nothing.
+
+        This assertion used to hold only by luck — it passes trivially while the
+        one shipped ``os_default`` (1) sits below its ``final_expected`` (2), and
+        ``TestOsDefault`` simultaneously asserted the opposite for a default that
+        *did* meet its target. The rule is now enforced in
+        ``_os_default_finding``, which caps the state, so this test holds for any
+        future catalog value; ``TestOsDefault.test_a_default_that_meets_the_final_
+        step_is_capped_at_audit`` exercises the cap directly.
+        """
+        control_obj = load_catalog().by_id(control_id)
+
+        finding = evaluate_control(control_obj, [])
+
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+        assert finding["evidence"]["os_default"]["value"] == control_obj.os_default
+        assert finding["evidence"]["found"] == []
+        assert finding["rollout_state"] != STATE_ENFORCED
 
     def test_the_whole_catalog_evaluates_against_an_empty_domain(self):
         catalog = load_catalog()

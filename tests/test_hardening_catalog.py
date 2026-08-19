@@ -70,6 +70,19 @@ def a_catalog(*controls, **overrides):
     return {k: v for k, v in document.items() if v is not _OMIT}
 
 
+# Hosts whose documents may be cited for an *exact value*. The Devore series is
+# Microsoft-published but is a blog: it supplies the rationale and the rollout
+# order, never a number the catalog scores on. That is the dual-sourcing rule
+# the catalog was designed around, and the reason a search result claiming
+# "AuditReceivingNTLMTraffic=2 means deny all" can never reach a verdict.
+_AUTHORITATIVE_VALUE_HOSTS = ("learn.microsoft.com", "docs.microsoft.com",
+                              "support.microsoft.com", "cisecurity.org")
+
+
+def _cites_authoritative_source(value_source):
+    return any(host in (value_source or "") for host in _AUTHORITATIVE_VALUE_HOSTS)
+
+
 class TestLoaderAcceptsValidCatalogs:
 
     def test_minimal_catalog_builds(self):
@@ -320,12 +333,89 @@ class TestNeedsBaselineValueGuard:
             build_catalog(a_catalog(self.unscored(missing_result="fail")))
 
     def test_an_unscored_control_may_still_carry_a_known_registry_key(self):
-        """Path known, value not — DEVORE-08-NTLM-BLOCK-OUTGOING's situation."""
+        """Path known, value not: still unscored, because the value is the gap."""
         catalog = build_catalog(a_catalog(self.unscored(
             registry_key="HKLM\\Software\\Test\\Flag")))
 
         assert catalog.controls[0].registry_key
         assert catalog.controls[0].scored is False
+
+    def test_an_os_default_on_an_unscored_control_is_a_load_error(self):
+        """A flagged control carries no values at all, defaults included."""
+        with pytest.raises(CatalogError, match="never guessed"):
+            build_catalog(a_catalog(self.unscored(os_default=1)))
+
+
+class TestOsDefaultField:
+    """``os_default`` lets an unset key be judged — only when it is sourced."""
+
+    def defaulted(self, **overrides):
+        base = dict(operator="gte", final_expected=2, os_default=1,
+                    value_source="Microsoft doc: the compliant value is 2.",
+                    os_default_source="Microsoft doc: effective default is 1.")
+        base.update(overrides)
+        return a_control(**base)
+
+    def test_a_sourced_os_default_loads_and_is_exposed_on_the_control(self):
+        catalog = build_catalog(a_catalog(self.defaulted()))
+
+        control = catalog.controls[0]
+        assert control.os_default == 1
+        assert control.final_expected == 2
+        assert control.scored is True
+
+    def test_absent_os_default_stays_none_so_behaviour_is_unchanged(self):
+        catalog = build_catalog(a_catalog(a_control()))
+
+        assert catalog.controls[0].os_default is None
+
+    def test_an_os_default_without_its_own_source_is_a_load_error(self):
+        """An uncitable default would let an unset key report as compliant."""
+        with pytest.raises(CatalogError,
+                           match="needs its own 'os_default_source"):
+            build_catalog(a_catalog(self.defaulted(os_default_source=_OMIT)))
+
+    def test_a_general_value_source_does_not_satisfy_the_default_guard(self):
+        """The guard the review called vacuous, now non-vacuous.
+
+        Requiring ``value_source`` proved nothing: every control already carries
+        one for its *baseline* value, so no catalog edit could ever fail the check.
+        The citation for the default is a field of its own.
+        """
+        with pytest.raises(CatalogError,
+                           match="needs its own 'os_default_source"):
+            build_catalog(a_catalog(self.defaulted(
+                os_default_source=_OMIT,
+                value_source="Microsoft doc naming the baseline value.")))
+
+    def test_a_dangling_os_default_source_is_a_load_error(self):
+        """A citation with nothing to cite reads as a default being applied."""
+        with pytest.raises(CatalogError, match="no 'os_default'"):
+            build_catalog(a_catalog(self.defaulted(os_default=_OMIT)))
+
+    def test_an_os_default_source_on_an_unscored_control_is_a_load_error(self):
+        """A flagged control carries no default, so it may not cite one either."""
+        flagged = a_control(
+            id="TEST-GAP", status=STATUS_NEEDS_BASELINE_VALUE,
+            operator="present", registry_key=None, final_expected=_OMIT,
+            missing_result=_OMIT,
+            baseline_gap="the post names the policy but prints no value",
+            os_default_source="Microsoft doc: default is 1.")
+
+        with pytest.raises(CatalogError, match="os_default_source"):
+            build_catalog(a_catalog(flagged))
+
+    def test_an_os_default_on_a_presence_operator_is_a_load_error(self):
+        with pytest.raises(CatalogError, match="needs a value operator"):
+            build_catalog(a_catalog(self.defaulted(
+                operator="present", final_expected=_OMIT,
+                presence_rollout_state="audit")))
+
+    def test_an_os_default_of_zero_is_kept_rather_than_treated_as_absent(self):
+        """``0`` is a real documented default, not a missing field."""
+        catalog = build_catalog(a_catalog(self.defaulted(os_default=0)))
+
+        assert catalog.controls[0].os_default == 0
 
 
 class TestLoadCatalogFromDisk:
@@ -414,8 +504,6 @@ class TestShippedCatalogInvariants:
 
     @pytest.mark.parametrize("control_id", [
         "DEVORE-04-KERB-CONFIGURE-ENCTYPES",
-        "DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
-        "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS",
         "DEVORE-08-NTLM-BLOCK-INCOMING",
         "DEVORE-08-NTLM-BLOCK-OUTGOING",
         "DEVORE-08-NTLM-BLOCK-INDOMAIN",
@@ -430,15 +518,216 @@ class TestShippedCatalogInvariants:
         assert control.scored is False
         assert control.interim_expected is None
         assert control.final_expected is None
+        assert control.os_default is None
         assert control.baseline_gap
+        assert any(phrase in control.baseline_gap.lower()
+                   or any(phrase in caveat.lower() for caveat in control.caveats)
+                   for phrase in ("unscored", "excluded from scoring")), control.id
 
-    def test_the_smb_signing_gap_records_the_hint_without_asserting_it(self, catalog):
-        """The commonly cited path stays prose, never an assertion."""
-        control = catalog.by_id("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS")
+    @pytest.mark.parametrize("control_id,service", [
+        ("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS", "LanManWorkstation"),
+        ("DEVORE-06-SMB-SERVER-SIGNING-ALWAYS", "LanManServer"),
+    ])
+    def test_the_smb_controls_are_active_on_the_sourced_value(
+            self, catalog, control_id, service):
+        """Acceptance 4: promoted on a Microsoft document, not on a hint."""
+        control = catalog.by_id(control_id)
 
-        assert control.registry_key is None
-        assert "RequireSecuritySignature" in control.baseline_gap
-        assert "UNVERIFIED" in control.baseline_gap
+        assert control.status == STATUS_ACTIVE
+        assert control.baseline_gap is None
+        assert control.operator == "equals"
+        assert control.final_expected == 1
+        assert control.registry_value_name == "RequireSecuritySignature"
+        assert service.lower() in control.registry_key.lower()
+        assert _cites_authoritative_source(control.value_source)
+        assert "smb-signing-overview" in control.value_source
+
+    @pytest.mark.parametrize("control_id", [
+        "DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
+        "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS",
+    ])
+    def test_the_smb_controls_reject_the_legacy_weaker_setting(
+            self, catalog, control_id):
+        """EnableSecuritySignature ('if ... agrees') must not satisfy these."""
+        control = catalog.by_id(control_id)
+
+        assert "EnableSecuritySignature" not in control.registry_key
+        assert any("EnableSecuritySignature" in caveat and "SMBv1" in caveat
+                   for caveat in control.caveats), control.caveats
+
+    def test_the_ldap_client_default_is_recorded_and_cited(self, catalog):
+        """Acceptance 2/3: the one OS default a Microsoft document states."""
+        control = catalog.by_id("DEVORE-03-LDAP-CLIENT-SIGNING")
+
+        assert control.os_default == 1
+        assert control.interim_expected == 1
+        assert control.final_expected == 2
+        assert "learn.microsoft.com" in control.value_source
+
+    def test_channel_binding_has_no_invented_default(self, catalog):
+        """It has no key by default — inventing one would hide a real gap."""
+        assert catalog.by_id("DEVORE-05-LDAP-CHANNEL-BINDING").os_default is None
+
+    def test_every_os_default_cites_a_microsoft_or_cis_document(self, catalog):
+        """A default that cannot be cited is a guess that reads as compliance."""
+        defaulted = [c for c in catalog.controls if c.os_default is not None]
+
+        assert defaulted, "the catalog should model at least one OS default"
+        for control in defaulted:
+            assert control.scored, control.id
+            assert _cites_authoritative_source(control.os_default_source), control.id
+            assert any("OS DEFAULT" in caveat for caveat in control.caveats), control.id
+
+
+class TestCitationHonesty:
+    """A ``value_source`` must not assert two things that cannot both be true.
+
+    The WP's whole theme. Three NTLM audit controls claimed both that "the floor
+    comes from Microsoft" and that "Microsoft does not print the numerics" — but
+    asserting ``gte 1`` requires knowing that the off option is numerically ``0``
+    and that every other option sorts above it, which is precisely a numeric.
+    The sentence actually quoted ("Not defined ... is the same as Disable") is
+    about the *unset* case and establishes nothing on its own about a configured
+    ``0``.
+
+    The floor is still the right call. What must be true is that the wording
+    separates what is **cited** from what is **inferred**, and says why the
+    inference is safe to rest a floor on.
+    """
+
+    NTLM_AUDIT_IDS = ("DEVORE-08-NTLM-AUDIT-INCOMING",
+                      "DEVORE-08-NTLM-AUDIT-OUTGOING",
+                      "DEVORE-08-NTLM-AUDIT-INDOMAIN")
+
+    @pytest.fixture
+    def catalog(self):
+        return load_catalog()
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_the_floor_is_not_claimed_to_come_from_microsoft(
+            self, catalog, control_id):
+        """The specific contradiction, pinned so it cannot come back."""
+        value_source = catalog.by_id(control_id).value_source
+
+        assert "The floor comes from Microsoft" not in value_source
+        assert "does not print the numerics" not in value_source
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_cited_and_inferred_are_labelled_separately(
+            self, catalog, control_id):
+        value_source = catalog.by_id(control_id).value_source
+
+        assert "CITED" in value_source
+        assert "INFERRED" in value_source
+        assert "WHY THE INFERENCE IS SAFE" in value_source
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_the_inference_is_named_precisely(self, catalog, control_id):
+        """It must say *which* fact is unsourced: the 0-is-off ordering."""
+        value_source = catalog.by_id(control_id).value_source
+
+        assert "not printed by Microsoft" in value_source
+        assert "stored as the numeric 0" in value_source
+        assert "unset" in value_source
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_the_floor_is_still_asserted(self, catalog, control_id):
+        """Honest wording, not a reverted assertion."""
+        control = catalog.by_id(control_id)
+
+        assert control.operator == "gte"
+        assert control.final_expected == 1
+        assert control.status == "active"
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_the_inference_is_surfaced_in_the_caveats_too(
+            self, catalog, control_id):
+        """The report renders caveats; the inference must not hide in prose."""
+        caveats = catalog.by_id(control_id).caveats
+
+        assert any("INFERRED, NOT CITED" in caveat for caveat in caveats), caveats
+
+    @pytest.mark.parametrize("control_id", NTLM_AUDIT_IDS)
+    def test_each_audit_control_says_enforced_does_not_mean_blocked(
+            self, catalog, control_id):
+        """Present on two of the three; INDOMAIN was missing it."""
+        caveats = catalog.by_id(control_id).caveats
+
+        assert any("enforced" in caveat and "not that" in caveat
+                   for caveat in caveats), caveats
+
+    def test_block_outgoing_justifies_being_held_in_the_data(self, catalog):
+        """The same inference, the same value name, a different verdict.
+
+        AUDIT-OUTGOING scores ``gte 1`` on ``RestrictSendingNTLMTraffic`` while
+        BLOCK-OUTGOING is held ``needs_baseline_value`` on that very value name.
+        That is defensible — a floor needs only the zero point and the ordering,
+        an exact target needs the full mapping — but the reasoning has to live in
+        the catalog, not in a reviewer's head.
+        """
+        block = catalog.by_id("DEVORE-08-NTLM-BLOCK-OUTGOING")
+        audit = catalog.by_id("DEVORE-08-NTLM-AUDIT-OUTGOING")
+
+        assert block.status == STATUS_NEEDS_BASELINE_VALUE
+        assert block.registry_key is None
+        assert block.final_expected is None
+        assert "DEVORE-08-NTLM-AUDIT-OUTGOING" in block.baseline_gap
+        assert "floor" in block.baseline_gap
+        assert "exact" in block.baseline_gap
+        # And the audit control points back, so neither side reads alone.
+        assert "DEVORE-08-NTLM-BLOCK-OUTGOING" in audit.value_source
+        assert "never 'blocked'" in audit.value_source
+
+    @pytest.mark.parametrize("control_id,service", [
+        ("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS", "LanManWorkstation"),
+        ("DEVORE-06-SMB-SERVER-SIGNING-ALWAYS", "LanManServer"),
+    ])
+    def test_the_smb_registry_quote_keeps_the_sources_casing(
+            self, catalog, control_id, service):
+        """The review flagged this as a re-cased "verbatim" quote. It is not.
+
+        *Overview of Server Message Block signing in Windows* writes the registry
+        paths as ``HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\
+        LanManWorkstation\\Parameters`` and ``...\\LanManServer\\Parameters`` —
+        capital ``M`` in both — which is exactly what the catalog quotes. The page
+        does write "Lanman Server" / "Lanman Workstation" further down, but only in
+        the *Administrative Templates* SMB-auditing policy paths, which are ADMX
+        policy paths and not these registry keys.
+
+        Pinned so the quote is not "corrected" into a misquote later. The scanner's
+        matching is unaffected either way: ``normalize_registry_key`` case-folds,
+        which is what lets a real GPO's own spelling still match.
+        """
+        control = catalog.by_id(control_id)
+
+        assert service in control.value_source
+        assert service in control.registry_key
+        assert "CASING IS VERBATIM" in control.value_source
+
+    def test_channel_binding_is_scored_on_a_named_microsoft_source(self, catalog):
+        """The doc used to call these numerics unsourced while the control scored.
+
+        ``HARDENING_CATALOG.md`` listed the LDAP channel-binding 0/1/2 mapping as
+        "not stated (need a baseline source)" in two places while
+        ``DEVORE-05-LDAP-CHANNEL-BINDING`` was ``status: active`` and scoring on
+        it. The doc now names KB4034879 as the source, which is only honest if the
+        control actually cites it.
+        """
+        control = catalog.by_id("DEVORE-05-LDAP-CHANNEL-BINDING")
+
+        assert control.status == "active"
+        assert control.interim_expected == 1
+        assert control.final_expected == 2
+        assert "KB4034879" in control.value_source
+        assert any("KB4034879" in caveat for caveat in control.caveats)
+
+    def test_the_audit_and_block_controls_share_one_value_name(self, catalog):
+        """The fact that makes the distinction load-bearing rather than academic."""
+        audit = catalog.by_id("DEVORE-08-NTLM-AUDIT-OUTGOING")
+        block = catalog.by_id("DEVORE-08-NTLM-BLOCK-OUTGOING")
+
+        assert audit.registry_value_name == "RestrictSendingNTLMTraffic"
+        assert "RestrictSendingNTLMTraffic" in block.baseline_gap
 
     def test_every_control_cites_a_devore_part_and_url(self, catalog):
         for control in catalog.controls:
@@ -466,11 +755,57 @@ class TestShippedCatalogInvariants:
         assert catalog.by_id("DEVORE-08-PRINT-RPCNAMEDPIPE").missing_result \
             == "not_applicable"
 
-    def test_presence_only_controls_declare_their_rollout_state_and_warn(self, catalog):
-        for control in catalog.scored_controls:
-            if control.operator in PRESENCE_OPERATORS:
-                assert control.presence_rollout_state == "audit", control.id
-                assert any("PRESENCE ONLY" in c for c in control.caveats), control.id
+    def test_no_scored_control_accepts_a_value_that_switches_it_off(self, catalog):
+        """Acceptance 5: a bare ``present`` passes a setting configured to 0.
+
+        The three NTLM audit controls used to do exactly that, so "8 passed"
+        could have included "auditing is disabled". Nothing scored may use a
+        presence operator now; if a genuinely presence-only control ever earns
+        its place, it must explain in ``caveats`` why no floor is needed, and
+        this assertion is the prompt to think about it.
+        """
+        presence_only = [c.id for c in catalog.scored_controls
+                         if c.operator in PRESENCE_OPERATORS]
+
+        assert presence_only == []
+
+    @pytest.mark.parametrize("control_id", [
+        "DEVORE-08-NTLM-AUDIT-INCOMING",
+        "DEVORE-08-NTLM-AUDIT-OUTGOING",
+        "DEVORE-08-NTLM-AUDIT-INDOMAIN",
+    ])
+    def test_the_ntlm_audit_controls_assert_a_sourced_floor(self, catalog,
+                                                            control_id):
+        control = catalog.by_id(control_id)
+
+        assert control.operator == "gte"
+        assert control.final_expected == 1
+        assert control.presence_rollout_state is None
+        assert _cites_authoritative_source(control.value_source)
+        assert any("FLOOR, NOT LEVEL" in caveat for caveat in control.caveats)
+
+    @pytest.mark.parametrize("control_id", [
+        "DEVORE-08-NTLM-BLOCK-INCOMING",
+        "DEVORE-08-NTLM-BLOCK-OUTGOING",
+        "DEVORE-08-NTLM-BLOCK-INDOMAIN",
+    ])
+    def test_the_ntlm_block_controls_stay_unscored_with_no_key(self, catalog,
+                                                               control_id):
+        """Acceptance 6: their numerics are unsourced, so nothing is asserted.
+
+        BLOCK-OUTGOING shares its value name with the outgoing *audit* control,
+        which is now scored on a floor of >= 1. Leaving a registry_key on the
+        unscored blocking control would invite a report to imply the deny level
+        had been checked, so the path stays prose in ``baseline_gap``.
+        """
+        control = catalog.by_id(control_id)
+
+        assert control.status == STATUS_NEEDS_BASELINE_VALUE
+        assert control.scored is False
+        assert control.registry_key is None
+        assert control.final_expected is None
+        assert control.interim_expected is None
+        assert control.baseline_gap
 
     def test_every_control_is_a_check_type_the_evaluator_can_run(self, catalog):
         for control in catalog.scored_controls:
