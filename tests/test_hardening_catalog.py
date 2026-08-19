@@ -351,7 +351,8 @@ class TestOsDefaultField:
 
     def defaulted(self, **overrides):
         base = dict(operator="gte", final_expected=2, os_default=1,
-                    value_source="Microsoft doc: effective default is 1.")
+                    value_source="Microsoft doc: the compliant value is 2.",
+                    os_default_source="Microsoft doc: effective default is 1.")
         base.update(overrides)
         return a_control(**base)
 
@@ -368,10 +369,41 @@ class TestOsDefaultField:
 
         assert catalog.controls[0].os_default is None
 
-    def test_an_os_default_without_a_value_source_is_a_load_error(self):
+    def test_an_os_default_without_its_own_source_is_a_load_error(self):
         """An uncitable default would let an unset key report as compliant."""
-        with pytest.raises(CatalogError, match="os_default' needs a 'value_source"):
-            build_catalog(a_catalog(self.defaulted(value_source=_OMIT)))
+        with pytest.raises(CatalogError,
+                           match="needs its own 'os_default_source"):
+            build_catalog(a_catalog(self.defaulted(os_default_source=_OMIT)))
+
+    def test_a_general_value_source_does_not_satisfy_the_default_guard(self):
+        """The guard the review called vacuous, now non-vacuous.
+
+        Requiring ``value_source`` proved nothing: every control already carries
+        one for its *baseline* value, so no catalog edit could ever fail the check.
+        The citation for the default is a field of its own.
+        """
+        with pytest.raises(CatalogError,
+                           match="needs its own 'os_default_source"):
+            build_catalog(a_catalog(self.defaulted(
+                os_default_source=_OMIT,
+                value_source="Microsoft doc naming the baseline value.")))
+
+    def test_a_dangling_os_default_source_is_a_load_error(self):
+        """A citation with nothing to cite reads as a default being applied."""
+        with pytest.raises(CatalogError, match="no 'os_default'"):
+            build_catalog(a_catalog(self.defaulted(os_default=_OMIT)))
+
+    def test_an_os_default_source_on_an_unscored_control_is_a_load_error(self):
+        """A flagged control carries no default, so it may not cite one either."""
+        flagged = a_control(
+            id="TEST-GAP", status=STATUS_NEEDS_BASELINE_VALUE,
+            operator="present", registry_key=None, final_expected=_OMIT,
+            missing_result=_OMIT,
+            baseline_gap="the post names the policy but prints no value",
+            os_default_source="Microsoft doc: default is 1.")
+
+        with pytest.raises(CatalogError, match="os_default_source"):
+            build_catalog(a_catalog(flagged))
 
     def test_an_os_default_on_a_presence_operator_is_a_load_error(self):
         with pytest.raises(CatalogError, match="needs a value operator"):

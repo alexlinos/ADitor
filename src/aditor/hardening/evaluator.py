@@ -625,6 +625,16 @@ def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
     author said does not apply when nothing sets the key, so a conditional
     control keeps reporting ``not_applicable`` rather than being upgraded to a
     failure by an unset key it already excused.
+
+    **``rollout_state`` is capped at ``audit``.** ``_state_for`` will happily
+    return ``enforced`` for a default that meets ``final_expected``, but nothing
+    enforces a default — the phrase means "Group Policy holds this value here",
+    and on a domain that configures nothing that is simply false. The cap lives
+    here rather than in the catalog because it is a property of what an OS default
+    *is*, not of any particular control's numbers: the single shipped default
+    happens to sit below its final step today, and a future control whose
+    documented default meets its target must not quietly start reporting
+    ``enforced``.
     """
     try:
         rollout_state = _state_for(control, control.os_default)
@@ -632,17 +642,26 @@ def _os_default_finding(control: Control, gpos: Sequence[GpoSnapshot],
         return _error_finding(control, f"os_default {control.os_default!r} "
                                        f"could not be compared: {exc}", [], gpos)
 
+    notes = [missing_note, _OS_DEFAULT_NOTE.format(value=control.os_default)]
+    capped = rollout_state == STATE_ENFORCED
+    if capped:
+        rollout_state = STATE_AUDIT
+        notes.append(_OS_DEFAULT_CAP_NOTE.format(value=control.os_default))
+
     result = (control.missing_result or RESULT_FAIL
               if rollout_state == STATE_NOT_STARTED else RESULT_PASS)
     return _finding(
         control, result, rollout_state, [], gpos,
-        notes=[missing_note, _OS_DEFAULT_NOTE.format(value=control.os_default)],
+        notes=notes,
         evidence_source=EVIDENCE_SOURCE_OS_DEFAULT,
         os_default_evidence={
             "value": control.os_default,
             "source": EVIDENCE_SOURCE_OS_DEFAULT,
+            "applied": True,
             "enforced_by_gpo": False,
-            "value_source": control.value_source,
+            "meets_final_expected": capped,
+            "rollout_state_capped": capped,
+            "value_source": control.os_default_source,
         })
 
 

@@ -19,9 +19,19 @@ default that is already partly compliant — ``LdapClientIntegrity`` defaults to
 optional ``os_default``, and the evaluator compares it against the assertion when
 no GPO sets the key, instead of reporting a bare ``fail``. ``os_default`` is
 populated **only where a Microsoft document states the default**, which the loader
-enforces by requiring a ``value_source`` alongside it; a control without one keeps
-the original behaviour (unset -> ``missing_result``). A default is an *assumption*,
-never enforcement, so the evaluator marks such evidence ``source: "os-default"``.
+enforces by requiring a dedicated ``os_default_source`` alongside it; a control
+without one keeps the original behaviour (unset -> ``missing_result``). The
+citation is a *separate field on purpose*: every control already carries a
+``value_source`` for its baseline value, so requiring that one would have been a
+guard that no catalog edit could ever fail. ``os_default_source`` has to name the
+document that states **the default**, and a dangling ``os_default_source`` with no
+``os_default`` is rejected too.
+
+A default is an *assumption*, never enforcement, so the evaluator marks such
+evidence ``source: "os-default"`` — and caps its ``rollout_state`` at ``audit``,
+because "enforced" means Group Policy holds the value and nothing enforces a
+default. That cap lives in the evaluator, not here: it is a property of what an OS
+default is, so no catalog value can opt out of it.
 
 **Only known values are asserted.** A control whose exact expected value the
 source does not state is carried with ``status: "needs_baseline_value"``, no
@@ -80,7 +90,7 @@ ROLLOUT_STATES = frozenset({"not_started", "audit", "enforced"})
 _CONTROL_FIELDS = frozenset({
     "id", "title", "source", "scope", "check_type", "severity", "status",
     "friendly_policy", "registry_key", "registry_type", "operator",
-    "interim_expected", "final_expected", "os_default",
+    "interim_expected", "final_expected", "os_default", "os_default_source",
     "presence_rollout_state", "missing_result", "missing_note", "value_source",
     "baseline_gap", "remediation", "caveats", "audit_before_enforce",
 })
@@ -116,6 +126,7 @@ class Control:
     interim_expected: Any = None
     final_expected: Any = None
     os_default: Any = None
+    os_default_source: Optional[str] = None
     presence_rollout_state: Optional[str] = None
     missing_result: Optional[str] = None
     missing_note: Optional[str] = None
@@ -388,6 +399,11 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
                 f"{where} is flagged {STATUS_NEEDS_BASELINE_VALUE} but carries "
                 f"an expected value — expected values must be null for a "
                 f"control whose baseline value is unknown, never guessed")
+        if raw.get("os_default_source"):
+            raise CatalogError(
+                f"{where} is flagged {STATUS_NEEDS_BASELINE_VALUE} but carries an "
+                f"'os_default_source'; with no 'os_default' to cite it can only "
+                f"mislead")
         if not raw.get("baseline_gap"):
             raise CatalogError(
                 f"{where} is flagged {STATUS_NEEDS_BASELINE_VALUE} but has no "
@@ -427,12 +443,21 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
                     f"{where}: 'os_default' is a value to compare, so it needs a "
                     f"value operator ({', '.join(sorted(VALUE_OPERATORS))}), not "
                     f"{operator!r}")
-            if not raw.get("value_source"):
+            if not raw.get("os_default_source"):
                 raise CatalogError(
-                    f"{where}: 'os_default' needs a 'value_source' stating which "
-                    f"Microsoft document gives that default — an OS default that "
-                    f"cannot be cited is a guess, and a guessed default would let "
-                    f"an unset key report as compliant")
+                    f"{where}: 'os_default' needs its own 'os_default_source' "
+                    f"citing the Microsoft document that states the default — an "
+                    f"OS default that cannot be cited is a guess, and a guessed "
+                    f"default would let an unset key report as compliant. "
+                    f"'value_source' does not satisfy this: every control already "
+                    f"has one for its *baseline* value, so requiring it proves "
+                    f"nothing about the default")
+        elif raw.get("os_default_source"):
+            raise CatalogError(
+                f"{where} has an 'os_default_source' but no 'os_default' — a "
+                f"citation with nothing to cite is a leftover, and the next "
+                f"editor would reasonably read it as a default that is being "
+                f"applied")
 
     return Control(
         id=control_id.strip(),
@@ -450,6 +475,7 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
         interim_expected=interim,
         final_expected=final,
         os_default=os_default,
+        os_default_source=raw.get("os_default_source"),
         presence_rollout_state=presence_state,
         missing_result=missing_result,
         missing_note=raw.get("missing_note"),
