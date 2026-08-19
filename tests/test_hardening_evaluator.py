@@ -25,7 +25,6 @@ from aditor.gpo.parsers import (
 )
 from aditor.hardening.catalog import build_catalog, load_catalog
 from aditor.hardening.evaluator import (
-    OperatorError,
     RESULT_ERROR,
     RESULT_FAIL,
     RESULT_NOT_APPLICABLE,
@@ -36,6 +35,7 @@ from aditor.hardening.evaluator import (
     UNSCORED_NEEDS_BASELINE_VALUE,
     GpoLink,
     GpoSnapshot,
+    OperatorError,
     evaluate_control,
     evaluate_controls,
     find_matches,

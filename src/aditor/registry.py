@@ -29,6 +29,7 @@ from .tools.computer import ComputerTools
 from .tools.organizational_unit import OrganizationalUnitTools
 from .tools.security import SecurityTools
 from .tools.gpo import GPOTools
+from .tools.hardening import HardeningTools
 
 
 @dataclass
@@ -42,6 +43,7 @@ class Tools:
     ou: OrganizationalUnitTools
     security: SecurityTools
     gpo: GPOTools
+    hardening: HardeningTools
 
     @classmethod
     def from_ldap(cls, ldap: LDAPManager) -> "Tools":
@@ -54,6 +56,7 @@ class Tools:
             ou=OrganizationalUnitTools(ldap),
             security=SecurityTools(ldap),
             gpo=GPOTools(ldap),
+            hardening=HardeningTools(ldap),
         )
 
 
@@ -299,6 +302,32 @@ summary=true for the same shape without the heavy bodies: registry entry counts
 instead of every entry, a {type, id, name, action, sid} digest per AppLocker rule
 instead of its XML, and section names instead of template/script bodies."""
 
+SCAN_HARDENING_DESC = """Scan the domain's GPOs against the AD hardening control catalog (read-only).
+
+Enumerates every GPO, reads its settings from SYSVOL over SMB, and evaluates
+them against the versioned control catalog derived from the Devore AD Hardening
+Series (Parts 1-8). Requires the optional 'smbprotocol' package and SYSVOL read
+access; it changes nothing.
+
+Returns a provenance header (scan engine version, catalog version, timestamp,
+domain and base DN), per-control findings, and counts. Each finding carries:
+- result: pass | fail | not_applicable | error
+- rollout_state: not_started | audit | enforced — most controls are
+  audit-first-then-enforce, so a domain correctly mid-rollout reads as
+  pass/audit rather than as a failure
+- evidence: the expected value next to every value found, with the source GPO
+  DN, its link path, and whether that link is enforced
+- conflict: set when two GPOs give the same key different values, or when a
+  compliant setting is contradicted by an enforced link
+
+Precedence (RSoP) is deliberately NOT resolved: every GPO that sets a control's
+key is reported and disagreements are flagged, rather than guessing which one
+wins. Controls whose exact expected value the source does not state are
+reported but not scored — never guessed.
+
+Pass control_ids to scan a subset; include_not_applicable to see controls that
+did not apply."""
+
 TEST_CONNECTION_DESC = """Test the LDAP connection and return server information.
 
 Validates Active Directory connectivity and reports server status."""
@@ -355,6 +384,7 @@ def _handle_schema_info(tools: "Tools", args: Dict[str, Any]) -> Dict[str, Any]:
             "ou_tools": tools.ou.get_schema_info(),
             "security_tools": tools.security.get_schema_info(),
             "gpo_tools": tools.gpo.get_schema_info(),
+            "hardening_tools": tools.hardening.get_schema_info(),
         },
     }
 
@@ -895,6 +925,33 @@ TOOLS: List[ToolSpec] = [
         lambda t, a: t.gpo.get_gpo_contents(
             a["identifier"], a.get("include_registry", True), a.get("max_value_chars", 6000),
             a.get("summary", False),
+        ),
+    ),
+    # ----- Hardening scan (read-only) -----
+    ToolSpec(
+        "scan_hardening",
+        SCAN_HARDENING_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "control_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Evaluate only these control ids (e.g. "
+                                   "DEVORE-03-LDAP-SERVER-SIGNING). Omit for the "
+                                   "whole catalog.",
+                },
+                "include_not_applicable": {
+                    "type": "boolean",
+                    "description": "Include findings whose control did not apply. "
+                                   "Controls flagged needs_baseline_value are "
+                                   "always included either way.",
+                    "default": False,
+                },
+            },
+        },
+        lambda t, a: t.hardening.scan_hardening(
+            a.get("control_ids"), a.get("include_not_applicable", False),
         ),
     ),
     # ----- System -----

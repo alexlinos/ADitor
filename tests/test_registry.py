@@ -120,6 +120,13 @@ def test_expected_security_tools_are_registered(server):
 
 
 def test_expected_tool_count(server):
-    # 9 user + 8 group + 9 computer + 7 OU + 7 security + 4 GPO + 3 system = 47
-    assert len(TOOLS) == 47
-    assert len(server._tools) == 47
+    # 9 user + 8 group + 9 computer + 7 OU + 7 security + 4 GPO
+    # + 1 hardening + 3 system = 48
+    assert len(TOOLS) == 48
+    assert len(server._tools) == 48
+
+
+def test_scan_hardening_is_registered(server):
+    """P2-WP1's tool. Adding a tool needs a Claude Code restart to be visible."""
+    assert "scan_hardening" in {spec.name for spec in TOOLS}
+    assert "scan_hardening" in set(server._tool_handlers)
