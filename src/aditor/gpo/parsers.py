@@ -8,6 +8,9 @@ against a live domain controller.
 Covered formats:
 
 - ``Registry.pol`` — the PReg binary admin-template format (``parse_registry_pol``)
+- ``Preferences\\Registry\\Registry.xml`` — Group Policy *Preferences* registry
+  items, the only way a GPO can deliver a registry value that has no ADMX policy
+  behind it (``parse_registry_xml``)
 - ``GptTmpl.inf`` / ``scripts.ini`` — INF/INI text, UTF-16 or UTF-8 (``parse_ini``)
 - the ``[Registry Values]`` section of a ``GptTmpl.inf`` security template, whose
   raw lines ``parse_ini`` hands back verbatim
@@ -52,8 +55,53 @@ _HIVE_ALIASES = {
 # AppLocker per-collection EnforcementMode DWORD values (registry form).
 APPLOCKER_ENFORCEMENT = {0: "AuditOnly", 1: "Enabled"}
 
+# Registry value type *names*, as a Group Policy Preferences Registry.xml writes
+# them, mapped back onto the numeric Windows type code every other parser here
+# reports. Registry.xml is the only format that names the type instead of
+# numbering it, so this is the one place the mapping has to run backwards.
+_REG_TYPE_CODES = {name: code for code, name in REG_TYPES.items()}
+
+# Group Policy Preferences item actions, as written in the ``action`` attribute.
+# The distinction is load-bearing rather than cosmetic:
+#
+# * ``C`` (Create) writes the value **only if it does not already exist**, so it
+#   does not correct a value that has drifted below the intended one.
+# * ``R`` (Replace) deletes and rewrites; ``U`` (Update) writes the value
+#   whether or not it exists. Both correct drift on every policy refresh.
+# * ``D`` (Delete) **removes** the value. A Delete item must never be read as
+#   configuring the value it names.
+REGISTRY_XML_ACTIONS = {"C": "Create", "R": "Replace", "U": "Update",
+                        "D": "Delete"}
+
+# MS-GPPREF makes ``action`` optional and defaults it to Update, so an item that
+# omits the attribute is an Update — not an unknown.
+REGISTRY_XML_DEFAULT_ACTION = "U"
+
+# Actions that write the value they name (i.e. everything but Delete).
+REGISTRY_XML_WRITE_ACTIONS = frozenset({"C", "R", "U"})
+
+# Actions that overwrite an existing value, and so correct drift. Create does
+# not: it writes only when the value is absent.
+REGISTRY_XML_DRIFT_CORRECTING_ACTIONS = frozenset({"R", "U"})
+
+# Type codes whose Registry.xml ``value`` attribute is a **hexadecimal** string.
+# This is the single most dangerous detail in the format: ``value="00000038"``
+# on a REG_DWORD is 0x38 = 56, and reading it as decimal 38 (= 0x26) inverts the
+# operator's intent — 0x38 disables RC4 and DES for Kerberos, 0x26 re-enables
+# both. See ``_decode_preference_value``.
+_HEX_VALUE_TYPES = frozenset({4, 5, 11})  # REG_DWORD, _BIG_ENDIAN, REG_QWORD
+
+# Attribute values that mean "true" in a Registry.xml boolean attribute.
+_XML_TRUE = frozenset({"1", "true", "yes"})
+
 # Keys kept from a parsed Registry.pol block when summarizing.
 _REGISTRY_SUMMARY_KEYS = ("entry_count", "entries_truncated")
+
+# Keys kept from a parsed Registry.xml block when summarizing. There is no
+# ``entries_truncated`` because ``parse_registry_xml`` truncates nothing: a
+# preference item's value is one registry value, where a single Registry.pol
+# value can be an AppLocker rule set of tens of KB.
+_REGISTRY_XML_SUMMARY_KEYS = ("entry_count",)
 
 # Rule-XML attributes that make up a summary digest, in output order.
 _DIGEST_ATTRS = (("id", "id"), ("name", "name"), ("action", "action"),
@@ -308,6 +356,214 @@ def _unquote(text: str) -> str:
     return text
 
 
+def parse_registry_xml(data: Any) -> List[Dict[str, Any]]:
+    """Parse a Group Policy Preferences ``Registry.xml`` into registry entries.
+
+    **Why this format matters.** ``Registry.pol`` can only carry values that an
+    ADMX template defines. An arbitrary registry value — ``Kdc``'s
+    ``DefaultDomainSupportedEncTypes``, ``WinHttpAutoProxySvc``'s ``Start``,
+    ``Wintrust``'s ``EnableCertPaddingCheck`` — has no ADMX policy behind it, so
+    a GPO delivers it as a Registry **preference** item under
+    ``{Machine,User}\\Preferences\\Registry\\Registry.xml``. A scanner that reads
+    only ``Registry.pol`` and ``GptTmpl.inf`` therefore cannot see a large part
+    of the hardening an operator has actually done, and reports it as missing.
+
+    File shape::
+
+        <RegistrySettings>
+          <Registry name="..." disabled="0">
+            <Properties action="U" displayDecimal="0" default="0"
+                        hive="HKEY_LOCAL_MACHINE"
+                        key="SYSTEM\\CurrentControlSet\\Services\\Kdc"
+                        name="DefaultDomainSupportedEncTypes"
+                        type="REG_DWORD" value="00000038"/>
+          </Registry>
+          <Collection name="...">          <!-- nests, arbitrarily deep -->
+            <Registry>...</Registry>
+          </Collection>
+        </RegistrySettings>
+
+    **``value`` is hexadecimal for the integer types.** ``value="00000038"`` on a
+    ``REG_DWORD`` means ``0x38`` — **56** decimal, not 38. Reading it as decimal
+    is not a cosmetic error: for ``DefaultDomainSupportedEncTypes``, ``0x38``
+    (AES128 + AES256 + the future flag) *disables* RC4 and DES, while 38 decimal
+    is ``0x26``, which *enables* both. The wrong parse turns a hardened domain
+    into a report that says RC4 is on — and a correctly-hardened one into a
+    ``fail``. ``displayDecimal`` is a **GPMC display hint only** and is
+    deliberately ignored: it changes how the console shows the number, never how
+    the file stores it.
+
+    Other real-world shapes handled:
+
+    * ``action`` is ``C``reate / ``R``eplace / ``U``pdate / ``D``elete, and is
+      optional (absent means ``U``, per MS-GPPREF). Delete items are returned —
+      they are part of the truth about the GPO — but a caller must not treat
+      one as configuring the value it names; see
+      :data:`REGISTRY_XML_WRITE_ACTIONS`.
+    * **Bare key-creation items** carry a ``key`` with no ``name`` and no
+      ``type`` (GPMC writes one per key when a preference creates a key tree).
+      They configure no value, so they are skipped rather than emitted as a
+      value with empty data.
+    * ``<Collection>`` groups nest ``<Registry>`` items arbitrarily deep, so the
+      whole tree is walked; entries come back in document order.
+    * ``REG_SZ``/``REG_EXPAND_SZ`` values stay literal — ``value="1"`` is the
+      string ``"1"``, not the number 1 — because that is what the GPO writes and
+      the difference belongs in the evidence.
+    * ``REG_MULTI_SZ`` items keep their values in ``<Values><Value>`` children;
+      those are collected into a list. ``REG_BINARY`` stays the literal hex
+      string it is in the file: it is not an integer and must not be decoded as
+      one.
+    * ``<Filters>`` with any child means the item carries **item-level
+      targeting**, so it may not apply everywhere the GPO is linked. Resolving
+      the filters is out of scope; ``has_filters`` records that they exist so a
+      caller can say so rather than implying the item applies domain-wide.
+    * ``disabled="1"`` on the item means the preference is switched off in GPMC
+      and writes nothing.
+    * The hive is spelled in full (``HKEY_LOCAL_MACHINE``);
+      :func:`normalize_registry_key` already folds that onto ``HKLM``.
+
+    Args:
+        data: Raw file bytes (or text). ``None``/empty yields ``[]``.
+
+    Returns:
+        One dict per value-configuring item, in document order:
+
+        * ``hive`` / ``key`` / ``value_name`` — exactly as written in the file.
+          Join them (and normalise) to get the full path; nothing here is
+          upper-cased, because these fields are what a report shows a reader.
+        * ``type`` — the numeric Windows type code, or ``None`` for a type name
+          Windows does not define (or an item with no ``type`` at all).
+        * ``type_name`` — the type as the file names it, or ``None``.
+        * ``value`` — decoded per the rules above.
+        * ``action`` — one of ``C``/``R``/``U``/``D`` (upper-cased; an
+          unrecognised action is passed through verbatim rather than guessed at).
+        * ``order`` — 1-based position in the file, so two items that set the
+          same value can be told apart in evidence.
+        * ``has_filters`` / ``disabled`` — booleans, as above.
+
+        Malformed, truncated or non-XML input returns ``[]`` and never raises: an
+        unreadable preferences file must not abort a domain-wide scan.
+    """
+    entries: List[Dict[str, Any]] = []
+    if not data:
+        return entries
+    try:
+        root = ElementTree.fromstring(data)
+    except Exception:
+        # Includes ElementTree.ParseError plus the TypeError/ValueError that a
+        # non-XML object or an undecodable encoding declaration raises.
+        return entries
+
+    order = 0
+    # ``iter()`` walks the whole tree in document order, which is what makes
+    # arbitrarily nested <Collection> grouping a non-issue.
+    for element in root.iter():
+        if _local_name(element.tag) != "Registry":
+            continue
+        properties, has_filters = _registry_xml_parts(element)
+        if properties is None:
+            continue
+
+        attrs = {_local_name(name).lower(): value
+                 for name, value in properties.attrib.items()}
+        value_name = (attrs.get("name") or "").strip()
+        type_name = (attrs.get("type") or "").strip().upper() or None
+
+        # A bare key-creation item names neither a value nor a type. It creates
+        # the key and nothing else, so emitting it would invent a configured
+        # value that the GPO does not set.
+        if not value_name and not type_name:
+            continue
+
+        type_code = _REG_TYPE_CODES.get(type_name) if type_name else None
+        multi_values = [child.text or "" for child in properties.iter()
+                        if _local_name(child.tag) == "Value"]
+
+        order += 1
+        entries.append({
+            "hive": (attrs.get("hive") or "").strip(),
+            "key": (attrs.get("key") or "").strip(),
+            "value_name": value_name,
+            "type": type_code,
+            "type_name": type_name,
+            "value": _decode_preference_value(type_code, attrs.get("value"),
+                                              multi_values),
+            "action": _preference_action(attrs.get("action")),
+            "order": order,
+            "has_filters": has_filters,
+            "disabled": _xml_flag(element.attrib.get("disabled")),
+        })
+    return entries
+
+
+def _registry_xml_parts(element: Any) -> Tuple[Any, bool]:
+    """Find a ``<Registry>`` item's ``<Properties>`` child and its filter flag.
+
+    An empty ``<Filters/>`` element is not targeting — only a ``<Filters>`` with
+    at least one child filter narrows where the item applies.
+    """
+    properties = None
+    has_filters = False
+    for child in element:
+        name = _local_name(child.tag)
+        if name == "Properties" and properties is None:
+            properties = child
+        elif name == "Filters" and len(child):
+            has_filters = True
+    return properties, has_filters
+
+
+def _decode_preference_value(type_code: Optional[int], raw: Optional[str],
+                             multi_values: List[str]) -> Any:
+    """Decode one Registry.xml ``value`` per its declared type.
+
+    Integer types are **base 16** (see :func:`parse_registry_xml`). A value that
+    is not valid hex is returned as the literal string rather than dropped, so
+    the evaluator can report the mismatch as evidence instead of the parser
+    silently losing a configured setting. Everything else stays literal.
+    """
+    if type_code == 7:  # REG_MULTI_SZ — stored as <Values><Value> children.
+        if multi_values:
+            return multi_values
+        return raw if raw is not None else ""
+    if type_code in _HEX_VALUE_TYPES:
+        return _hex_value(raw)
+    return raw if raw is not None else ""
+
+
+def _hex_value(raw: Optional[str]) -> Any:
+    """Parse a Registry.xml integer value, which is a hex string.
+
+    ``"00000038"`` -> 56. An empty value means nothing was configured (``None``);
+    a value that will not parse as hex comes back as the literal string.
+    """
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    body = text[2:] if text[:2].lower() == "0x" else text
+    try:
+        return int(body, 16)
+    except ValueError:
+        return text
+
+
+def _preference_action(raw: Optional[str]) -> str:
+    """Normalise a preference item's ``action``, defaulting to Update."""
+    if raw is None:
+        return REGISTRY_XML_DEFAULT_ACTION
+    action = raw.strip().upper()
+    if not action:
+        return REGISTRY_XML_DEFAULT_ACTION
+    return action
+
+
+def _xml_flag(raw: Optional[str]) -> bool:
+    """Read a Registry.xml boolean attribute (``"1"``/``"true"``)."""
+    return isinstance(raw, str) and raw.strip().lower() in _XML_TRUE
+
+
 def extract_applocker(machine_entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Pull AppLocker rules/enforcement out of parsed machine registry entries.
 
@@ -396,10 +652,10 @@ def summarize_gpo_contents(contents: Dict[str, Any]) -> Dict[str, Any]:
     """Drop the heavy bodies from parsed GPO contents (``summary=True`` mode).
 
     Kept: identity, ``files[]``, ``gpt_ini``, each Registry.pol's
-    ``entry_count``/``entries_truncated``, and AppLocker
-    ``enforcement_mode``/``rule_count``. Registry ``entries[]`` are omitted,
-    AppLocker rule XML becomes a digest, and security template / script
-    sections are reduced to their section names.
+    ``entry_count``/``entries_truncated``, each Registry.xml's ``entry_count``,
+    and AppLocker ``enforcement_mode``/``rule_count``. Registry ``entries[]``
+    are omitted, AppLocker rule XML becomes a digest, and security template /
+    script sections are reduced to their section names.
 
     The input dict is not mutated.
     """
@@ -409,6 +665,13 @@ def summarize_gpo_contents(contents: Dict[str, Any]) -> Dict[str, Any]:
         pol = contents.get(key)
         if isinstance(pol, dict):
             out[key] = {name: pol[name] for name in _REGISTRY_SUMMARY_KEYS if name in pol}
+
+    for key in ("machine_registry_xml", "user_registry_xml"):
+        preferences = contents.get(key)
+        if isinstance(preferences, dict):
+            out[key] = {name: preferences[name]
+                        for name in _REGISTRY_XML_SUMMARY_KEYS
+                        if name in preferences}
 
     if contents.get("applocker"):
         out["applocker"] = summarize_applocker(contents["applocker"])
