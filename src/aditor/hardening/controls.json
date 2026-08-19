@@ -339,16 +339,18 @@
       "friendly_policy": "Network security: Restrict NTLM: Audit Incoming NTLM Traffic",
       "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\AuditReceivingNTLMTraffic",
       "registry_type": "REG_DWORD",
-      "operator": "present",
+      "operator": "gte",
       "interim_expected": null,
-      "final_expected": null,
-      "presence_rollout_state": "audit",
+      "final_expected": 1,
+      "presence_rollout_state": null,
       "missing_result": "fail",
-      "missing_note": "Incoming NTLM auditing is not configured, so there is no inventory of which clients still use NTLM against this system.",
-      "value_source": "Registry path quoted in Devore Part 8; the numeric level is not. The assertion is therefore presence only.",
-      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Audit Incoming NTLM Traffic' = 'Enable auditing for domain accounts'.",
+      "missing_note": "Incoming NTLM auditing is not configured, so there is no inventory of which clients still use NTLM against this system. Microsoft: 'Not defined ... is the same as Disable, and it results in no auditing of NTLM traffic.'",
+      "value_source": "Registry path quoted in Devore Part 8. The floor comes from Microsoft, 'Network security: Restrict NTLM: Audit incoming NTLM traffic', whose options are Disable / Enable auditing for domain accounts / Enable auditing for all accounts and which states 'Not defined ... is the same as Disable, and it results in no auditing of NTLM traffic': https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-restrict-ntlm-audit-incoming-ntlm-traffic — Microsoft does not print the numerics, so this control asserts only the floor (>= 1, i.e. not the Disable/off state) and reports the exact level as evidence instead of scoring it.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Audit Incoming NTLM Traffic' = 'Enable auditing for domain accounts' (or 'for all accounts').",
       "caveats": [
-        "PRESENCE ONLY: the post does not print the numeric level, so any configured value satisfies this control. Read the value in the finding's evidence — a value of 0 would mean auditing is configured off. Sourcing the exact numeric from a baseline would upgrade this to a value assertion.",
+        "FLOOR, NOT LEVEL: >= 1 means some auditing is enabled; 0 fails as 'auditing configured off'. Microsoft documents the option set (Disable / domain accounts / all accounts) but not the numerics, so the domain-vs-all-accounts distinction is reported in the evidence rather than scored — read the found value if you need to know which level is set.",
+        "TRAP: third-party write-ups conflate the Audit* and Restrict* value mappings and will tell you a value of 2 here means 'deny all'. It does not — Microsoft is explicit that this audit policy 'doesn't actually block any traffic'. Blocking is DEVORE-08-NTLM-BLOCK-INCOMING, which stays unscored for want of a sourced numeric.",
+        "rollout_state 'enforced' means the audit policy is fully configured, not that NTLM is blocked; blocking is tracked by the DEVORE-08-NTLM-BLOCK-* controls.",
         "Generates 8002/8003 in Microsoft/Windows/NTLM/Operational."
       ],
       "audit_before_enforce": null
@@ -367,17 +369,18 @@
       "friendly_policy": "Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers",
       "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\RestrictSendingNTLMTraffic",
       "registry_type": "REG_DWORD",
-      "operator": "present",
+      "operator": "gte",
       "interim_expected": null,
-      "final_expected": null,
-      "presence_rollout_state": "audit",
+      "final_expected": 1,
+      "presence_rollout_state": null,
       "missing_result": "fail",
-      "missing_note": "Outgoing NTLM traffic is neither audited nor restricted, so the outbound NTLM inventory needed before blocking does not exist.",
-      "value_source": "Registry path quoted in Devore Part 8; the numeric level is not. Presence only.",
+      "missing_note": "Outgoing NTLM traffic is neither audited nor restricted, so the outbound NTLM inventory needed before blocking does not exist. Microsoft: 'Not defined ... is the same as Allow all, and the device will allow all NTLM authentication requests.'",
+      "value_source": "Registry path quoted in Devore Part 8. The floor comes from Microsoft, 'Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers', whose options are Allow all / Audit all / Deny all and which states 'Not defined ... is the same as Allow all': https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-restrict-ntlm-outgoing-ntlm-traffic-to-remote-servers — Microsoft does not print the numerics, so this control asserts only the floor (>= 1, i.e. not the Allow-all zero state) and reports the exact level as evidence.",
       "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers' = 'Audit all' during the audit phase.",
       "caveats": [
-        "PRESENCE ONLY: the numeric level is not printed in the post, so any configured value satisfies this control; read the found value in the evidence.",
-        "One value name governs both audit and block for outgoing NTLM — see DEVORE-08-NTLM-BLOCK-OUTGOING, which needs a baseline value for the deny level."
+        "FLOOR, NOT LEVEL: >= 1 means outgoing NTLM is at least being logged; the Allow-all zero state fails. Which enabled level is set (Audit all vs Deny all) is reported in the evidence, not scored, because Microsoft does not print the numerics.",
+        "One value name governs both audit and block for outgoing NTLM — see DEVORE-08-NTLM-BLOCK-OUTGOING, which stays unscored because the deny numeric is unsourced. A pass here therefore means 'at least audited'; it is NOT evidence that outgoing NTLM is blocked.",
+        "rollout_state 'enforced' means this audit control's target is met, not that outgoing NTLM is denied."
       ],
       "audit_before_enforce": null
     },
@@ -395,16 +398,17 @@
       "friendly_policy": "Network security: Restrict NTLM: Audit NTLM authentication in this domain",
       "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Netlogon\\Parameters\\AuditNTLMInDomain",
       "registry_type": "REG_DWORD",
-      "operator": "present",
+      "operator": "gte",
       "interim_expected": null,
-      "final_expected": null,
-      "presence_rollout_state": "audit",
+      "final_expected": 1,
+      "presence_rollout_state": null,
       "missing_result": "fail",
-      "missing_note": "In-domain NTLM auditing is not configured on domain controllers, so domain-wide NTLM usage is not being inventoried.",
-      "value_source": "Registry path quoted in Devore Part 8; the numeric level is not. Presence only.",
+      "missing_note": "In-domain NTLM auditing is not configured on domain controllers, so domain-wide NTLM usage is not being inventoried. Microsoft gives 'Not defined' as the default for every server type, and Disable as the state in which no events are logged.",
+      "value_source": "Registry path quoted in Devore Part 8. The floor comes from Microsoft, 'Network security: Restrict NTLM: Audit NTLM authentication in this domain', whose options are Disable / Enable for domain accounts to domain servers / Enable for domain accounts / Enable for domain servers / Enable all, with Disable defined as 'won't log events for incoming NTLM traffic': https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-restrict-ntlm-audit-ntlm-authentication-in-this-domain — Microsoft does not print the numerics, so this control asserts only the floor (>= 1, i.e. not Disable) and reports the exact level as evidence.",
       "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Audit NTLM authentication in this domain' = 'Enable all', in a GPO linked to the Domain Controllers OU.",
       "caveats": [
-        "PRESENCE ONLY: the numeric level is not printed in the post; read the found value in the evidence.",
+        "FLOOR, NOT LEVEL: >= 1 means some in-domain auditing is enabled; 0 fails as 'auditing configured off'. This policy has five documented options (Disable plus four Enable scopes) and Microsoft does not print their numerics, so which scope is configured is reported in the evidence rather than scored — 'Enable all' is the level that inventories everything.",
+        "TRAP: this is an audit policy. Microsoft states it 'doesn't actually block any traffic'; the deny variants belong to DEVORE-08-NTLM-BLOCK-INDOMAIN, which stays unscored. Do not read any value here as blocking.",
         "Generates 8004/8005/8006."
       ],
       "audit_before_enforce": null
@@ -450,7 +454,7 @@
       "severity": "high",
       "status": "needs_baseline_value",
       "friendly_policy": "Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers",
-      "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\RestrictSendingNTLMTraffic",
+      "registry_key": null,
       "registry_type": "REG_DWORD",
       "operator": "present",
       "interim_expected": null,
@@ -459,10 +463,11 @@
       "missing_result": null,
       "missing_note": null,
       "value_source": null,
-      "baseline_gap": "The path is known (it is the same value name as the outgoing audit control) but the post does not print the numeric that means 'Deny all' — audit-vs-deny is a value change on one value name, so scoring this control without the exact number would risk reporting an audit-only domain as blocking. Source the deny numeric from the Microsoft Security Baseline or CIS Benchmark.",
+      "baseline_gap": "The value name is known — MSV1_0\\RestrictSendingNTLMTraffic, the same one the outgoing audit control reads — but no Microsoft or CIS document consulted prints the numeric that means 'Deny all'. Audit-versus-deny is a value change on a single value name, so scoring this control on an inferred number would risk reporting an audit-only domain as blocking outgoing NTLM. registry_key is therefore left null so that no part of the pipeline can present this control as checked. Source the deny numeric from a Microsoft Security Baseline or CIS Benchmark to activate it.",
       "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers' = 'Deny all', after the audit phase is clean.",
       "caveats": [
-        "Same value name as the outgoing audit control (DEVORE-08-NTLM-AUDIT-OUTGOING): audit versus deny is a value change, which is exactly why the deny numeric must come from a baseline rather than be inferred."
+        "Same value name as the outgoing audit control (DEVORE-08-NTLM-AUDIT-OUTGOING), which asserts only a floor of >= 1 ('at least audited'). A pass there is NOT evidence of blocking, and this control stays unscored until the deny numeric is sourced.",
+        "TRAP: third-party write-ups conflate the Audit* and Restrict* mappings and confidently assign a 'deny all' numeric. That is exactly the guess this status exists to prevent."
       ],
       "audit_before_enforce": "8001/8002 outbound inventory must be clean for the in-scope systems."
     },

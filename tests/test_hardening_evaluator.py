@@ -1003,6 +1003,116 @@ class TestSmbSigningOnTheShippedCatalog:
         assert all(f["evidence"]["expected"]["final"] == 1 for f in findings)
 
 
+class TestNtlmAuditFloorOnTheShippedCatalog:
+    """Acceptance 5: auditing configured *off* must not score as a pass.
+
+    These three controls used ``operator: present``, so any configured value
+    passed — including 0, which Microsoft documents as Disable / "no auditing".
+    A summary line of "8 passed" that can include "auditing is disabled" is the
+    plausible-wrong-answer class this tool exists to prevent, so the controls
+    now assert a floor of >= 1 and report which enabled level is set as
+    evidence rather than scoring it.
+    """
+
+    KEYS = {
+        "DEVORE-08-NTLM-AUDIT-INCOMING":
+            "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
+            "\\AuditReceivingNTLMTraffic",
+        "DEVORE-08-NTLM-AUDIT-OUTGOING":
+            "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\MSV1_0"
+            "\\RestrictSendingNTLMTraffic",
+        "DEVORE-08-NTLM-AUDIT-INDOMAIN":
+            "MACHINE\\System\\CurrentControlSet\\Services\\Netlogon\\Parameters"
+            "\\AuditNTLMInDomain",
+    }
+
+    def audit_gpo(self, control_id, value):
+        return template_gpo(GUID_SIGNING, "NTLM Auditing",
+                            f"{self.KEYS[control_id]}=4,{value}")
+
+    @pytest.mark.parametrize("control_id", sorted(KEYS))
+    def test_auditing_configured_off_fails(self, control_id):
+        """The defect: value 0 used to pass as 'the policy is configured'."""
+        finding = evaluate_control(load_catalog().by_id(control_id),
+                                  [self.audit_gpo(control_id, 0)])
+
+        assert finding["result"] == RESULT_FAIL, finding["evidence"]
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["found"][0]["value"] == 0
+        assert finding["evidence"]["expected"]["final"] == 1
+
+    @pytest.mark.parametrize("control_id", sorted(KEYS))
+    @pytest.mark.parametrize("value", [1, 2])
+    def test_any_enabled_auditing_level_passes(self, control_id, value):
+        finding = evaluate_control(load_catalog().by_id(control_id),
+                                  [self.audit_gpo(control_id, value)])
+
+        assert finding["result"] == RESULT_PASS, finding["evidence"]
+        assert finding["evidence"]["found"][0]["value"] == value
+
+    @pytest.mark.parametrize("control_id", sorted(KEYS))
+    def test_the_exact_level_is_reported_rather_than_scored(self, control_id):
+        """1 vs 2 (domain accounts vs all accounts) is evidence, not a verdict."""
+        control_obj = load_catalog().by_id(control_id)
+
+        domain_accounts = evaluate_control(control_obj,
+                                          [self.audit_gpo(control_id, 1)])
+        all_accounts = evaluate_control(control_obj,
+                                       [self.audit_gpo(control_id, 2)])
+
+        assert domain_accounts["result"] == all_accounts["result"] == RESULT_PASS
+        assert domain_accounts["evidence"]["found"][0]["value"] == 1
+        assert all_accounts["evidence"]["found"][0]["value"] == 2
+        assert any("FLOOR, NOT LEVEL" in caveat
+                   for caveat in domain_accounts["caveats"])
+
+    @pytest.mark.parametrize("control_id", sorted(KEYS))
+    def test_unset_still_fails_as_no_auditing(self, control_id):
+        """Microsoft: 'Not defined ... is the same as Disable'."""
+        finding = evaluate_control(load_catalog().by_id(control_id), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+        assert finding["evidence"]["os_default"] is None
+
+    def test_a_domain_auditing_at_mixed_levels_is_not_reported_as_blocking(self):
+        """The observed live shape (incoming 2, outgoing 1) passes as audited."""
+        catalog = load_catalog()
+        gpos = [self.audit_gpo("DEVORE-08-NTLM-AUDIT-INCOMING", 2),
+                template_gpo(GUID_CONFLICT, "NTLM Outgoing Audit",
+                             f"{self.KEYS['DEVORE-08-NTLM-AUDIT-OUTGOING']}=4,1")]
+        controls, _ = catalog.select(["DEVORE-08-NTLM-AUDIT-OUTGOING",
+                                      "DEVORE-08-NTLM-BLOCK-OUTGOING"])
+
+        findings, counts = evaluate_controls(controls, gpos,
+                                             include_not_applicable=True)
+
+        audit = next(f for f in findings
+                     if f["control_id"] == "DEVORE-08-NTLM-AUDIT-OUTGOING")
+        block = next(f for f in findings
+                     if f["control_id"] == "DEVORE-08-NTLM-BLOCK-OUTGOING")
+        assert audit["result"] == RESULT_PASS
+        assert block["result"] == RESULT_NOT_APPLICABLE
+        assert block["scored"] is False
+        assert block["unscored_reason"] == UNSCORED_NEEDS_BASELINE_VALUE
+        assert block["evidence"]["registry_key"] is None
+        assert counts["needs_baseline_value"] == 1
+        assert any("NOT evidence that outgoing NTLM is blocked" in caveat
+                   for caveat in audit["caveats"])
+
+    def test_two_gpos_disagreeing_about_the_audit_level_follow_the_worst(self):
+        """One GPO auditing, another switching it off: the off value wins."""
+        control_obj = load_catalog().by_id("DEVORE-08-NTLM-AUDIT-INCOMING")
+        key = self.KEYS["DEVORE-08-NTLM-AUDIT-INCOMING"]
+        gpos = [template_gpo(GUID_SIGNING, "NTLM Auditing On", f"{key}=4,2"),
+                template_gpo(GUID_CONFLICT, "NTLM Auditing Off", f"{key}=4,0")]
+
+        finding = evaluate_control(control_obj, gpos)
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["conflict"]["kind"] == "value-disagreement"
+
+
 class TestShippedCatalogAgainstSynthesizedGpos:
     """Every shipped active control, exercised once with a compliant GPO."""
 
