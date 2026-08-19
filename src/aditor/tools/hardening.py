@@ -35,6 +35,7 @@ from ..gpo.parsers import parse_gp_link, parse_security_template_registry_values
 from ..hardening import SCAN_ENGINE_VERSION
 from ..hardening.catalog import Catalog, CatalogError, load_catalog
 from ..hardening.evaluator import (
+    DELIVERIES,
     EVIDENCE_SOURCES,
     GpoLink,
     GpoSnapshot,
@@ -385,6 +386,7 @@ class HardeningTools(BaseTool):
                 guid=guid,
                 security_template_entries=_template_entries(contents),
                 registry_pol_entries=_machine_pol_entries(contents),
+                registry_xml_entries=_machine_preference_entries(contents),
                 links=links,
             ))
         return snapshots, read_errors
@@ -410,12 +412,33 @@ class HardeningTools(BaseTool):
             "report_formats": ["html"],
             "report_format_version": REPORT_FORMAT_VERSION,
             "check_types": ["gpo-security-template", "gpo-registry-pol"],
+            "deliveries": list(DELIVERIES),
             "results": ["pass", "fail", "not_applicable", "error"],
             "rollout_states": ["not_started", "audit", "enforced"],
             "evidence_sources": list(EVIDENCE_SOURCES),
             "notes": [
                 "Reads GPO settings from SYSVOL over SMB; needs the optional "
                 "'smbprotocol' package and SYSVOL read access.",
+                "A gpo-registry-pol control is satisfied by a value delivered "
+                "either by the admin-template Registry.pol or by a Group Policy "
+                "Preferences Registry.xml item - a registry value with no ADMX "
+                "policy behind it can only come from a preference. There is no "
+                "separate check_type for preferences: a control asserts a "
+                "registry key, and how the value got there is evidence. Each "
+                "found value records it in evidence.found[].delivery.",
+                "delivery matters to an auditor. A preference TATTOOS: the value "
+                "stays in the registry if its GPO is unlinked, where a policy "
+                "value reverts, so a pass delivered by preference is a weaker "
+                "statement about ongoing state. A preference item's action is "
+                "also carried: 'C' (Create) writes only when the value is absent "
+                "and so does not correct drift, while 'D' (Delete) removes the "
+                "value and is never counted as configuring it. Item-level "
+                "targeting (<Filters>) is not resolved, but a filtered item says "
+                "so in the evidence rather than implying domain-wide coverage.",
+                "A policy value and a preference value disagreeing on the same "
+                "key is reported as a 'policy-preference-disagreement' conflict: "
+                "which one lands depends on client-side extension ordering, not "
+                "on link precedence, and this scan resolves neither.",
                 _RSOP_NOTE,
                 "Controls flagged needs_baseline_value are reported but not "
                 "scored: their exact expected value is not stated by the source "
@@ -469,3 +492,16 @@ def _machine_pol_entries(contents: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not isinstance(pol, dict):
         return []
     return list(pol.get("entries") or [])
+
+
+def _machine_preference_entries(contents: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Parsed machine ``Registry.xml`` preference items.
+
+    Machine side only, matching ``_machine_pol_entries``: every control in the
+    catalog is a machine setting. The block is absent altogether for a GPO with
+    no preferences, so ``.get`` is doing real work here.
+    """
+    preferences = contents.get("machine_registry_xml")
+    if not isinstance(preferences, dict):
+        return []
+    return list(preferences.get("entries") or [])
