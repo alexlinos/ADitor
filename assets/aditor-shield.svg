@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 144" width="120" height="144" role="img" aria-label="ADitor shield mark">
+  <title>ADitor</title>
+  <g fill="none" stroke="#7C8A99" stroke-width="5" stroke-linecap="butt" stroke-linejoin="round">
+    <!-- shield: flat top, rounded top corners, sides tapering to a point -->
+    <path d="M 15 28 Q 15 19 24 19 L 96 19 Q 105 19 105 28 L 105 76
+             C 105 102 85 121 60 132 C 35 121 15 102 15 76 Z"/>
+    <!-- tier 1 -> tier 2 -->
+    <path d="M 60 48 V 60"/>
+    <path d="M 40 60 H 80"/>
+    <path d="M 40 60 V 68"/>
+    <path d="M 80 60 V 68"/>
+    <!-- tier 2 -> tier 3 -->
+    <path d="M 42 90 H 78"/>
+    <path d="M 42 90 V 96"/>
+    <path d="M 60 90 V 96"/>
+    <path d="M 78 90 V 96"/>
+    <!-- tier 2: two hollow nodes -->
+    <rect x="33" y="68" width="14" height="14"/>
+    <rect x="73" y="68" width="14" height="14"/>
+  </g>
+  <!-- tier 3: three filled leaf nodes -->
+  <g fill="#7C8A99">
+    <rect x="36" y="96" width="12" height="13" rx="1.5"/>
+    <rect x="54" y="96" width="12" height="13" rx="1.5"/>
+    <rect x="72" y="96" width="12" height="13" rx="1.5"/>
+  </g>
+  <!-- root node: the only colour in the mark -->
+  <rect x="53" y="34" width="14" height="14" fill="none" stroke="#F5A623" stroke-width="5"/>
+</svg>
