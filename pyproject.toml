@@ -60,7 +60,7 @@ Repository = "https://github.com/alexlinos/ADitor.git"
 Issues = "https://github.com/alexlinos/ADitor/issues"
 
 [project.scripts]
-activedirectory-mcp = "aditor.server:main"
+aditor = "aditor.server:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
