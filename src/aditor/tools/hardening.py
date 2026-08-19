@@ -25,6 +25,7 @@ version, timestamp, domain and base DN — because a report that cannot state
 """
 
 from datetime import datetime, timezone
+from uuid import uuid4
 from typing import Any, Dict, List, Optional, Sequence
 
 import ldap3
@@ -280,6 +281,10 @@ class HardeningTools(BaseTool):
         provenance: Dict[str, Any] = {
             "tool": "scan_hardening",
             "tool_version": SCAN_ENGINE_VERSION,
+            # Identity for this run. The timestamp orders scans; this names one,
+            # so a diff (or a report quoted in a ticket) can refer to it
+            # unambiguously even if two scans share a timestamp.
+            "scan_id": uuid4().hex,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "domain": config.domain,
             "base_dn": config.base_dn,

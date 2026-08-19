@@ -94,6 +94,7 @@ def provenance(catalog, gpos_scanned=2, gpos_unreadable=0):
     header = {
         "tool": "scan_hardening",
         "tool_version": "1.1.0",
+        "scan_id": "0123456789abcdef0123456789abcdef",
         "timestamp": "2026-08-19T09:30:00+00:00",
         "domain": "test.local",
         "base_dn": BASE_DN,
@@ -147,8 +148,13 @@ def sections_of(document):
 
 
 def card_of(document, section_id, control_id):
-    """The one ``<article>`` for ``control_id`` inside ``section_id``."""
-    anchor = f'id="{section_id}-{control_id}"'.lower()
+    """The one ``<article>`` for ``control_id`` inside ``section_id``.
+
+    The anchor is the control id alone — deliberately not section-qualified, so a
+    link to a finding survives the finding changing verdict. ``section_id`` is
+    still checked, via the card's class.
+    """
+    anchor = f'id="{control_id}"'.lower()
     start = document.lower().index(anchor)
     start = document.rindex("<article", 0, start)
     return document[start:document.index("</article>", start)]
@@ -1011,3 +1017,54 @@ if __name__ == "__main__":  # pragma: no cover - a maintenance utility
         "examples/hardening-report-sample.html"
     written, size = write_report(sample_scan(), destination)
     print(f"wrote {size} bytes of synthetic sample report to {written}")
+
+
+class TestStableAnchorsAndScanId:
+    """Two guarantees the diffing work depends on.
+
+    A card's anchor must not move when its verdict moves, and a scan must be
+    nameable, not just timestamped.
+    """
+
+    def test_a_card_anchor_does_not_move_when_the_verdict_changes(self, catalog):
+        """The anchor is the whole point: a link from a ticket must survive.
+
+        Previously anchors were ``{section}-{control_id}``, so the anchor changed
+        exactly when the finding changed — breaking the link at the moment someone
+        would follow it.
+        """
+        control_id = "DEVORE-06-LLMNR-DISABLE"
+        compliant = scan_payload([
+            snapshot("11111111-1111-1111-1111-111111111111", "LLMNR off",
+                     entries=[template_entry(
+                         r"MACHINE\Software\Policies\Microsoft\Windows NT"
+                         r"\DNSClient\EnableMulticast", 0)])],
+            catalog=catalog)
+        breached = scan_payload([
+            snapshot("11111111-1111-1111-1111-111111111111", "LLMNR on",
+                     entries=[template_entry(
+                         r"MACHINE\Software\Policies\Microsoft\Windows NT"
+                         r"\DNSClient\EnableMulticast", 1)])],
+            catalog=catalog)
+
+        passing = render_report(compliant)
+        failing = render_report(breached)
+
+        anchor = f'id="{control_id.lower()}"'
+        assert anchor in passing.lower()
+        assert anchor in failing.lower()
+        # and the anchor is not section-qualified in either direction
+        for document in (passing, failing):
+            assert f'id="passes-{control_id.lower()}"' not in document.lower()
+            assert f'id="failures-{control_id.lower()}"' not in document.lower()
+
+    def test_the_section_survives_as_the_card_class(self, mixed_scan):
+        """Dropping the section from the id must not lose the section."""
+        document = render_report(mixed_scan)
+        assert 'class="card card-failures"' in document
+
+    def test_the_scan_id_is_rendered_in_provenance(self, mixed_scan):
+        """A saved report must be able to name which scan produced it."""
+        document = render_report(mixed_scan)
+        assert "Scan id" in document
+        assert mixed_scan["scan"]["scan_id"] in document
