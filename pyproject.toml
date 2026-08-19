@@ -62,6 +62,12 @@ Issues = "https://github.com/alexlinos/ADitor/issues"
 [project.scripts]
 aditor = "aditor.server:main"
 
+[tool.setuptools.package-data]
+# The hardening control catalog is data the engine loads at runtime, so it has
+# to travel inside the wheel (and, later, the PyInstaller bundle) — not just sit
+# in the source tree.
+aditor = ["hardening/*.json"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
 testpaths = ["tests"]
