@@ -678,6 +678,32 @@ class TestCitationHonesty:
         assert "DEVORE-08-NTLM-BLOCK-OUTGOING" in audit.value_source
         assert "never 'blocked'" in audit.value_source
 
+    @pytest.mark.parametrize("control_id,service", [
+        ("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS", "LanManWorkstation"),
+        ("DEVORE-06-SMB-SERVER-SIGNING-ALWAYS", "LanManServer"),
+    ])
+    def test_the_smb_registry_quote_keeps_the_sources_casing(
+            self, catalog, control_id, service):
+        """The review flagged this as a re-cased "verbatim" quote. It is not.
+
+        *Overview of Server Message Block signing in Windows* writes the registry
+        paths as ``HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\
+        LanManWorkstation\\Parameters`` and ``...\\LanManServer\\Parameters`` —
+        capital ``M`` in both — which is exactly what the catalog quotes. The page
+        does write "Lanman Server" / "Lanman Workstation" further down, but only in
+        the *Administrative Templates* SMB-auditing policy paths, which are ADMX
+        policy paths and not these registry keys.
+
+        Pinned so the quote is not "corrected" into a misquote later. The scanner's
+        matching is unaffected either way: ``normalize_registry_key`` case-folds,
+        which is what lets a real GPO's own spelling still match.
+        """
+        control = catalog.by_id(control_id)
+
+        assert service in control.value_source
+        assert service in control.registry_key
+        assert "CASING IS VERBATIM" in control.value_source
+
     def test_channel_binding_is_scored_on_a_named_microsoft_source(self, catalog):
         """The doc used to call these numerics unsourced while the control scored.
 
