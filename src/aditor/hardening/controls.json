@@ -1,0 +1,524 @@
+{
+  "catalog_version": "2026.08.1",
+  "spec": "docs/HARDENING_CATALOG.md",
+  "baseline": {
+    "primary_source": "Jerry Devore, \"Active Directory Hardening Series\" Parts 1-8, Microsoft Core Infrastructure and Security Blog (series verified Aug 2026; there is no Part 9).",
+    "value_policy": "Expected values are only carried where the source states them. A control whose exact value the source does not state is present with status 'needs_baseline_value', no expected values, and is excluded from scoring. Values are never inferred or guessed.",
+    "pending_value_source": "Microsoft Security Baselines (Security Compliance Toolkit) and/or CIS Benchmarks — needed to close the 'needs_baseline_value' controls."
+  },
+  "notes": [
+    "Check types in this release: gpo-security-template (GptTmpl.inf [Registry Values]) and gpo-registry-pol (Registry.pol). The catalog's directory-state controls (DEVORE-02 SMBv1, DEVORE-04 msDS-SupportedEncryptionTypes, DEVORE-07 least privilege, DEVORE-08 Protected Users) have no evaluator yet and are deliberately absent rather than present-and-unevaluatable; they arrive with their own engine.",
+    "registry_key is the full path including the value name (its last component). For gpo-registry-pol the evaluator splits the last component off to match Registry.pol's separate key/value fields; for gpo-security-template the whole path is one [Registry Values] key.",
+    "Rollout is phased, not binary: interim_expected is the audit/negotiate step and final_expected the enforced step, so a domain correctly mid-rollout reports rollout_state 'audit' and result 'pass', not a failure."
+  ],
+  "controls": [
+    {
+      "id": "DEVORE-01-NTLM-LMCOMPATIBILITYLEVEL",
+      "title": "Enforce NTLMv2 via LAN Manager authentication level",
+      "source": {
+        "part": 1,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-1-%E2%80%93-disabling-ntlmv1/3934787"
+      },
+      "scope": "all",
+      "check_type": "gpo-security-template",
+      "severity": "high",
+      "status": "active",
+      "friendly_policy": "Network security: LAN Manager authentication level",
+      "registry_key": "HKLM\\System\\CurrentControlSet\\Control\\Lsa\\LmCompatibilityLevel",
+      "registry_type": "REG_DWORD",
+      "operator": "gte",
+      "interim_expected": 3,
+      "final_expected": 5,
+      "presence_rollout_state": null,
+      "missing_result": "fail",
+      "missing_note": "No GPO configures the level. The absent-default is OS-dependent (3 on Vista/2008+) but is not an enforced policy, and the key tattoos, so absence is reported as a failure rather than assumed compliant.",
+      "value_source": "Levels 0-5 and their meanings are quoted in Devore Part 1 (3 = Send NTLMv2 response only; 5 = Refuse LM & NTLM).",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: LAN Manager authentication level'. Bring all clients and member servers to 'Send NTLMv2 response only' (3) first, then raise domain controllers to 'Refuse LM & NTLM' (5).",
+      "caveats": [
+        "PHASED: do not set domain controllers to 5 until every device is at 3+. At 5 a DC treats NTLMv1 as bad-password attempts, which causes lockouts (the author saw 46 failed logons from one NTLMv1 SMB connection).",
+        "0-3 govern what the client requests; 4-5 govern what the server/DC accepts.",
+        "TATTOOING: the key lives outside HKLM\\SOFTWARE\\Policies, so setting it and later returning the policy to 'Not Defined' leaves the value behind; it must be cleared per device.",
+        "Credential Guard ignores this setting and disables NTLMv1 on its own. No reboot required."
+      ],
+      "audit_before_enforce": "4624 with LmPackageName='NTLM V1' on members and endpoints. 4776 on DCs does not record the NTLM version. Exclude ANONYMOUS LOGON."
+    },
+    {
+      "id": "DEVORE-03-LDAP-SERVER-SIGNING",
+      "title": "Domain controller LDAP server signing",
+      "source": {
+        "part": 3,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-3-%E2%80%93-enforcing-ldap-signing/4066233"
+      },
+      "scope": "domain-controllers",
+      "check_type": "gpo-security-template",
+      "severity": "high",
+      "status": "active",
+      "friendly_policy": "Domain controller: LDAP signing requirements",
+      "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\NTDS\\Parameters\\LDAPServerIntegrity",
+      "registry_type": "REG_DWORD",
+      "operator": "equals",
+      "interim_expected": 1,
+      "final_expected": 2,
+      "presence_rollout_state": null,
+      "missing_result": "fail",
+      "missing_note": "No GPO sets the LDAP signing requirement, so unsigned simple binds over cleartext remain acceptable to the DC.",
+      "value_source": "1 = None (negotiate, do not require) and 2 = Require Signing are quoted in Devore Part 3.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Domain controller: LDAP signing requirements' = 'Require signing', in a GPO linked to the Domain Controllers OU. Confirm event 2889 shows no unsigned binds first.",
+      "caveats": [
+        "AUDIT-FIRST: do not set Require Signing until 2889 auditing shows no unsigned binds.",
+        "TLS-offload / bridging load balancers forward unsigned traffic and appear as the client IP in 2889."
+      ],
+      "audit_before_enforce": "Event 2889 (unsigned bind, with client IP and account) after enabling '16 LDAP Interface Events' = 2; 2887 gives the daily unsigned volume."
+    },
+    {
+      "id": "DEVORE-03-LDAP-CLIENT-SIGNING",
+      "title": "LDAP client signing requirement",
+      "source": {
+        "part": 3,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-3-%E2%80%93-enforcing-ldap-signing/4066233"
+      },
+      "scope": "all",
+      "check_type": "gpo-security-template",
+      "severity": "medium",
+      "status": "active",
+      "friendly_policy": "Network security: LDAP client signing requirements",
+      "registry_key": "HKLM\\System\\CurrentControlSet\\Services\\LDAP\\LdapClientIntegrity",
+      "registry_type": "REG_DWORD",
+      "operator": "gte",
+      "interim_expected": 1,
+      "final_expected": 2,
+      "presence_rollout_state": null,
+      "missing_result": "fail",
+      "missing_note": "No GPO sets the client requirement. The Windows default is already Negotiate (1), so this is usually a documentation gap rather than a live risk — but an unset policy cannot be shown to be 1, and a GPO elsewhere may have lowered it to 0.",
+      "value_source": "0/1/2 (None / Negotiate signing / Require signing) are quoted in Devore Part 3; the post also states the OS default is Negotiate.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: LDAP client signing requirements' = 'Negotiate signing' or 'Require signing'.",
+      "caveats": [
+        "Windows already defaults to Negotiate (1); Windows SASL binds will not break when DCs start requiring signing unless a GPO overrode that default with 0."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "id": "DEVORE-03-LDAP-DIAG-LOGGING",
+      "title": "Enable LDAP Interface diagnostic logging (find unsigned binds)",
+      "source": {
+        "part": 3,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-3-%E2%80%93-enforcing-ldap-signing/4066233"
+      },
+      "scope": "domain-controllers",
+      "check_type": "gpo-registry-pol",
+      "severity": "informational",
+      "status": "active",
+      "friendly_policy": null,
+      "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\NTDS\\Diagnostics\\16 LDAP Interface Events",
+      "registry_type": "REG_DWORD",
+      "operator": "equals",
+      "interim_expected": null,
+      "final_expected": 2,
+      "presence_rollout_state": null,
+      "missing_result": "fail",
+      "missing_note": "Diagnostic logging is not configured, so the 2889 evidence needed before enforcing LDAP signing or channel binding is not being produced.",
+      "value_source": "= 2 is quoted in Devore Part 3.",
+      "remediation": "Set the '16 LDAP Interface Events' diagnostic level to 2 on domain controllers (registry preference or the equivalent policy) while collecting unsigned-bind evidence.",
+      "caveats": [
+        "An audit enabler, not a hardening endpoint: it generates 2889 (client IP, account, binding type), 2887 (daily unsigned volume) and 2888 (rejected after enforcement).",
+        "Leaving it at 2 permanently is noisy; it is normally raised for the audit window."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "id": "DEVORE-04-KERB-CONFIGURE-ENCTYPES",
+      "title": "Configure encryption types allowed for Kerberos (disable RC4 on devices)",
+      "source": {
+        "part": 4,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-4-%E2%80%93-enforcing-aes-for-kerberos/4114965"
+      },
+      "scope": "all",
+      "check_type": "gpo-security-template",
+      "severity": "high",
+      "status": "needs_baseline_value",
+      "friendly_policy": "Network security: Configure encryption types allowed for Kerberos",
+      "registry_key": null,
+      "registry_type": "REG_DWORD",
+      "operator": "present",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": null,
+      "missing_result": null,
+      "missing_note": null,
+      "value_source": null,
+      "baseline_gap": "Devore Part 4 names only the friendly policy and the msDS-SupportedEncryptionTypes attribute; it prints neither the registry path nor the bitmask. Source both from the Microsoft Security Baseline (Security Compliance Toolkit) or the CIS Benchmark before scoring this control.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Configure encryption types allowed for Kerberos'. Enable the AES types, and only clear RC4 once 4768 auditing confirms every device advertises AES. Remediate service accounts before devices.",
+      "caveats": [
+        "Registry path not given by the source: this control cannot be evaluated deterministically and is excluded from scoring.",
+        "Remediate SERVICE ACCOUNTS before disabling RC4 on devices."
+      ],
+      "audit_before_enforce": "4768 Ticket Encryption Type; the Jan 2025 CU adds Advertised Etypes / Available Keys to 4768 and 4769."
+    },
+    {
+      "id": "DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES",
+      "title": "Disable RC4 at the domain level on domain controllers",
+      "source": {
+        "part": 4,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-4-%E2%80%93-enforcing-aes-for-kerberos/4114965"
+      },
+      "scope": "domain-controllers",
+      "check_type": "gpo-registry-pol",
+      "severity": "high",
+      "status": "active",
+      "friendly_policy": null,
+      "registry_key": "HKLM\\System\\CurrentControlSet\\services\\KDC\\DefaultDomainSupportedEncTypes",
+      "registry_type": "REG_DWORD",
+      "operator": "equals",
+      "interim_expected": null,
+      "final_expected": 56,
+      "presence_rollout_state": null,
+      "missing_result": "fail",
+      "missing_note": "The KDC default is not restricted, so RC4 remains available domain-wide for accounts whose msDS-SupportedEncryptionTypes is blank.",
+      "value_source": "0x38 (= 56 decimal) is quoted in Devore Part 4, citing KB5021131.",
+      "remediation": "Set DefaultDomainSupportedEncTypes to 0x38 on domain controllers, as the final lock-in after per-account (service account) AES remediation.",
+      "caveats": [
+        "The post warns that big-bang use is 'too aggressive for most' — treat this as the final step, after per-account remediation, not the opening move."
+      ],
+      "audit_before_enforce": "4768 Ticket Encryption Type = RC4 identifies the accounts and devices that still depend on RC4."
+    },
+    {
+      "id": "DEVORE-05-LDAP-CHANNEL-BINDING",
+      "title": "Domain controller LDAP server channel binding token requirement",
+      "source": {
+        "part": 5,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-5-%E2%80%93-enforcing-ldap-channel-binding/4235497"
+      },
+      "scope": "domain-controllers",
+      "check_type": "gpo-security-template",
+      "severity": "high",
+      "status": "active",
+      "friendly_policy": "Domain controller: LDAP server channel binding token requirements",
+      "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\NTDS\\Parameters\\LdapEnforceChannelBinding",
+      "registry_type": "REG_DWORD",
+      "operator": "equals",
+      "interim_expected": 1,
+      "final_expected": 2,
+      "presence_rollout_state": null,
+      "missing_result": "fail",
+      "missing_note": "The value is absent, which means channel binding is off (the key has no default) and SASL binds over TLS are not bound to the TLS channel.",
+      "value_source": "Registry path quoted in Devore Part 5. The 0/1/2 numeric mapping (Never / When supported / Always) is the documented KB4034879 mapping — the post names the settings but not the numbers.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Domain controller: LDAP server channel binding token requirements' = 'When supported' (1) during the audit phase, then 'Always' (2).",
+      "caveats": [
+        "The numeric 0/1/2 mapping is not printed in the post (names only: Never / When supported / Always); it is the well-known KB4034879 mapping and should be reconfirmed against a baseline source.",
+        "Key absent by default means OFF. Only affects SASL binds over TLS. TLS-bridging load balancers break CBT, and the VIP FQDN must be in the DC certificate SAN.",
+        "AUDIT-FIRST: Server 2019+ logs 3075; 2016 and earlier only log 3039 on rejection. Requires '16 LDAP Interface Events' >= 2."
+      ],
+      "audit_before_enforce": "Event 3075 (2019+) or 3039 (2016 and earlier) in the Directory Service log."
+    },
+    {
+      "id": "DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
+      "title": "SMB client require signing (always)",
+      "source": {
+        "part": 6,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-6-%E2%80%93-enforcing-smb-signing/4272168"
+      },
+      "scope": "all",
+      "check_type": "gpo-security-template",
+      "severity": "high",
+      "status": "needs_baseline_value",
+      "friendly_policy": "Microsoft network client: Digitally sign communications (always)",
+      "registry_key": null,
+      "registry_type": "REG_DWORD",
+      "operator": "present",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": null,
+      "missing_result": null,
+      "missing_note": null,
+      "value_source": null,
+      "baseline_gap": "Devore Part 6 defers to linked Microsoft articles and prints no registry path. The commonly cited path is LanmanWorkstation\\Parameters\\RequireSecuritySignature = 1, but that is UNVERIFIED here and deliberately not asserted; confirm against the Microsoft Security Baseline or CIS Benchmark first.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Microsoft network client: Digitally sign communications (always)' = Enabled, on endpoints and member servers as well as domain controllers.",
+      "caveats": [
+        "Registry path not given by the source: excluded from scoring until a baseline value is sourced.",
+        "'(always)' applies to all SMB versions and terminates sessions where the peer cannot sign.",
+        "Windows 11 24H2 and Server 2025 require SMB signing by default."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "id": "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS",
+      "title": "SMB server require signing (always)",
+      "source": {
+        "part": 6,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-6-%E2%80%93-enforcing-smb-signing/4272168"
+      },
+      "scope": "all",
+      "check_type": "gpo-security-template",
+      "severity": "high",
+      "status": "needs_baseline_value",
+      "friendly_policy": "Microsoft network server: Digitally sign communications (always)",
+      "registry_key": null,
+      "registry_type": "REG_DWORD",
+      "operator": "present",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": null,
+      "missing_result": null,
+      "missing_note": null,
+      "value_source": null,
+      "baseline_gap": "As with the client control, Part 6 prints no registry path. The commonly cited path is LanmanServer\\Parameters\\RequireSecuritySignature = 1 — UNVERIFIED here and not asserted; source it from the Microsoft Security Baseline or CIS Benchmark.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Microsoft network server: Digitally sign communications (always)' = Enabled — not only on domain controllers.",
+      "caveats": [
+        "Registry path not given by the source: excluded from scoring until a baseline value is sourced.",
+        "The post is explicit that this belongs on endpoints and member servers too. Third-party appliances and multifunction printers are the usual unsigned culprits."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "id": "DEVORE-06-LLMNR-DISABLE",
+      "title": "Turn off LLMNR (multicast name resolution)",
+      "source": {
+        "part": 6,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-6-%E2%80%93-enforcing-smb-signing/4272168"
+      },
+      "scope": "all",
+      "check_type": "gpo-registry-pol",
+      "severity": "medium",
+      "status": "active",
+      "friendly_policy": "Turn off multicast name resolution",
+      "registry_key": "HKLM\\Software\\Policies\\Microsoft\\Windows NT\\DNSClient\\EnableMulticast",
+      "registry_type": "REG_DWORD",
+      "operator": "equals",
+      "interim_expected": null,
+      "final_expected": 0,
+      "presence_rollout_state": null,
+      "missing_result": "fail",
+      "missing_note": "LLMNR is not turned off by policy, leaving the Responder / adversary-in-the-middle name-resolution surface open.",
+      "value_source": "= 0 is quoted explicitly in Devore Part 6.",
+      "remediation": "Computer Configuration > Policies > Administrative Templates > Network > DNS Client > 'Turn off multicast name resolution' = Enabled (writes EnableMulticast = 0).",
+      "caveats": [
+        "Explicit value in the post. Reduces the AiTM / Responder surface."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "id": "DEVORE-06-NBTNS-NODETYPE",
+      "title": "Disable NetBIOS-over-TCP name resolution (P-node)",
+      "source": {
+        "part": 6,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-6-%E2%80%93-enforcing-smb-signing/4272168"
+      },
+      "scope": "all",
+      "check_type": "gpo-registry-pol",
+      "severity": "medium",
+      "status": "active",
+      "friendly_policy": "MS Security Guide: NetBT NodeType configuration (SecGuide.admx)",
+      "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\NetBT\\Parameters\\NodeType",
+      "registry_type": "REG_DWORD",
+      "operator": "equals",
+      "interim_expected": null,
+      "final_expected": 2,
+      "presence_rollout_state": null,
+      "missing_result": "fail",
+      "missing_note": "NodeType is not set to P-node, so NetBIOS broadcast name resolution remains available for spoofing.",
+      "value_source": "= 2 (P-node) is quoted explicitly in Devore Part 6.",
+      "remediation": "Computer Configuration > Policies > Administrative Templates > MS Security Guide > 'NetBT NodeType configuration' = P-node (writes NodeType = 2). Requires SecGuide.admx from the Security Compliance Toolkit.",
+      "caveats": [
+        "Explicit value in the post. Needs SecGuide.admx from the Security Compliance Toolkit for a native GPO setting."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "id": "DEVORE-08-NTLM-AUDIT-INCOMING",
+      "title": "Audit incoming NTLM traffic",
+      "source": {
+        "part": 8,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
+      },
+      "scope": "all",
+      "check_type": "gpo-security-template",
+      "severity": "medium",
+      "status": "active",
+      "friendly_policy": "Network security: Restrict NTLM: Audit Incoming NTLM Traffic",
+      "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\AuditReceivingNTLMTraffic",
+      "registry_type": "REG_DWORD",
+      "operator": "present",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": "audit",
+      "missing_result": "fail",
+      "missing_note": "Incoming NTLM auditing is not configured, so there is no inventory of which clients still use NTLM against this system.",
+      "value_source": "Registry path quoted in Devore Part 8; the numeric level is not. The assertion is therefore presence only.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Audit Incoming NTLM Traffic' = 'Enable auditing for domain accounts'.",
+      "caveats": [
+        "PRESENCE ONLY: the post does not print the numeric level, so any configured value satisfies this control. Read the value in the finding's evidence — a value of 0 would mean auditing is configured off. Sourcing the exact numeric from a baseline would upgrade this to a value assertion.",
+        "Generates 8002/8003 in Microsoft/Windows/NTLM/Operational."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "id": "DEVORE-08-NTLM-AUDIT-OUTGOING",
+      "title": "Audit outgoing NTLM traffic to remote servers",
+      "source": {
+        "part": 8,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
+      },
+      "scope": "all",
+      "check_type": "gpo-security-template",
+      "severity": "medium",
+      "status": "active",
+      "friendly_policy": "Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers",
+      "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\RestrictSendingNTLMTraffic",
+      "registry_type": "REG_DWORD",
+      "operator": "present",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": "audit",
+      "missing_result": "fail",
+      "missing_note": "Outgoing NTLM traffic is neither audited nor restricted, so the outbound NTLM inventory needed before blocking does not exist.",
+      "value_source": "Registry path quoted in Devore Part 8; the numeric level is not. Presence only.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers' = 'Audit all' during the audit phase.",
+      "caveats": [
+        "PRESENCE ONLY: the numeric level is not printed in the post, so any configured value satisfies this control; read the found value in the evidence.",
+        "One value name governs both audit and block for outgoing NTLM — see DEVORE-08-NTLM-BLOCK-OUTGOING, which needs a baseline value for the deny level."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "id": "DEVORE-08-NTLM-AUDIT-INDOMAIN",
+      "title": "Audit NTLM authentication in this domain (domain controllers)",
+      "source": {
+        "part": 8,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
+      },
+      "scope": "domain-controllers",
+      "check_type": "gpo-security-template",
+      "severity": "medium",
+      "status": "active",
+      "friendly_policy": "Network security: Restrict NTLM: Audit NTLM authentication in this domain",
+      "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Netlogon\\Parameters\\AuditNTLMInDomain",
+      "registry_type": "REG_DWORD",
+      "operator": "present",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": "audit",
+      "missing_result": "fail",
+      "missing_note": "In-domain NTLM auditing is not configured on domain controllers, so domain-wide NTLM usage is not being inventoried.",
+      "value_source": "Registry path quoted in Devore Part 8; the numeric level is not. Presence only.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Audit NTLM authentication in this domain' = 'Enable all', in a GPO linked to the Domain Controllers OU.",
+      "caveats": [
+        "PRESENCE ONLY: the numeric level is not printed in the post; read the found value in the evidence.",
+        "Generates 8004/8005/8006."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "id": "DEVORE-08-NTLM-BLOCK-INCOMING",
+      "title": "Block incoming NTLM traffic (final phase)",
+      "source": {
+        "part": 8,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
+      },
+      "scope": "all",
+      "check_type": "gpo-security-template",
+      "severity": "high",
+      "status": "needs_baseline_value",
+      "friendly_policy": "Network security: Restrict NTLM: Incoming NTLM traffic",
+      "registry_key": null,
+      "registry_type": "REG_DWORD",
+      "operator": "present",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": null,
+      "missing_result": null,
+      "missing_note": null,
+      "value_source": null,
+      "baseline_gap": "Part 8 prints the three audit paths but no blocking path or value. MSV1_0\\RestrictReceivingNTLMTraffic is the commonly cited value name — UNVERIFIED here and not asserted. Source path and the 'Deny all domain accounts' numeric from the Microsoft Security Baseline or CIS Benchmark.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Incoming NTLM traffic' = 'Deny all domain accounts', piloted on Tier 0 / PAWs first.",
+      "caveats": [
+        "Registry path and value not given by the source: excluded from scoring.",
+        "Use 'Deny all domain accounts', not 'Deny all accounts', which breaks loopback and System. Server-exception policies are available. Block events 4001-4006 replace 8001-8006."
+      ],
+      "audit_before_enforce": "8002/8003 must be clean for the in-scope systems before blocking."
+    },
+    {
+      "id": "DEVORE-08-NTLM-BLOCK-OUTGOING",
+      "title": "Block outgoing NTLM traffic to remote servers",
+      "source": {
+        "part": 8,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
+      },
+      "scope": "all",
+      "check_type": "gpo-security-template",
+      "severity": "high",
+      "status": "needs_baseline_value",
+      "friendly_policy": "Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers",
+      "registry_key": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\RestrictSendingNTLMTraffic",
+      "registry_type": "REG_DWORD",
+      "operator": "present",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": null,
+      "missing_result": null,
+      "missing_note": null,
+      "value_source": null,
+      "baseline_gap": "The path is known (it is the same value name as the outgoing audit control) but the post does not print the numeric that means 'Deny all' — audit-vs-deny is a value change on one value name, so scoring this control without the exact number would risk reporting an audit-only domain as blocking. Source the deny numeric from the Microsoft Security Baseline or CIS Benchmark.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: Outgoing NTLM traffic to remote servers' = 'Deny all', after the audit phase is clean.",
+      "caveats": [
+        "Same value name as the outgoing audit control (DEVORE-08-NTLM-AUDIT-OUTGOING): audit versus deny is a value change, which is exactly why the deny numeric must come from a baseline rather than be inferred."
+      ],
+      "audit_before_enforce": "8001/8002 outbound inventory must be clean for the in-scope systems."
+    },
+    {
+      "id": "DEVORE-08-NTLM-BLOCK-INDOMAIN",
+      "title": "Block NTLM authentication in this domain (domain controllers, project end)",
+      "source": {
+        "part": 8,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
+      },
+      "scope": "domain-controllers",
+      "check_type": "gpo-security-template",
+      "severity": "high",
+      "status": "needs_baseline_value",
+      "friendly_policy": "Network security: Restrict NTLM: NTLM authentication in this domain",
+      "registry_key": null,
+      "registry_type": "REG_DWORD",
+      "operator": "present",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": null,
+      "missing_result": null,
+      "missing_note": null,
+      "value_source": null,
+      "baseline_gap": "Neither the blocking path nor the deny numerics are printed in Part 8. Netlogon\\Parameters\\RestrictNTLMInDomain is the commonly cited value name — UNVERIFIED here and not asserted. The deny variants differ by scope, so both path and value must come from a baseline source.",
+      "remediation": "Computer Configuration > Policies > Windows Settings > Security Settings > Local Policies > Security Options > 'Network security: Restrict NTLM: NTLM authentication in this domain' = the appropriate deny variant, on domain controllers, as the very last step of the project.",
+      "caveats": [
+        "Path and values not given by the source: excluded from scoring.",
+        "Deny variants differ by scope; applied at the very end, DCs only."
+      ],
+      "audit_before_enforce": "8004/8005/8006 must be clean domain-wide before blocking."
+    },
+    {
+      "id": "DEVORE-08-PRINT-RPCNAMEDPIPE",
+      "title": "Fix Print Spooler NTLM fallback (PrintNightmare artifact)",
+      "source": {
+        "part": 8,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
+      },
+      "scope": "all",
+      "check_type": "gpo-registry-pol",
+      "severity": "low",
+      "status": "active",
+      "friendly_policy": "Printers\\Configure RPC connection/listener settings (prefer RPC over TCP)",
+      "registry_key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Printers\\RPC\\RpcNamedPipeAuthentication",
+      "registry_type": "REG_DWORD",
+      "operator": "equals",
+      "interim_expected": null,
+      "final_expected": 2,
+      "presence_rollout_state": null,
+      "missing_result": "not_applicable",
+      "missing_note": "The value only applies where RPC-over-named-pipes must be retained. The preferred configuration is RPC-over-TCP, under which this value is legitimately unset — so absence is reported as not_applicable rather than a failure.",
+      "value_source": "0x2 (= 2 decimal) is quoted explicitly in Devore Part 8.",
+      "remediation": "Prefer RPC over TCP. Where named pipes must be retained, set 'Configure RPC connection settings' / RpcNamedPipeAuthentication = 2 so the named-pipe listener does not fall back to unauthenticated NTLM.",
+      "caveats": [
+        "Explicit value quoted in the post. Related NTLM-fallback sources (RPC EPM, TryIPSPN, Kerberos LogLevel, MS-CHAPv2, DFS referrals) are named in the post without values."
+      ],
+      "audit_before_enforce": null
+    }
+  ]
+}
