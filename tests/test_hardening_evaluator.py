@@ -14,6 +14,14 @@ real SID, domain, DC hostname or file path appears.
 The centrepiece is ``TestLiveVerifiedLdapCase``: the two ``[Registry Values]``
 lines a real GPO was observed to contain must satisfy *both* LDAP controls. That
 reproduces the live-verified case entirely offline.
+
+Three further classes pin the accuracy fixes, each of which changes a verdict:
+``TestOsDefault`` and ``TestLdapClientSigningOnTheShippedCatalog`` (an unset key
+with a documented Windows default is judged against it, and labelled so it never
+reads as GPO-enforced), ``TestSmbSigningOnTheShippedCatalog`` (the newly active
+SMB controls, spelled the way real GPOs spell the service names), and
+``TestNtlmAuditFloorOnTheShippedCatalog`` (auditing configured *off* must fail
+rather than pass as "the policy is configured").
 """
 
 import pytest
@@ -461,6 +469,21 @@ class TestOsDefault:
 
         assert finding["result"] == RESULT_FAIL
         assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
+
+    def test_a_weak_default_respects_a_conditional_controls_semantics(self):
+        """Knowing the default cannot make a control apply that says it does not.
+
+        A control whose ``missing_result`` is ``not_applicable`` has declared
+        that an unset key means "does not apply here". A documented default that
+        falls below the floor must not silently upgrade that to a failure.
+        """
+        finding = evaluate_control(
+            self.default_control(os_default=0, missing_result="not_applicable",
+                                 missing_note="Only applies where X is retained."),
+            [])
+
+        assert finding["result"] == RESULT_NOT_APPLICABLE
         assert finding["evidence"]["source"] == EVIDENCE_SOURCE_OS_DEFAULT
 
     def test_a_default_that_meets_the_final_step_reads_as_enforced(self):
