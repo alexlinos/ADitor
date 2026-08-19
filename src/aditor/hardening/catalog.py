@@ -202,10 +202,17 @@ class Catalog:
         return tuple(c for c in self.controls if not c.scored)
 
     def provenance(self) -> Dict[str, Any]:
-        """The catalog half of a scan's provenance header."""
+        """The catalog half of a scan's provenance header.
+
+        ``catalog_source`` is trimmed to its last two path components: a scan
+        report is a shareable artifact and does not need the operator's absolute
+        install path in it. Full paths stay in load-time error messages, where
+        they are useful.
+        """
+        parts = Path(self.source).parts if self.source else ()
         return {
             "catalog_version": self.version,
-            "catalog_source": self.source,
+            "catalog_source": "/".join(parts[-2:]) if parts else "",
             "control_count": len(self.controls),
             "scored_control_count": len(self.scored_controls),
             "unscored_control_ids": [c.id for c in self.unscored_controls],

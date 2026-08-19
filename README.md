@@ -105,6 +105,16 @@ redirects):
 `get_gpo_contents` (parses Registry.pol, security templates, and AppLocker rules
 from SYSVOL)
 
+**Hardening scan**
+`scan_hardening` — evaluates the domain's GPOs against a versioned control
+catalog derived from the Devore AD Hardening Series (Parts 1-8). Each finding
+carries a result, a rollout state (not started / audit / enforced, so a domain
+correctly mid-rollout does not read as failing), and evidence: expected value
+next to every value found, with the source GPO DN and link path. Policy
+precedence is not resolved — conflicting GPOs are reported as conflicts instead.
+Controls whose exact expected value the source does not state are reported but
+never scored or guessed.
+
 **Directory management**
 - Users: `list_users`, `get_user`, `get_user_groups`, `create_user`, `modify_user`,
   `delete_user`, `enable_user`, `disable_user`, `reset_user_password`
