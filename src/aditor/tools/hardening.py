@@ -7,7 +7,7 @@ response shaping. The control definitions live in
 :mod:`aditor.hardening.report`, and the parsing in :mod:`aditor.gpo.parsers`;
 all four are pure and unit-tested offline.
 
-Four tools, one scan:
+Five tools, one scan:
 
 * ``scan_hardening`` returns the structured JSON — the **source of truth**.
 * ``write_hardening_report`` runs the same scan and writes it as one
@@ -16,10 +16,16 @@ Four tools, one scan:
 * ``write_hardening_scan`` runs the same scan and writes the **JSON** to a file,
   so two runs can be compared later. It is the report tool's sibling: same scan,
   same path guards, different medium.
+* ``write_hardening_snapshot`` runs the scan **once** and writes both of the
+  above into one dated folder. The two writers above each run their own scan, so
+  calling them in turn would leave a folder holding two different scans; this
+  tool exists to make that impossible — see
+  :mod:`aditor.hardening.snapshot`.
 * ``diff_hardening_scans`` compares two stored scans. It is the one tool here
-  that touches no directory at all — two files in, one diff out.
+  that touches no directory at all — two files (or two snapshot folders) in, one
+  diff out.
 
-Writing a file is the only side effect any of these tools has.
+Writing files is the only side effect any of these tools has.
 
 The scan is **read-only**: it enumerates ``groupPolicyContainer`` objects, reads
 each one's SYSVOL folder, and compares what it finds against the catalog. It
@@ -69,6 +75,13 @@ from ..hardening.scanfile import (
     SCAN_FILE_FORMAT_VERSION,
     ScanFileError,
     write_scan,
+)
+from ..hardening.snapshot import (
+    SNAPSHOT_FORMAT_VERSION,
+    SNAPSHOT_REPORT_FILENAME,
+    SNAPSHOT_SCAN_FILENAME,
+    SnapshotError,
+    write_snapshot,
 )
 from .base import BaseTool
 from .gpo import GPOTools
@@ -316,6 +329,140 @@ class HardeningTools(BaseTool):
             ],
         }, "write_hardening_scan")
 
+    def write_hardening_snapshot(self, output_dir: str
+                                 ) -> List[Dict[str, Any]]:
+        """Run the hardening scan **once** and write both artifacts to one folder.
+
+        ::
+
+            <output_dir>/2026-08-20T162647Z-b288e925/
+                scan.json      <- the payload (source of truth)
+                report.html    <- the rendered document
+
+        The reason this tool exists rather than the caller running the other two:
+        ``write_hardening_scan`` and ``write_hardening_report`` each run their
+        **own** scan. Calling both would put a report and a payload from two
+        different scans in one folder — different ``scan_id``, different
+        timestamps, and on a domain that moved in between, different findings.
+        The JSON is the evidence of record, so a report that disagrees with it
+        undermines the provenance the folder exists to keep. Here the scan runs
+        once and both writers are handed that one payload.
+
+        The folder is named from the scan's **own** timestamp, not from a fresh
+        clock reading, so the directory listing and the provenance inside the
+        files agree; and it carries no colon, because that is an illegal Windows
+        filename and the packaging target is a Windows ``.exe``. The short
+        ``scan_id`` suffix keeps two scans in the same second apart.
+
+        Neither ``control_ids`` nor ``include_not_applicable`` is exposed, and
+        the whole catalog is always scanned. A snapshot is a record of the domain
+        at a moment and an input to a later ``diff_hardening_scans``; a snapshot
+        that filtered part of the catalog out could not be told apart from one
+        whose catalog was smaller, and the pair of files would no longer be a
+        complete account of the run.
+
+        Args:
+            output_dir: The directory to create the snapshot folder **inside**.
+                ``~`` is expanded and a relative path resolves against the
+                working directory. Missing parents are created. There is
+                deliberately no default: both files hold real directory content,
+                so where they land is the operator's choice.
+
+        Returns:
+            List of MCP content objects with the snapshot folder, the
+            ``scan_id``, both file paths and byte counts, the provenance header
+            and the headline counts. On any failure the payload carries
+            ``success: False``, and a refusal after the folder was created leaves
+            no folder behind — a snapshot is both files or neither.
+        """
+        try:
+            payload = self._scan(None, include_not_applicable=True,
+                                 operation="write_hardening_snapshot")
+        except _GpoReadFailure as failure:
+            return self._handle_ldap_error(failure.cause,
+                                           "write_hardening_snapshot",
+                                           self.ldap.ad_config.base_dn)
+
+        if payload.get("success") is False:
+            # A catalog, argument or dependency failure. Report it and write
+            # nothing: a folder holding an error payload would be read later as
+            # a snapshot of the domain.
+            return self._format_response(payload, "write_hardening_snapshot")
+
+        try:
+            snapshot = write_snapshot(payload, output_dir)
+        except (SnapshotError, ScanFileError, ReportPathError) as exc:
+            return self._format_response({
+                "success": False,
+                "error": str(exc),
+                "operation": "write_hardening_snapshot",
+                "scan_succeeded": True,
+                "note": "The scan completed; only the write was refused. Fix "
+                        "the output directory and re-run — no snapshot folder "
+                        "was left behind.",
+            }, "write_hardening_snapshot")
+
+        log_ldap_operation("write_hardening_snapshot",
+                           self.ldap.ad_config.base_dn, True,
+                           f"Wrote {snapshot.scan_bytes + snapshot.report_bytes}"
+                           f" bytes to {snapshot.folder}")
+
+        return self._format_response({
+            "success": True,
+            "operation": "write_hardening_snapshot",
+            "snapshot_dir": str(snapshot.folder),
+            "snapshot_name": snapshot.folder.name,
+            "snapshot_format_version": SNAPSHOT_FORMAT_VERSION,
+            # Named at the top level as well as inside ``scan``: it is the one
+            # value that proves both files came from the same run.
+            "scan_id": payload["scan"]["scan_id"],
+            "scans_run": 1,
+            "files": {
+                "scan": {
+                    "name": SNAPSHOT_SCAN_FILENAME,
+                    "path": str(snapshot.scan_path),
+                    "bytes_written": snapshot.scan_bytes,
+                    "format": "json",
+                    "scan_format_version": SCAN_FILE_FORMAT_VERSION,
+                },
+                "report": {
+                    "name": SNAPSHOT_REPORT_FILENAME,
+                    "path": str(snapshot.report_path),
+                    "bytes_written": snapshot.report_bytes,
+                    "format": "html",
+                    "report_format_version": REPORT_FORMAT_VERSION,
+                    "self_contained": True,
+                },
+            },
+            "bytes_written": snapshot.scan_bytes + snapshot.report_bytes,
+            "counts": payload["counts"],
+            "headline": headline_counts(payload),
+            "scan": payload["scan"],
+            "notes": [
+                "The scan ran ONCE and both files render that one payload, so "
+                "the report and the JSON carry the same scan_id, the same "
+                "timestamp and the same findings. Running "
+                "write_hardening_scan and write_hardening_report separately "
+                "would give you two different scans in one folder.",
+                "The folder name is the scan's own timestamp plus a scan_id "
+                "prefix, with no colon in it: colons are illegal in Windows "
+                "filenames, and the name is derived from the payload rather "
+                "than from the clock so the directory listing and the files "
+                "agree.",
+                "An existing snapshot folder is refused, never overwritten or "
+                "merged into. Each run gets its own folder.",
+                "The whole catalog was scanned and nothing was filtered out, so "
+                "a later diff can tell a catalog change from a control that "
+                "was simply not evaluated.",
+                "diff_hardening_scans accepts these folders directly — pass "
+                "two snapshot folders and it reads the scan.json inside each.",
+                "BOTH FILES CONTAIN DIRECTORY CONTENT: this domain's GPO "
+                "display names, registry values and DNs. Treat the folder "
+                "accordingly when sharing it, attaching it to a ticket, or "
+                "committing it.",
+            ],
+        }, "write_hardening_snapshot")
+
     def diff_hardening_scans(self, before_path: str, after_path: str
                              ) -> List[Dict[str, Any]]:
         """Compare two scans written by ``write_hardening_scan``.
@@ -323,14 +470,20 @@ class HardeningTools(BaseTool):
         The one tool in this module that touches no directory: it reads two files
         and returns a diff. No LDAP, no SMB, no SYSVOL.
 
+        Either path may be a ``.json`` scan file or a snapshot folder written by
+        ``write_hardening_snapshot``, in which case the ``scan.json`` inside it
+        is read — so ``diff <folder-a> <folder-b>`` works without the caller
+        reaching inside either folder.
+
         **Read ``attribution`` first.** It is the payload's opening key because
         every number below it depends on it. If the two scans ran different
         catalog or engine versions, a difference may be the *tool* rather than
         the domain, and the diff refuses to present it as domain progress.
 
         Args:
-            before_path: The earlier scan's ``.json`` file.
-            after_path: The later scan's ``.json`` file.
+            before_path: The earlier scan — its ``.json`` file, or the snapshot
+                folder holding it.
+            after_path: The later scan, in either of the same two forms.
 
         Returns:
             List of MCP content objects with the diff. On a refusal — either file
@@ -346,8 +499,9 @@ class HardeningTools(BaseTool):
                 "operation": "diff_hardening_scans",
                 "note": "Nothing was read from the directory and nothing was "
                         "written. Both inputs must be JSON scans written by "
-                        "write_hardening_scan, and both must be scans of the "
-                        "same domain.",
+                        "write_hardening_scan — or snapshot folders written by "
+                        "write_hardening_snapshot — and both must be scans of "
+                        "the same domain.",
             }, "diff_hardening_scans")
 
         # success/operation first, then the diff with ``attribution`` still the
@@ -580,15 +734,21 @@ class HardeningTools(BaseTool):
 
         return {
             "operations": ["scan_hardening", "write_hardening_report",
-                           "write_hardening_scan", "diff_hardening_scans"],
-            # The scan itself changes nothing in the directory. The two write
-            # tools' one side effect is the file each writes, and
-            # diff_hardening_scans reads two files and touches no directory.
+                           "write_hardening_scan", "write_hardening_snapshot",
+                           "diff_hardening_scans"],
+            # The scan itself changes nothing in the directory. The write tools'
+            # one side effect is the file (or the folder of two files) each
+            # writes, and diff_hardening_scans reads its inputs and touches no
+            # directory.
             "read_only": True,
-            "writes_files": ["write_hardening_report", "write_hardening_scan"],
+            "writes_files": ["write_hardening_report", "write_hardening_scan",
+                             "write_hardening_snapshot"],
             "report_formats": ["html"],
             "report_format_version": REPORT_FORMAT_VERSION,
             "scan_format_version": SCAN_FILE_FORMAT_VERSION,
+            "snapshot_format_version": SNAPSHOT_FORMAT_VERSION,
+            "snapshot_files": [SNAPSHOT_SCAN_FILENAME,
+                               SNAPSHOT_REPORT_FILENAME],
             "diff_format_version": DIFF_FORMAT_VERSION,
             "diff_attributions": [ATTRIBUTION_DOMAIN, ATTRIBUTION_AMBIGUOUS],
             "check_types": ["gpo-security-template", "gpo-registry-pol"],
@@ -668,8 +828,20 @@ class HardeningTools(BaseTool):
                 "this domain's GPO display names, registry values and DNs, "
                 "exactly as the HTML report does; treat the file as directory "
                 "content when sharing or committing it.",
+                "write_hardening_snapshot runs the scan ONCE and writes both "
+                "artifacts — scan.json and report.html — into one new folder "
+                "named after the scan's own timestamp plus a scan_id prefix "
+                "(no colon, so the name is legal on Windows). The other two "
+                "write tools each run their own scan, so calling both would "
+                "put two different scans in one folder; here both files render "
+                "one payload and therefore carry the same scan_id, timestamp "
+                "and findings. An existing snapshot folder is refused rather "
+                "than overwritten or merged into. Both files embed this "
+                "domain's GPO display names, registry values and DNs.",
                 "diff_hardening_scans compares two stored scans and touches no "
-                "directory. Its first key is 'attribution': 'domain' when both "
+                "directory. Either input may be a .json scan file or a "
+                "snapshot folder, whose scan.json is then read. Its first key "
+                "is 'attribution': 'domain' when both "
                 "scans ran the same catalog_version AND engine_version, "
                 "'ambiguous' otherwise. A cross-version difference may be the "
                 "TOOL rather than the domain — this project has seen a control "

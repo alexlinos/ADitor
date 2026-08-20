@@ -401,11 +401,57 @@ version, catalog version, timestamp, domain and base DN) and the headline counts
 Pass control_ids to scan a subset, though a scan meant for diffing should
 normally cover the whole catalog."""
 
+WRITE_HARDENING_SNAPSHOT_DESC = """Run the scan once and write both artifacts to one dated folder.
+
+One run, one folder, the payload and the document side by side:
+
+    <output_dir>/2026-08-20T162647Z-b288e925/
+        scan.json      <- the payload (source of truth)
+        report.html    <- the rendered document
+
+USE THIS RATHER THAN CALLING THE OTHER TWO WRITE TOOLS IN TURN.
+write_hardening_scan and write_hardening_report each run their OWN scan, so
+calling both puts a report and a payload from two DIFFERENT scans in one place —
+different scan_id, different timestamps, and on a domain that changed in between,
+different findings. The JSON is the evidence of record; a report that disagrees
+with it destroys the provenance the pair exists to provide. This tool runs the
+scan exactly once and hands that one payload to both writers, so the two files
+carry the same scan_id, the same timestamp and the same findings by construction.
+
+The folder name is derived from the scan's OWN timestamp, not from a fresh clock
+reading, so a directory listing and the provenance inside the files tell the same
+story. It contains no colon — illegal in a Windows filename — and ends in a short
+scan_id prefix so two scans in the same second cannot collide.
+
+The whole catalog is always scanned and nothing is filtered out: a snapshot is a
+complete record of one moment and an input to a later diff_hardening_scans, and a
+filtered snapshot could not be told apart from one whose catalog was smaller.
+
+output_dir is the directory to create the snapshot folder INSIDE, and is
+required: there is deliberately no default, because both files hold real
+directory content and where they land is the operator's choice. Missing parents
+are created. An existing snapshot folder is refused by name — never overwritten,
+never merged into — and a refusal after the folder was created leaves no folder
+behind, so a snapshot is both files or neither.
+
+BOTH FILES CONTAIN DIRECTORY CONTENT. They embed this domain's GPO
+display names, registry values and DNs — the same caveat write_hardening_report
+and write_hardening_scan carry individually. Treat the folder accordingly when
+sharing it, attaching it to a ticket, or committing it. Writing the folder is
+this tool's only side effect; the directory is not modified.
+
+Returns the snapshot folder, the scan_id, both file paths and byte counts, the
+provenance header and the headline counts. Pass the folder straight to
+diff_hardening_scans to compare it with an earlier one."""
+
 DIFF_HARDENING_SCANS_DESC = """Compare two hardening scans: did my fix land, did anything regress?
 
-Reads two .json files written by write_hardening_scan and returns a structured
-diff, keyed on control_id. This tool touches no directory at all — no LDAP, no
-SMB, no SYSVOL. Two files in, one diff out.
+Reads two scans and returns a structured diff, keyed on control_id. Each input is
+either a .json file written by write_hardening_scan or a snapshot folder written
+by write_hardening_snapshot, in which case the scan.json inside it is read — so
+`diff <folder-a> <folder-b>` works without reaching into either folder. This tool
+touches no directory at all — no LDAP, no SMB, no SYSVOL. Two scans in, one diff
+out.
 
 READ 'attribution' FIRST. It is the payload's opening key because every number
 below it depends on it:
@@ -441,8 +487,9 @@ The payload, in order:
 - counts_delta: before/after/delta per count key
 
 Refuses with a clear error, not a crash, if the two scans are of different
-domains (base_dn mismatch) or if a file is not a scan payload — an HTML report
-from write_hardening_report is not a scan and cannot be diffed."""
+domains (base_dn mismatch), if a file is not a scan payload — an HTML report
+from write_hardening_report is not a scan and cannot be diffed — or if a
+directory given as an input holds no scan.json."""
 
 TEST_CONNECTION_DESC = """Test the LDAP connection and return server information.
 
@@ -1135,6 +1182,29 @@ TOOLS: List[ToolSpec] = [
         ),
     ),
     ToolSpec(
+        "write_hardening_snapshot",
+        WRITE_HARDENING_SNAPSHOT_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "output_dir": {
+                    "type": "string",
+                    "description": "The directory to create the snapshot folder "
+                                   "INSIDE — not the folder itself, which is "
+                                   "named after the scan. '~' is expanded; a "
+                                   "relative path resolves against the server's "
+                                   "working directory. Missing parents are "
+                                   "created. Required: there is no default, "
+                                   "because both files hold real directory "
+                                   "content and where they land is the "
+                                   "operator's choice.",
+                },
+            },
+            "required": ["output_dir"],
+        },
+        lambda t, a: t.hardening.write_hardening_snapshot(a.get("output_dir")),
+    ),
+    ToolSpec(
         "diff_hardening_scans",
         DIFF_HARDENING_SCANS_DESC,
         {
@@ -1142,13 +1212,15 @@ TOOLS: List[ToolSpec] = [
             "properties": {
                 "before_path": {
                     "type": "string",
-                    "description": "The earlier scan's .json file, as written by "
-                                   "write_hardening_scan.",
+                    "description": "The earlier scan: its .json file as written "
+                                   "by write_hardening_scan, or the snapshot "
+                                   "folder written by write_hardening_snapshot.",
                 },
                 "after_path": {
                     "type": "string",
-                    "description": "The later scan's .json file. Both must be "
-                                   "scans of the same domain.",
+                    "description": "The later scan, in either of the same two "
+                                   "forms. Both must be scans of the same "
+                                   "domain.",
                 },
             },
             "required": ["before_path", "after_path"],
