@@ -16,7 +16,39 @@ from ..core.logging import log_ldap_operation
 
 class SecurityTools(BaseTool):
     """Tools for Active Directory security operations and auditing."""
-    
+
+    # Real user accounts only. `(objectClass=user)` on its own also matches
+    # computers (and msDS-ManagedServiceAccounts), because in the AD schema
+    # `computer` derives from `user`; objectCategory is single-valued, so
+    # `person` excludes them.
+    USER_ACCOUNT_FILTER = "(&(objectCategory=person)(objectClass=user))"
+
+    # Same filter with disabled accounts (ACCOUNTDISABLE, UAC bit 0x0002)
+    # removed via the LDAP_MATCHING_RULE_BIT_AND OID.
+    ENABLED_USER_ACCOUNT_FILTER = (
+        "(&(objectCategory=person)(objectClass=user)"
+        "(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
+    )
+
+    def _is_computer_account(self, attributes: Dict[str, Any]) -> bool:
+        """True if this entry is a machine account rather than a person.
+
+        Checks objectClass, then falls back to the trailing ``$`` that AD
+        mandates on a machine account's sAMAccountName, so an entry fetched
+        without objectClass is still recognised.
+        """
+        object_classes = {
+            str(value).lower()
+            for value in self._get_attr_list(attributes, 'objectClass')
+        }
+        if object_classes & {'computer', 'msds-managedserviceaccount',
+                             'msds-groupmanagedserviceaccount'}:
+            return True
+
+        sam_account_name = self._get_attr_value(attributes, 'sAMAccountName', '') or ''
+        return str(sam_account_name).endswith('$')
+
+
     def get_domain_info(self) -> List[Dict[str, Any]]:
         """
         Get domain information and security settings.
@@ -341,13 +373,21 @@ class SecurityTools(BaseTool):
             else:
                 max_pwd_age = max_pwd_age_raw if max_pwd_age_raw is not None else 0
 
-            # Search for users
+            # Search for users.
+            #
+            # (objectClass=user) is NOT a user filter: in AD `computer` is a
+            # subclass of `user`, so a bare objectClass search returns every
+            # machine account too (40 of them on the live domain). Machine
+            # passwords are rotated automatically by the machine, so they are
+            # not a password-policy finding about a person. objectCategory is
+            # single-valued and indexed, and person/computer are distinct
+            # categories, which is what makes this the correct discriminator.
             user_results = self.ldap.search(
                 search_base=self.ldap.ad_config.base_dn,
-                search_filter="(objectClass=user)",
+                search_filter=self.USER_ACCOUNT_FILTER,
                 attributes=[
                     'sAMAccountName', 'displayName', 'pwdLastSet',
-                    'userAccountControl', 'accountExpires'
+                    'userAccountControl', 'accountExpires', 'objectClass'
                 ]
             )
 
@@ -355,9 +395,17 @@ class SecurityTools(BaseTool):
             # An account can be exempt from maxPwdAge rather than in breach of it;
             # count those instead of silently dropping the finding.
             exempt_from_expiry = 0
+            computer_accounts = 0
             current_time = self._convert_datetime_to_filetime(datetime.now())
 
             for entry in user_results:
+                # Belt and braces behind the filter above: never report a
+                # machine account in a user password-policy report, whatever the
+                # directory returned.
+                if self._is_computer_account(entry['attributes']):
+                    computer_accounts += 1
+                    continue
+
                 uac = self._get_attr_value(entry['attributes'], 'userAccountControl', 0)
                 pwd_last_set_raw = self._get_attr_value(entry['attributes'], 'pwdLastSet', 0)
                 account_expires_raw = self._get_attr_value(entry['attributes'], 'accountExpires', 0)
@@ -426,6 +474,7 @@ class SecurityTools(BaseTool):
                 "password_violations": violations,
                 "count": len(violations),
                 "excluded_counts": {
+                    "computer_accounts": computer_accounts,
                     "exempt_from_expiry": exempt_from_expiry,
                 },
                 "notes": [
@@ -434,6 +483,11 @@ class SecurityTools(BaseTool):
                     "DONT_EXPIRE_PASSWORD. maxPwdAge does not apply to them, so "
                     "they are exempt rather than expired and are reported only "
                     "as 'Password set to never expire'.",
+                    "excluded_counts.computer_accounts: machine accounts dropped "
+                    "after the search. This report covers user accounts only; "
+                    "machine passwords are rotated automatically by the machine. "
+                    "The search filter already excludes computers, so on a "
+                    "healthy directory this is 0.",
                 ],
             }, "get_password_policy_violations")
             
