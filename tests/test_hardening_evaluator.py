@@ -30,6 +30,8 @@ It reported ``pass`` / ``audit`` / ``source: os-default`` off a scan that read
 nothing at all.
 """
 
+import dataclasses
+
 import pytest
 
 from aditor.gpo.parsers import (
@@ -2299,3 +2301,82 @@ class TestPreferencesDoNotDisturbTheRestOfTheEngine:
         assert finding["result"] == RESULT_PASS
         assert any("could not be read" in note
                    for note in finding["evidence"]["notes"])
+
+
+# --------------------------------------------------------------------------- #
+# P2-WP5 — accuracy fixes
+# --------------------------------------------------------------------------- #
+
+DIAG_CONTROL_ID = "DEVORE-03-LDAP-DIAG-LOGGING"
+DIAG_POL_KEY = r"SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics"
+DIAG_VALUE_NAME = "16 LDAP Interface Events"
+
+
+def diag_gpo(value, guid=GUID_SIGNING, name="NTDS Diagnostics"):
+    """A GPO whose Registry.pol sets the LDAP Interface diagnostic level."""
+    return pol_gpo(guid, name, (DIAG_POL_KEY, DIAG_VALUE_NAME, 4, dword(value)),
+                   links=(GpoLink(DC_OU),))
+
+
+class TestLdapDiagnosticLoggingIsAFloorNotAnExactValue:
+    """Fix 1a: the NTDS diagnostic levels are 0-5 with increasing verbosity.
+
+    A domain controller logging at level 3 produces everything level 2 produces
+    and more — including the 2889 unsigned-bind events this control exists to
+    generate. Asserting ``equals 2`` therefore failed a domain that was *more*
+    compliant than the baseline asks for, which is the same "states more than the
+    evidence supports" defect as the rest of this work package, pointing the
+    other way.
+
+    Levels and the default of 0 are Microsoft's: "How to configure Active
+    Directory and LDS diagnostic event logging"
+    (learn.microsoft.com/troubleshoot/windows-server/active-directory/
+    configure-ad-and-lds-event-logging), cited in the control's ``value_source``.
+    """
+
+    @pytest.fixture
+    def control_obj(self):
+        return load_catalog().by_id(DIAG_CONTROL_ID)
+
+    def test_the_shipped_control_asserts_a_floor(self, control_obj):
+        assert control_obj.operator == "gte"
+        assert control_obj.final_expected == 2
+
+    @pytest.mark.parametrize("value", [2, 3, 4, 5])
+    def test_any_level_at_or_above_two_passes(self, control_obj, value):
+        finding = evaluate_control(control_obj, [diag_gpo(value)])
+
+        assert finding["result"] == RESULT_PASS, finding["evidence"]
+        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["evidence"]["found"][0]["value"] == value
+
+    @pytest.mark.parametrize("value", [0, 1])
+    def test_a_level_below_two_still_fails(self, control_obj, value):
+        finding = evaluate_control(control_obj, [diag_gpo(value)])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+
+    def test_the_old_equals_two_assertion_would_have_failed_level_three(
+            self, control_obj):
+        """The defect, pinned as a counterfactual.
+
+        The same fixture, the same evaluator, one field different: with the
+        pre-fix ``equals`` the domain observed at level 3 scores ``fail``, and
+        with the shipped ``gte`` it scores ``pass``. Without this assertion
+        nothing stops a future edit restoring ``equals`` and re-introducing the
+        false negative.
+        """
+        gpo = diag_gpo(3)
+        old = dataclasses.replace(control_obj, operator="equals")
+
+        assert evaluate_control(old, [gpo])["result"] == RESULT_FAIL
+        assert evaluate_control(control_obj, [gpo])["result"] == RESULT_PASS
+
+    def test_the_value_source_cites_the_microsoft_levels_document(
+            self, control_obj):
+        """The floor is a sourced judgement, not a loosened assertion."""
+        assert "configure-ad-and-lds-event-logging" in control_obj.value_source
+
+    def test_the_noisy_when_left_raised_caveat_is_kept(self, control_obj):
+        assert any("noisy" in caveat for caveat in control_obj.caveats)
