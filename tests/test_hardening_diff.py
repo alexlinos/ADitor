@@ -950,15 +950,38 @@ class TestEvidenceChanges:
         assert any("baseline change rather than a domain change" in note
                    for note in entry["notes"])
 
-    def test_a_control_becoming_unscored_is_surfaced(self):
-        diff = self.evidence_diff(
-            finding(SIGNING_CONTROL, found=[match(2)], scored=True),
-            finding(SIGNING_CONTROL, found=[match(2)], scored=False))
+    def test_a_control_becoming_unscored_is_surfaced_with_the_reason(self):
+        before_finding = finding(SIGNING_CONTROL, found=[match(2)], scored=True)
+        after_finding = finding(SIGNING_CONTROL, found=[match(2)], scored=False)
+        after_finding["unscored_reason"] = "needs_baseline_value"
 
-        fields = {c["field"] for c in entry_for(diff["evidence_changes"],
-                                                SIGNING_CONTROL
-                                                )["evidence"]["changes"]}
-        assert "scored" in fields
+        diff = self.evidence_diff(before_finding, after_finding)
+
+        entry = entry_for(diff["evidence_changes"], SIGNING_CONTROL)
+        change = next(c for c in entry["evidence"]["changes"]
+                      if c["field"] == "scored")
+        assert change["before"] == {"scored": True, "reason": None}
+        assert change["after"] == {"scored": False,
+                                   "reason": "needs_baseline_value"}
+        assert "change in the tool, not the domain" in change["detail"]
+        assert entry["evidence"]["after"]["unscored_reason"] == \
+            "needs_baseline_value"
+
+    def test_the_unscored_reason_changing_alone_is_surfaced(self):
+        """needs_baseline_value and unsupported_check_type are not the same gap."""
+        before_finding = finding(SIGNING_CONTROL, found=[], scored=False)
+        before_finding["unscored_reason"] = "needs_baseline_value"
+        after_finding = finding(SIGNING_CONTROL, found=[], scored=False)
+        after_finding["unscored_reason"] = "unsupported_check_type"
+
+        diff = self.evidence_diff(before_finding, after_finding)
+
+        change = next(c for c in entry_for(diff["evidence_changes"],
+                                           SIGNING_CONTROL
+                                           )["evidence"]["changes"]
+                      if c["field"] == "scored")
+        assert change["before"]["reason"] == "needs_baseline_value"
+        assert change["after"]["reason"] == "unsupported_check_type"
 
     def test_identical_findings_produce_no_evidence_changes(self):
         assert evidence_changes(finding(SIGNING_CONTROL, found=[match(2)]),
