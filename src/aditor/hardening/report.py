@@ -70,6 +70,7 @@ from string import Template
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import SCAN_ENGINE_VERSION
+from .catalog import SEVERITY_RANK
 
 # Version of the *report layout*. Bumped when the rendered structure changes, so
 # a stored report can say which renderer produced it alongside which engine and
@@ -199,8 +200,9 @@ _PREFERENCE_FILTER_WARNING = (
     "apply to only some of the machines this GPO reaches. <strong>Not "
     "evaluated</strong> by this scan."
 )
-_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3,
-                   "informational": 4}
+# Worst first. Shared with the scan diff, which orders its regression and
+# improvement lists the same way — one definition so the two cannot drift.
+_SEVERITY_ORDER = SEVERITY_RANK
 
 # The standing disclaimer. Restated in the document because a saved report gets
 # read without the tool that produced it.
