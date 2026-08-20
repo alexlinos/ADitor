@@ -341,6 +341,11 @@ def evidence_side(finding: Dict[str, Any]) -> Dict[str, Any]:
         "conflict": _conflict_kind(finding),
         "expected": evidence.get("expected"),
         "scored": finding.get("scored"),
+        # The evaluator's own reason, not re-derived from ``scored``: it
+        # distinguishes 'needs_baseline_value' (the source states no expected
+        # value) from 'unsupported_check_type' (this release has no engine for
+        # the control), and a reader of a change entry wants to know which.
+        "unscored_reason": finding.get("unscored_reason"),
     }
 
 
@@ -377,11 +382,15 @@ def evidence_changes(before: Dict[str, Any],
             "two scans, so any verdict change here is at least partly a change "
             "in what is being asked — not in the domain.")
 
-    if left["scored"] != right["scored"]:
-        add("scored", left["scored"], right["scored"],
+    if left["scored"] != right["scored"] or \
+            left["unscored_reason"] != right["unscored_reason"]:
+        add("scored",
+            {"scored": left["scored"], "reason": left["unscored_reason"]},
+            {"scored": right["scored"], "reason": right["unscored_reason"]},
             "Whether this control is scored at all changed between the two "
-            "scans. That is a catalog change: an unscored control has no "
-            "sourced expected value and is never judged.")
+            "scans. That is a change in the tool, not the domain: an unscored "
+            "control has no sourced expected value (or no engine for its check "
+            "type) and is never judged, so it can neither pass nor fail.")
 
     if left["source"] != right["source"]:
         add("source", left["source"], right["source"],
