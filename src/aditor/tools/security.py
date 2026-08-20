@@ -23,13 +23,6 @@ class SecurityTools(BaseTool):
     # `person` excludes them.
     USER_ACCOUNT_FILTER = "(&(objectCategory=person)(objectClass=user))"
 
-    # Same filter with disabled accounts (ACCOUNTDISABLE, UAC bit 0x0002)
-    # removed via the LDAP_MATCHING_RULE_BIT_AND OID.
-    ENABLED_USER_ACCOUNT_FILTER = (
-        "(&(objectCategory=person)(objectClass=user)"
-        "(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
-    )
-
     def _is_computer_account(self, attributes: Dict[str, Any]) -> bool:
         """True if this entry is a machine account rather than a person.
 
@@ -345,10 +338,19 @@ class SecurityTools(BaseTool):
         except Exception as e:
             return self._handle_ldap_error(e, "get_inactive_users", self.ldap.ad_config.base_dn)
     
-    def get_password_policy_violations(self) -> List[Dict[str, Any]]:
+    def get_password_policy_violations(self, include_disabled: bool = False) -> List[Dict[str, Any]]:
         """
-        Get users with password policy violations.
-        
+        Get enabled user accounts with password policy violations.
+
+        Covers user accounts only (never computers) and, by default, only
+        enabled ones: a disabled account cannot authenticate, so its password
+        state is housekeeping rather than a policy breach. Whatever is left out
+        is counted in ``excluded_counts`` so a short list can be told apart from
+        a clean domain.
+
+        Args:
+            include_disabled: Include disabled accounts in results (default: False)
+
         Returns:
             List of MCP content objects with password policy violation information
         """
@@ -396,6 +398,8 @@ class SecurityTools(BaseTool):
             # count those instead of silently dropping the finding.
             exempt_from_expiry = 0
             computer_accounts = 0
+            disabled_accounts = 0
+            accounts_examined = 0
             current_time = self._convert_datetime_to_filetime(datetime.now())
 
             for entry in user_results:
@@ -407,6 +411,16 @@ class SecurityTools(BaseTool):
                     continue
 
                 uac = self._get_attr_value(entry['attributes'], 'userAccountControl', 0)
+
+                # Disabled accounts are filtered here rather than in the LDAP
+                # filter on purpose: the count of what was left out is the whole
+                # point of reporting it, and a directory-side filter would make
+                # it unknowable. 328 of the live domain's 545 hits were disabled.
+                if bool(uac & 0x0002) and not include_disabled:  # ACCOUNTDISABLE
+                    disabled_accounts += 1
+                    continue
+
+                accounts_examined += 1
                 pwd_last_set_raw = self._get_attr_value(entry['attributes'], 'pwdLastSet', 0)
                 account_expires_raw = self._get_attr_value(entry['attributes'], 'accountExpires', 0)
 
@@ -468,16 +482,29 @@ class SecurityTools(BaseTool):
 
                     violations.append(violation_info)
             
-            log_ldap_operation("get_password_policy_violations", self.ldap.ad_config.base_dn, True, f"Found {len(violations)} violations")
+            log_ldap_operation(
+                "get_password_policy_violations",
+                self.ldap.ad_config.base_dn,
+                True,
+                f"Found {len(violations)} violations across {accounts_examined} "
+                f"accounts (excluded {disabled_accounts} disabled, "
+                f"{computer_accounts} computer; {exempt_from_expiry} exempt from expiry)"
+            )
             
             return self._format_response({
                 "password_violations": violations,
                 "count": len(violations),
+                "include_disabled": include_disabled,
+                "accounts_examined": accounts_examined,
                 "excluded_counts": {
+                    "disabled_accounts": disabled_accounts,
                     "computer_accounts": computer_accounts,
                     "exempt_from_expiry": exempt_from_expiry,
                 },
                 "notes": [
+                    "excluded_counts.disabled_accounts: accounts skipped because "
+                    "they are disabled and cannot authenticate. Pass "
+                    "include_disabled=true to include them.",
                     "excluded_counts.exempt_from_expiry: accounts whose password "
                     "is older than maxPwdAge but which carry "
                     "DONT_EXPIRE_PASSWORD. maxPwdAge does not apply to them, so "
@@ -1019,5 +1046,26 @@ class SecurityTools(BaseTool):
                 "Read Domain Security Policy", "Read User Attributes",
                 "Read Group Membership", "Audit User Activity"
             ],
-            "risk_levels": ["low", "medium", "high", "critical"]
+            "risk_levels": ["low", "medium", "high", "critical"],
+            "operation_parameters": {
+                "get_user_permissions": {"username": "string, required"},
+                "get_inactive_users": {
+                    "days": "integer, default 90",
+                    "include_disabled": "boolean, default false",
+                },
+                "get_password_policy_violations": {
+                    "include_disabled": "boolean, default false",
+                },
+            },
+            "notes": [
+                "get_password_policy_violations reports user accounts only "
+                "((objectCategory=person)(objectClass=user)): in the AD schema "
+                "`computer` derives from `user`, so a bare (objectClass=user) "
+                "filter would report machine accounts, whose passwords are "
+                "rotated automatically by the machine. It excludes disabled "
+                "accounts unless include_disabled is set, and never reports a "
+                "DONT_EXPIRE_PASSWORD account as expired, because maxPwdAge "
+                "does not apply to it. Everything left out is counted in "
+                "excluded_counts.",
+            ],
         }

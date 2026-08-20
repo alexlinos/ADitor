@@ -710,3 +710,71 @@ class TestComputerAccountsAreNotAPasswordPolicyFinding:
         for search_filter in user_filters:
             assert 'objectCategory=person' in search_filter
             assert search_filter != '(objectClass=user)'
+
+
+class TestDisabledAccountsAreExcludedByDefault:
+    """Fix 1c: 328 of the live domain's 545 hits were disabled accounts."""
+
+    def _mixed_fixture(self):
+        return [
+            _violation_user('user.enabled', pwd_age_days=500),
+            _violation_user('user.disabled',
+                            uac=UAC_NORMAL_ACCOUNT | UAC_ACCOUNTDISABLE,
+                            pwd_age_days=500),
+            _violation_user('user.disabled.notreqd',
+                            uac=UAC_NORMAL_ACCOUNT | UAC_ACCOUNTDISABLE | UAC_PASSWD_NOTREQD,
+                            pwd_age_days=500),
+        ]
+
+    def test_default_excludes_disabled(self, security_tools, mock_ldap_manager):
+        payload = _violations_payload(security_tools, mock_ldap_manager, self._mixed_fixture())
+
+        assert [acc['sam_account_name'] for acc in payload['password_violations']] == \
+            ['user.enabled']
+        assert payload['include_disabled'] is False
+        assert payload['excluded_counts']['disabled_accounts'] == 2
+        assert payload['accounts_examined'] == 1
+
+    def test_opt_in_restores_disabled(self, security_tools, mock_ldap_manager):
+        payload = _violations_payload(security_tools, mock_ldap_manager,
+                                      self._mixed_fixture(), include_disabled=True)
+
+        assert len(payload['password_violations']) == 3
+        assert payload['include_disabled'] is True
+        assert payload['excluded_counts']['disabled_accounts'] == 0
+        assert payload['accounts_examined'] == 3
+
+    def test_default_is_the_signature_default(self):
+        import inspect
+        signature = inspect.signature(SecurityTools.get_password_policy_violations)
+        parameter = signature.parameters['include_disabled']
+        assert parameter.default is False
+        assert parameter.annotation is bool
+
+    def test_excluded_counts_distinguish_filtering_from_a_clean_domain(
+            self, security_tools, mock_ldap_manager):
+        """An empty list plus zero exclusions is the only 'clean domain' answer."""
+        clean = _violations_payload(security_tools, mock_ldap_manager,
+                                    [_violation_user('user.fine', pwd_age_days=3)])
+        assert clean['count'] == 0
+        assert set(clean['excluded_counts'].values()) == {0}
+
+        filtered = _violations_payload(security_tools, mock_ldap_manager, [
+            _violation_user('user.disabled',
+                            uac=UAC_NORMAL_ACCOUNT | UAC_ACCOUNTDISABLE,
+                            pwd_age_days=500),
+            _violation_user('WKSTN01$', pwd_age_days=500, object_classes=('computer',)),
+            _violation_user('svc.exempt',
+                            uac=UAC_NORMAL_ACCOUNT | UAC_DONT_EXPIRE_PASSWORD,
+                            pwd_age_days=500),
+        ])
+        assert filtered['excluded_counts'] == {
+            'disabled_accounts': 1,
+            'computer_accounts': 1,
+            'exempt_from_expiry': 1,
+        }
+        assert filtered['notes'], 'excluded_counts must be explained in the payload'
+
+    def test_schema_info_advertises_the_new_parameter(self, security_tools):
+        parameters = security_tools.get_schema_info()['operation_parameters']
+        assert 'include_disabled' in parameters['get_password_policy_violations']
