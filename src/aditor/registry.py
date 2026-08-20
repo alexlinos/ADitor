@@ -374,6 +374,76 @@ it as containing directory content when sharing it.
 Returns the written path, the byte count, the provenance header and the headline
 counts. Pass control_ids to report on a subset of the catalog."""
 
+WRITE_HARDENING_SCAN_DESC = """Run the hardening scan and write the JSON payload to a file.
+
+The sibling of write_hardening_report: the same read-only scan, the same path
+guards, a different medium. The report is for a reader; this is the structured
+payload, written so two runs can be compared later with diff_hardening_scans.
+Nothing is derived and nothing is dropped, so the file and scan_hardening's own
+output cannot disagree.
+
+The whole catalog is always scanned and not-applicable findings are always
+included. A stored scan is an input to a later comparison, and a scan that
+filtered part of the catalog out cannot be told apart from one whose catalog was
+smaller, so storing everything removes that ambiguity from the diff.
+
+Writing the file is this tool's only side effect; the directory is not modified.
+Parent directories are created as needed, the path must end in .json, and an
+existing file is overwritten only if it is a previous ADitor scan.
+
+THE FILE CONTAINS DIRECTORY CONTENT. A saved scan embeds this domain's GPO
+display names, registry values and DNs — the same caveat write_hardening_report
+carries for the rendered document. Treat the file accordingly when sharing it,
+attaching it to a ticket, or committing it.
+
+Returns the written path, the byte count, the provenance header (scan engine
+version, catalog version, timestamp, domain and base DN) and the headline counts.
+Pass control_ids to scan a subset, though a scan meant for diffing should
+normally cover the whole catalog."""
+
+DIFF_HARDENING_SCANS_DESC = """Compare two hardening scans: did my fix land, and did anything regress?
+
+Reads two .json files written by write_hardening_scan and returns a structured
+diff, keyed on control_id. This tool touches no directory at all — no LDAP, no
+SMB, no SYSVOL. Two files in, one diff out.
+
+READ 'attribution' FIRST. It is the payload's opening key because every number
+below it depends on it:
+- 'domain' — both scans ran the same catalog_version AND engine_version, so the
+  differences can be attributed to the domain. This is the only case in which
+  "the fix landed" can be read off a diff directly.
+- 'ambiguous' — the versions differ, so EVERY difference may be the TOOL rather
+  than the domain, and none of it can be reported as domain progress. This is
+  not hypothetical: a control in this project went fail -> pass between two real
+  scans purely because the scanner learned to read Group Policy Preferences. The
+  value had been set correctly the whole time and the domain never changed.
+  Both version pairs are named and the verdict is stamped on every entry.
+
+The payload, in order:
+- attribution: the above, with a plain-language summary and caveats (a different
+  GPO count, unreadable GPOs, a narrowed scan, reversed arguments)
+- scans: both scan_ids, timestamps, versions and read coverage
+- regressions, FIRST because a regression matters more: pass -> fail/unknown/
+  error, or a rollout moving backwards (enforced -> audit -> not_started), which
+  counts even when result stays 'pass'
+- improvements: fail/unknown -> pass, or a rollout advancing. error -> pass is
+  deliberately NOT an improvement — the earlier scan could not read the setting,
+  so "it passes now" is not evidence that anything was fixed
+- other_changes: verdict moves that are neither, each saying why
+- unchanged: a count
+- catalog_changes: controls added to or removed from the catalog, reported
+  separately and NEVER counted as improvements or regressions. 'comparable' says
+  whether absence from a findings list really means absence from the catalog
+- evidence_changes: same verdict, moved grounds — a different value, a different
+  GPO delivering it, a changed delivery mechanism (policy -> preference tattoos,
+  which is a weaker statement), a changed evidence source, or a conflict
+  appearing or clearing
+- counts_delta: before/after/delta per count key
+
+Refuses with a clear error, not a crash, if the two scans are of different
+domains (base_dn mismatch) or if a file is not a scan payload — an HTML report
+from write_hardening_report is not a scan and cannot be diffed."""
+
 TEST_CONNECTION_DESC = """Test the LDAP connection and return server information.
 
 Validates Active Directory connectivity and reports server status."""
@@ -1032,6 +1102,59 @@ TOOLS: List[ToolSpec] = [
         },
         lambda t, a: t.hardening.write_hardening_report(
             a.get("output_path"), a.get("control_ids"),
+        ),
+    ),
+    ToolSpec(
+        "write_hardening_scan",
+        WRITE_HARDENING_SCAN_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "output_path": {
+                    "type": "string",
+                    "description": "Where to write the .json scan. '~' is "
+                                   "expanded; a relative path resolves against "
+                                   "the server's working directory. Missing "
+                                   "parent directories are created. An existing "
+                                   "file is overwritten only if it is a previous "
+                                   "ADitor scan.",
+                },
+                "control_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Scan only these control ids (e.g. "
+                                   "DEVORE-03-LDAP-SERVER-SIGNING). Omit for the "
+                                   "whole catalog, which is what a scan meant "
+                                   "for diffing should normally do.",
+                },
+            },
+            "required": ["output_path"],
+        },
+        lambda t, a: t.hardening.write_hardening_scan(
+            a.get("output_path"), a.get("control_ids"),
+        ),
+    ),
+    ToolSpec(
+        "diff_hardening_scans",
+        DIFF_HARDENING_SCANS_DESC,
+        {
+            "type": "object",
+            "properties": {
+                "before_path": {
+                    "type": "string",
+                    "description": "The earlier scan's .json file, as written by "
+                                   "write_hardening_scan.",
+                },
+                "after_path": {
+                    "type": "string",
+                    "description": "The later scan's .json file. Both must be "
+                                   "scans of the same domain.",
+                },
+            },
+            "required": ["before_path", "after_path"],
+        },
+        lambda t, a: t.hardening.diff_hardening_scans(
+            a.get("before_path"), a.get("after_path"),
         ),
     ),
     # ----- System -----

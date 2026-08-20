@@ -19,7 +19,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from aditor.gpo.parsers import parse_registry_xml
-from aditor.hardening import SCAN_ENGINE_VERSION
+from aditor.hardening import SCAN_ENGINE_VERSION, read_scan
 from aditor.tools.gpo import GPOTools
 from aditor.tools.hardening import (
     HardeningTools,
@@ -864,14 +864,386 @@ class TestWriteHardeningReport:
         assert mock_ldap_manager.delete.called is False
 
 
+class TestWriteHardeningScan:
+    """The persistence tool's wiring: same scan, written as JSON.
+
+    The file format and its guards are covered in ``test_hardening_scanfile.py``.
+    What matters here is that the tool runs the identical scan, writes only where
+    it is allowed to, and never leaves a file behind when the scan or the path is
+    bad. Still no network: the LDAP manager is a Mock and the SYSVOL read is
+    patched.
+    """
+
+    def save(self, tools, contents_by_guid, output_path, **kwargs):
+        """Call write_hardening_scan with SMB stubbed out; parse the JSON."""
+        def read_sysvol(sysvol_path, include_registry=True,
+                        max_value_chars=6000):
+            for guid, contents in contents_by_guid.items():
+                if guid in sysvol_path:
+                    if isinstance(contents, Exception):
+                        raise contents
+                    return contents
+            return sysvol_contents()
+
+        with patch.dict(sys.modules, {"smbclient": Mock()}), \
+             patch.object(GPOTools, "_read_gpo_sysvol",
+                          side_effect=read_sysvol):
+            result = tools.write_hardening_scan(str(output_path), **kwargs)
+        return json.loads(result[0].text)
+
+    def test_writes_the_json_and_returns_path_and_headline_counts(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        target = tmp_path / "scan.json"
+
+        response = self.save(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)},
+                             target)
+
+        assert response["success"] is True
+        assert response["output_path"] == str(target)
+        assert response["bytes_written"] == target.stat().st_size
+        assert response["format"] == "json"
+        assert response["scan_format_version"]
+        assert response["headline"]["total"] == response["counts"]["total"]
+
+    def test_the_written_file_is_the_scan_the_json_tool_returns(
+            self, tools, mock_ldap_manager, tmp_path):
+        """One scan, two deliveries: the file must not invent its own numbers."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        contents = {GUID_SIGNING: sysvol_contents(*LDAP_LINES)}
+        target = tmp_path / "scan.json"
+
+        scan = run_scan(tools, contents, include_not_applicable=True)
+        self.save(tools, contents, target)
+        stored = read_scan(str(target))
+
+        assert stored["counts"] == scan["counts"]
+        assert [f["control_id"] for f in stored["findings"]] == \
+            [f["control_id"] for f in scan["findings"]]
+        assert [f["result"] for f in stored["findings"]] == \
+            [f["result"] for f in scan["findings"]]
+        assert stored["scan"]["catalog_version"] == \
+            scan["scan"]["catalog_version"]
+        assert stored["scan"]["base_dn"] == BASE_DN
+
+    def test_the_stored_scan_covers_the_whole_catalog_and_hides_nothing(
+            self, tools, mock_ldap_manager, tmp_path):
+        """A scan meant for diffing must not leave the diff guessing."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        target = tmp_path / "scan.json"
+
+        self.save(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)}, target)
+        stored = read_scan(str(target))
+
+        assert stored["scan"]["include_not_applicable"] is True
+        assert stored["counts"]["hidden"] == 0
+        assert stored["counts"]["total"] == stored["scan"]["control_count"]
+
+    def test_the_notes_warn_that_the_file_holds_directory_content(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+
+        response = self.save(tools, {}, tmp_path / "scan.json")
+
+        notes = " ".join(response["notes"])
+        assert "GPO display names, registry values and DNs" in notes
+        assert "diff_hardening_scans" in notes
+
+    def test_a_non_json_path_is_refused_and_nothing_is_written(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+
+        response = self.save(tools, {}, tmp_path / "scan.html")
+
+        assert response["success"] is False
+        assert "must end in .json" in response["error"]
+        assert response["scan_succeeded"] is True
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_unrelated_existing_file_is_not_clobbered(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        target = tmp_path / "package.json"
+        target.write_text('{"name": "something else"}', encoding="utf-8")
+
+        response = self.save(tools, {}, target)
+
+        assert response["success"] is False
+        assert "refusing to overwrite it" in response["error"]
+        assert "something else" in target.read_text(encoding="utf-8")
+
+    def test_missing_parent_directories_are_created(self, tools,
+                                                    mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+
+        response = self.save(tools, {}, tmp_path / "scans" / "2026" / "s.json")
+
+        assert response["success"] is True
+        assert (tmp_path / "scans" / "2026" / "s.json").is_file()
+
+    def test_unknown_control_ids_fail_before_any_file_is_written(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+
+        response = self.save(tools, {}, tmp_path / "s.json",
+                             control_ids=["MADE-UP-1"])
+
+        assert response["success"] is False
+        assert "MADE-UP-1" in response["error"]
+        assert response["operation"] == "write_hardening_scan"
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_broken_catalog_writes_nothing(self, tools, mock_ldap_manager,
+                                             tmp_path):
+        from aditor.hardening.catalog import CatalogError
+
+        with patch("aditor.tools.hardening.load_catalog",
+                   side_effect=CatalogError("duplicate control id 'X'")):
+            result = tools.write_hardening_scan(str(tmp_path / "s.json"))
+        response = json.loads(result[0].text)
+
+        assert response["success"] is False
+        assert "catalog failed to load" in response["error"]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_ldap_failure_writes_nothing(self, tools, mock_ldap_manager,
+                                            tmp_path):
+        mock_ldap_manager.search.side_effect = RuntimeError("LDAP server down")
+
+        with patch.dict(sys.modules, {"smbclient": Mock()}):
+            result = tools.write_hardening_scan(str(tmp_path / "s.json"))
+        response = json.loads(result[0].text)
+
+        assert response["success"] is False
+        assert "LDAP server down" in response["error"]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_missing_smbprotocol_names_this_tool_not_another(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) \
+            else __builtins__.__import__
+
+        def no_smbclient(name, *args, **kwargs):
+            if name == "smbclient":
+                raise ImportError("No module named 'smbclient'")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=no_smbclient):
+            result = tools.write_hardening_scan(str(tmp_path / "s.json"))
+        response = json.loads(result[0].text)
+
+        assert response["success"] is False
+        assert response["error"].startswith("write_hardening_scan reads GPO")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_scan_stays_read_only(self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+
+        self.save(tools, {}, tmp_path / "s.json")
+
+        assert mock_ldap_manager.add.called is False
+        assert mock_ldap_manager.modify.called is False
+        assert mock_ldap_manager.delete.called is False
+
+    def test_rerunning_over_its_own_output_is_allowed(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+        target = tmp_path / "s.json"
+
+        first = self.save(tools, {}, target)
+        second = self.save(tools, {}, target)
+
+        assert first["success"] is True and second["success"] is True
+        assert first["scan"]["scan_id"] != second["scan"]["scan_id"]
+
+
+class TestDiffHardeningScans:
+    """The diff tool's wiring. It reads two files and touches no directory.
+
+    The diff logic itself is covered exhaustively in ``test_hardening_diff.py``.
+    """
+
+    def save(self, tools, contents_by_guid, output_path):
+        def read_sysvol(sysvol_path, include_registry=True,
+                        max_value_chars=6000):
+            for guid, contents in contents_by_guid.items():
+                if guid in sysvol_path:
+                    return contents
+            return sysvol_contents()
+
+        with patch.dict(sys.modules, {"smbclient": Mock()}), \
+             patch.object(GPOTools, "_read_gpo_sysvol",
+                          side_effect=read_sysvol):
+            tools.write_hardening_scan(str(output_path))
+
+    def diff(self, tools, before_path, after_path):
+        return json.loads(tools.diff_hardening_scans(str(before_path),
+                                                     str(after_path))[0].text)
+
+    def test_two_real_scans_of_the_same_domain_diff_end_to_end(
+            self, tools, mock_ldap_manager, tmp_path):
+        """The round trip the reviewer will run live, offline."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        before = tmp_path / "before.json"
+        after = tmp_path / "after.json"
+        # Before: the signing GPO sets nothing. After: it sets both LDAP values.
+        self.save(tools, {GUID_SIGNING: sysvol_contents()}, before)
+        self.save(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)}, after)
+
+        response = self.diff(tools, before, after)
+
+        assert response["success"] is True
+        assert response["read_only"] is True
+        # Same engine and catalog on both sides, so this really is the domain.
+        assert response["attribution"]["verdict"] == "domain"
+        improved = {e["control_id"] for e in response["improvements"]}
+        assert "DEVORE-03-LDAP-SERVER-SIGNING" in improved
+        assert "DEVORE-05-LDAP-CHANNEL-BINDING" in improved
+        assert response["regressions"] == []
+        assert response["scans"]["before"]["source"] == str(before)
+
+    def test_the_response_headline_states_the_attribution(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        before = tmp_path / "before.json"
+        after = tmp_path / "after.json"
+        self.save(tools, {}, before)
+        self.save(tools, {}, after)
+
+        response = self.diff(tools, before, after)
+
+        assert "attributed to the domain" in response["headline"]
+
+    def test_an_ambiguous_diff_leads_with_a_warning_headline(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        before = tmp_path / "before.json"
+        after = tmp_path / "after.json"
+        self.save(tools, {}, before)
+        self.save(tools, {}, after)
+        # Rewrite the after scan as though a newer engine produced it.
+        stored = json.loads(after.read_text(encoding="utf-8"))
+        stored["scan"]["tool_version"] = "99.0.0"
+        after.write_text(json.dumps(stored), encoding="utf-8")
+
+        response = self.diff(tools, before, after)
+
+        assert response["attribution"]["verdict"] == "ambiguous"
+        assert response["headline"].startswith("ATTRIBUTION IS AMBIGUOUS")
+        assert "may be the scanner or the catalog" in response["headline"]
+
+    def test_two_domains_are_refused_with_a_clear_error(
+            self, tools, mock_ldap_manager, tmp_path):
+        """Acceptance 8, through the tool."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        before = tmp_path / "before.json"
+        after = tmp_path / "after.json"
+        self.save(tools, {}, before)
+        self.save(tools, {}, after)
+        stored = json.loads(after.read_text(encoding="utf-8"))
+        stored["scan"]["base_dn"] = "DC=elsewhere,DC=local"
+        after.write_text(json.dumps(stored), encoding="utf-8")
+
+        response = self.diff(tools, before, after)
+
+        assert response["success"] is False
+        assert "different domains" in response["error"]
+        assert BASE_DN in response["error"]
+        assert "DC=elsewhere,DC=local" in response["error"]
+        assert response["operation"] == "diff_hardening_scans"
+
+    def test_a_file_that_is_not_a_scan_is_refused_by_name(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        before = tmp_path / "before.json"
+        self.save(tools, {}, before)
+        not_a_scan = tmp_path / "notes.json"
+        not_a_scan.write_text('{"just": "some json"}', encoding="utf-8")
+
+        response = self.diff(tools, before, not_a_scan)
+
+        assert response["success"] is False
+        assert "not a hardening scan payload" in response["error"]
+        assert "notes.json" in response["error"]
+
+    def test_an_html_report_handed_to_the_diff_is_diagnosed(
+            self, tools, mock_ldap_manager, tmp_path):
+        """The likeliest mistake a caller makes."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        before = tmp_path / "before.json"
+        self.save(tools, {}, before)
+        report = tmp_path / "report.json"
+        report.write_text("<!DOCTYPE html><html>a report</html>",
+                          encoding="utf-8")
+
+        response = self.diff(tools, before, report)
+
+        assert response["success"] is False
+        assert "looks like an HTML file" in response["error"]
+
+    def test_a_missing_file_is_refused(self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        before = tmp_path / "before.json"
+        self.save(tools, {}, before)
+
+        response = self.diff(tools, before, tmp_path / "gone.json")
+
+        assert response["success"] is False
+        assert "does not exist" in response["error"]
+
+    def test_the_diff_touches_no_directory_at_all(self, tools,
+                                                  mock_ldap_manager, tmp_path):
+        """No LDAP, no SMB, no SYSVOL: two files in, one diff out."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        before = tmp_path / "before.json"
+        after = tmp_path / "after.json"
+        self.save(tools, {}, before)
+        self.save(tools, {}, after)
+        mock_ldap_manager.reset_mock()
+
+        with patch.object(GPOTools, "_read_gpo_sysvol",
+                          side_effect=AssertionError("SYSVOL must not be read")):
+            response = self.diff(tools, before, after)
+
+        assert response["success"] is True
+        assert mock_ldap_manager.search.called is False
+        assert mock_ldap_manager.add.called is False
+        assert mock_ldap_manager.modify.called is False
+        assert mock_ldap_manager.delete.called is False
+
+    def test_attribution_is_the_first_key_of_the_diff_body(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        before = tmp_path / "before.json"
+        after = tmp_path / "after.json"
+        self.save(tools, {}, before)
+        self.save(tools, {}, after)
+
+        keys = list(self.diff(tools, before, after))
+
+        # The response envelope comes first, then attribution ahead of every
+        # finding list — a reader must meet it before any number.
+        assert keys.index("attribution") < keys.index("regressions")
+        assert keys.index("regressions") < keys.index("improvements")
+
+
 class TestSchemaInfo:
 
     def test_schema_info_advertises_the_catalog_and_its_limits(self, tools):
         info = tools.get_schema_info()
 
         assert info["operations"] == ["scan_hardening",
-                                      "write_hardening_report"]
+                                      "write_hardening_report",
+                                      "write_hardening_scan",
+                                      "diff_hardening_scans"]
         assert info["read_only"] is True
+        assert info["writes_files"] == ["write_hardening_report",
+                                        "write_hardening_scan"]
         assert info["catalog_version"]
         assert "DEVORE-03-LDAP-SERVER-SIGNING" in info["control_ids"]
         assert info["unscored_control_ids"]
