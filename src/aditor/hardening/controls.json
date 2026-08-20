@@ -120,10 +120,12 @@
       "final_expected": 2,
       "presence_rollout_state": null,
       "missing_result": "fail",
-      "missing_note": "Diagnostic logging is not configured, so the 2889 evidence needed before enforcing LDAP signing or channel binding is not being produced.",
+      "gpo_deliverable": false,
+      "missing_note": "No GPO sets the diagnostic level. Devore's own instruction for this control is a direct registry write on the domain controllers, which leaves no GPO trace, so absence from Group Policy is not evidence that the level is 0 and the 2889 evidence is not being produced - this scan reads Group Policy and cannot see the level either way.",
       "value_source": "2 is the level quoted in Devore Part 3. The operator is 'gte', not 'equals', because the NTDS diagnostic levels are 0-5 with increasing verbosity (default 0) per Microsoft, 'How to configure Active Directory and LDS diagnostic event logging': https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/configure-ad-and-lds-event-logging — a domain controller at 3 logs strictly more than one at 2 and still produces the 2889 events this control exists to generate, so it is more compliant, not less, and must not be scored as a failure for exceeding the minimum.",
-      "remediation": "Set the '16 LDAP Interface Events' diagnostic level to 2 or higher on domain controllers while collecting unsigned-bind evidence.",
+      "remediation": "Set the '16 LDAP Interface Events' diagnostic level to 2 or higher on domain controllers while collecting unsigned-bind evidence. Devore's instruction is a direct registry write on each DC: reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\NTDS\\Diagnostics\" /v \"16 LDAP Interface Events\" /t REG_DWORD /d 2 /f. Delivering the same value through a GPO registry preference is equivalent and is the only form this scan can verify.",
       "caveats": [
+        "NOT GPO-DELIVERED: the documented remediation writes the registry directly on each domain controller, so this scan cannot confirm the level from Group Policy. Where no GPO sets the key the finding is 'unknown', not 'fail', and carries the reg query command to check it on the DCs.",
         "An audit enabler, not a hardening endpoint: it generates 2889 (client IP, account, binding type), 2887 (daily unsigned volume) and 2888 (rejected after enforcement).",
         "Leaving it raised permanently is noisy; it is normally raised for the audit window only.",
         "Levels run 0-5 with increasing verbosity (Microsoft, 'AD and LDS diagnostic event logging'; default 0), so a level above 2 satisfies this control - it logs strictly more, including the 2889 events. The floor is 2, not the exact value 2."
@@ -178,11 +180,13 @@
       "final_expected": 56,
       "presence_rollout_state": null,
       "missing_result": "fail",
-      "missing_note": "The KDC default is not restricted, so RC4 remains available domain-wide for accounts whose msDS-SupportedEncryptionTypes is blank.",
+      "gpo_deliverable": false,
+      "missing_note": "No GPO sets the KDC default. Devore's instruction for this control is to create the value on the domain controllers, which leaves no GPO trace, so absence from Group Policy is not evidence that RC4 remains available domain-wide - this scan reads Group Policy and cannot see the value either way.",
       "value_source": "0x38 (= 56 decimal) is quoted in Devore Part 4, citing KB5021131.",
-      "remediation": "Set DefaultDomainSupportedEncTypes to 0x38 on domain controllers, as the final lock-in after per-account (service account) AES remediation.",
+      "remediation": "Set DefaultDomainSupportedEncTypes to 0x38 on domain controllers, as the final lock-in after per-account (service account) AES remediation. Devore's instruction is to create the value directly on the DCs; delivering it as a GPO registry preference is equivalent and is the only form this scan can verify.",
       "caveats": [
-        "The post warns that big-bang use is 'too aggressive for most' — treat this as the final step, after per-account remediation, not the opening move."
+        "The post warns that big-bang use is 'too aggressive for most' — treat this as the final step, after per-account remediation, not the opening move.",
+        "NOT GPO-DELIVERED: the documented remediation creates the value on the domain controllers, so absence from Group Policy proves nothing. Where no GPO sets the key the finding is 'unknown', not 'fail', and carries the reg query command to check it on the DCs. Where a GPO does set it - as on the verified domain, at 0x38 by registry preference - it is scored normally."
       ],
       "audit_before_enforce": "4768 Ticket Encryption Type = RC4 identifies the accounts and devices that still depend on RC4."
     },
