@@ -352,6 +352,9 @@ class SecurityTools(BaseTool):
             )
 
             violations = []
+            # An account can be exempt from maxPwdAge rather than in breach of it;
+            # count those instead of silently dropping the finding.
+            exempt_from_expiry = 0
             current_time = self._convert_datetime_to_filetime(datetime.now())
 
             for entry in user_results:
@@ -371,9 +374,10 @@ class SecurityTools(BaseTool):
                     account_expires = account_expires_raw if account_expires_raw is not None else 0
 
                 user_violations = []
+                password_never_expires = bool(uac & 0x10000)  # DONT_EXPIRE_PASSWORD
 
                 # Check if password never expires but should
-                if bool(uac & 0x10000) and max_pwd_age != 0:  # DONT_EXPIRE_PASSWORD
+                if password_never_expires and max_pwd_age != 0:
                     user_violations.append("Password set to never expire")
 
                 # Check if password not required
@@ -384,11 +388,21 @@ class SecurityTools(BaseTool):
                 if account_expires != 0 and account_expires != 9223372036854775807 and account_expires < current_time:
                     user_violations.append("Account expired")
 
-                # Check if password is old (only if max age is set)
+                # Check if password is old (only if max age is set).
+                #
+                # DONT_EXPIRE_PASSWORD exempts the account from maxPwdAge
+                # entirely, so such a password is never "expired" no matter how
+                # old it is. Reporting both "Password expired" and "Password set
+                # to never expire" on one account is self-contradictory; the
+                # never-expire finding above already carries the real concern.
+                # Count the suppression so the reader can see it happened.
                 if max_pwd_age != 0 and pwd_last_set != 0:
                     password_age = current_time - pwd_last_set
                     if password_age > abs(max_pwd_age):
-                        user_violations.append("Password expired")
+                        if password_never_expires:
+                            exempt_from_expiry += 1
+                        else:
+                            user_violations.append("Password expired")
 
                 # Check if password never set
                 if pwd_last_set == 0:
@@ -410,7 +424,17 @@ class SecurityTools(BaseTool):
             
             return self._format_response({
                 "password_violations": violations,
-                "count": len(violations)
+                "count": len(violations),
+                "excluded_counts": {
+                    "exempt_from_expiry": exempt_from_expiry,
+                },
+                "notes": [
+                    "excluded_counts.exempt_from_expiry: accounts whose password "
+                    "is older than maxPwdAge but which carry "
+                    "DONT_EXPIRE_PASSWORD. maxPwdAge does not apply to them, so "
+                    "they are exempt rather than expired and are reported only "
+                    "as 'Password set to never expire'.",
+                ],
             }, "get_password_policy_violations")
             
         except Exception as e:

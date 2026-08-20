@@ -536,3 +536,131 @@ def test_schema_operations_list_has_no_deleted_methods(security_tools):
             f"schema advertises {operation}, which SecurityTools does not implement"
         )
 
+
+
+# ---------------------------------------------------------------------------
+# get_password_policy_violations (P2-WP6 Fix 1)
+# ---------------------------------------------------------------------------
+
+# userAccountControl bits, spelled out so the fixtures read as intent.
+UAC_NORMAL_ACCOUNT = 0x0200        # 512
+UAC_ACCOUNTDISABLE = 0x0002
+UAC_PASSWD_NOTREQD = 0x0020
+UAC_DONT_EXPIRE_PASSWORD = 0x10000
+UAC_WORKSTATION_TRUST = 0x1000     # what a computer account carries
+
+# 42 days expressed as AD's negative 100-nanosecond interval.
+MAX_PWD_AGE_42_DAYS = -36288000000000
+
+
+def _violation_user(sam, *, uac=UAC_NORMAL_ACCOUNT, pwd_age_days=10,
+                    object_classes=('top', 'person', 'organizationalPerson', 'user'),
+                    dn=None):
+    """One synthetic directory entry for get_password_policy_violations.
+
+    Names are invented (DC=test,DC=local); nothing here comes from a real domain.
+    """
+    attributes = {
+        'sAMAccountName': [sam],
+        'displayName': [sam],
+        'objectClass': list(object_classes),
+        'userAccountControl': [uac],
+        'accountExpires': [0],
+    }
+    if pwd_age_days is None:
+        attributes['pwdLastSet'] = [0]
+    else:
+        attributes['pwdLastSet'] = [datetime.now() - timedelta(days=pwd_age_days)]
+    return {'dn': dn or f'CN={sam},OU=Accounts,DC=test,DC=local', 'attributes': attributes}
+
+
+def _violations_search(users, max_pwd_age=MAX_PWD_AGE_42_DAYS):
+    """search() side effect: the domain policy first, then the given user set.
+
+    The mock deliberately returns `users` whatever the user search filter is, so
+    the tests prove the tool excludes the wrong objects itself rather than
+    relying on the directory to have honoured the filter.
+    """
+    def side_effect(*args, **kwargs):
+        if 'objectClass=domain' in kwargs.get('search_filter', ''):
+            return [{
+                'dn': 'DC=test,DC=local',
+                'attributes': {'maxPwdAge': [max_pwd_age], 'minPwdAge': [-864000000000]},
+            }]
+        return users
+    return side_effect
+
+
+def _violations_payload(security_tools, mock_ldap_manager, users, **kwargs):
+    mock_ldap_manager.search.side_effect = _violations_search(users)
+    result = security_tools.get_password_policy_violations(**kwargs)
+    assert len(result) == 1
+    assert isinstance(result[0], TextContent)
+    return json.loads(result[0].text)
+
+
+class TestPasswordExpiryIsNotClaimedForExemptAccounts:
+    """Fix 1a: DONT_EXPIRE_PASSWORD exempts an account from maxPwdAge."""
+
+    def test_never_expire_account_with_old_password_is_not_also_expired(
+            self, security_tools, mock_ldap_manager):
+        """The exact contradictory pair seen live: both findings on one account."""
+        user = _violation_user('svc.exempt',
+                               uac=UAC_NORMAL_ACCOUNT | UAC_DONT_EXPIRE_PASSWORD,
+                               pwd_age_days=500)  # far past the 42-day maximum
+        payload = _violations_payload(security_tools, mock_ldap_manager, [user])
+
+        assert payload['count'] == 1
+        violations = payload['password_violations'][0]['violations']
+        assert 'Password set to never expire' in violations
+        assert 'Password expired' not in violations
+        assert payload['excluded_counts']['exempt_from_expiry'] == 1
+
+    def test_expired_password_is_still_reported_without_the_exemption(
+            self, security_tools, mock_ldap_manager):
+        """Control case: the same old password without DONT_EXPIRE_PASSWORD."""
+        user = _violation_user('user.expired', pwd_age_days=500)
+        payload = _violations_payload(security_tools, mock_ldap_manager, [user])
+
+        violations = payload['password_violations'][0]['violations']
+        assert 'Password expired' in violations
+        assert 'Password set to never expire' not in violations
+        assert payload['excluded_counts']['exempt_from_expiry'] == 0
+
+    def test_no_account_carries_both_findings(self, security_tools, mock_ldap_manager):
+        """Asserted directly over a mixed set: the pair must be unreachable."""
+        users = [
+            _violation_user('user.fresh', pwd_age_days=3),
+            _violation_user('user.expired', pwd_age_days=500),
+            _violation_user('svc.exempt.old',
+                            uac=UAC_NORMAL_ACCOUNT | UAC_DONT_EXPIRE_PASSWORD,
+                            pwd_age_days=4000),
+            _violation_user('svc.exempt.fresh',
+                            uac=UAC_NORMAL_ACCOUNT | UAC_DONT_EXPIRE_PASSWORD,
+                            pwd_age_days=3),
+            _violation_user('user.notreqd',
+                            uac=UAC_NORMAL_ACCOUNT | UAC_PASSWD_NOTREQD,
+                            pwd_age_days=500),
+            _violation_user('user.nopassword', pwd_age_days=None),
+        ]
+        payload = _violations_payload(security_tools, mock_ldap_manager, users)
+
+        assert payload['password_violations'], 'fixture should produce findings'
+        for account in payload['password_violations']:
+            violations = account['violations']
+            assert not ('Password expired' in violations
+                        and 'Password set to never expire' in violations), (
+                f"{account['sam_account_name']} reports a contradictory pair: {violations}"
+            )
+
+    def test_exempt_account_drops_out_when_expiry_was_its_only_finding(
+            self, security_tools, mock_ldap_manager):
+        """maxPwdAge unset domain-wide: never-expire is not a finding either."""
+        user = _violation_user('svc.exempt',
+                               uac=UAC_NORMAL_ACCOUNT | UAC_DONT_EXPIRE_PASSWORD,
+                               pwd_age_days=500)
+        mock_ldap_manager.search.side_effect = _violations_search([user], max_pwd_age=0)
+        payload = json.loads(security_tools.get_password_policy_violations()[0].text)
+
+        assert payload['count'] == 0
+        assert payload['excluded_counts']['exempt_from_expiry'] == 0
