@@ -5,7 +5,10 @@
 > backend foundation is in [`REPLATFORM_BRIEF.md`](REPLATFORM_BRIEF.md).
 
 **Baseline source:** Jerry Devore, "Active Directory Hardening Series," Microsoft
-Core Infrastructure and Security Blog. Verified Aug 2026 — **8 parts, no Part 9.**
+Core Infrastructure and Security Blog. **Every control cites the specific article
+it derives from** in its own `source` field — that per-control citation, not any
+count of articles, is what defines coverage. Where the series does not state an
+exact value, a second authoritative source is cited alongside it (see below).
 
 This catalog is the product spec: each control is a declarative, source-cited
 assertion. It is the input to the scan engine, the fixture for offline tests, and
@@ -54,6 +57,18 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 ---
 
 ## Build implications (read before scoping the engine)
+
+0. **Cite the article; restate the guidance in our own words.** Each control carries
+   roughly a page of derived content — `remediation`, `caveats`, `missing_note`,
+   `audit_before_enforce`, `value_source` — because the HTML report has to be
+   actionable without the reader opening a blog post mid-incident. That content is
+   **our restatement**, not copied prose: the source articles are Microsoft
+   copyright, and this repo should not become a mirror of them. Quote only where the
+   exact wording *is* the evidence — for example "Not defined ... is the same as
+   Disable", which is the sentence that licenses the NTLM audit floor — and attribute
+   it inline. There is also a product reason for restating rather than excerpting:
+   the report needs finding-specific guidance ("two GPOs set this to 1 and 7, decide
+   which owns it"), which no excerpt can supply.
 
 1. **The posts are not a complete value source.** Devore frequently names only the
    friendly policy and defers to linked Microsoft articles — so SMB `RequireSecuritySignature`,
@@ -568,10 +583,6 @@ pragmatic route. Until then, a browser printing the HTML covers the rare case �
 
 ## Notes from source research
 
-- **Part 9 does not exist** (as of Aug 2026). The author page lists Parts 1–8 plus
-  two non-series posts. The `adhardening` tag's "9 Topics" = 9 tagged posts (8 parts
-  + a related article), not a Part 9. A search for `"Active Directory Hardening
-  Series" "Part 9"` returns nothing.
 - **Non-deterministic as a GPO check:** Part 2 (SMBv1 feature), Part 4
   msDS-SupportedEncryptionTypes (per-account attr), Part 7 (all of it), Part 8
   Protected Users. These use directory/feature queries, not GPO content.

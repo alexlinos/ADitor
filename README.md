@@ -109,7 +109,8 @@ from SYSVOL)
 
 **Hardening scan**
 `scan_hardening` — evaluates the domain's GPOs against a versioned control
-catalog derived from the Devore AD Hardening Series (Parts 1-8). Each finding
+catalog derived from the Devore AD Hardening Series, with each control citing
+the specific article it comes from. Each finding
 carries a result, a rollout state (not started / audit / enforced, so a domain
 correctly mid-rollout does not read as failing), and evidence: expected value
 next to every value found, with the source GPO DN and link path. Policy
