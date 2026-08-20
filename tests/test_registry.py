@@ -155,3 +155,15 @@ def test_write_hardening_report_is_registered(server):
     # carries the domain's GPO names and registry values.
     assert "self-contained" in spec.description
     assert "only side effect" in spec.description
+
+
+def test_audit_admin_accounts_description_states_the_risk_model():
+    """P2-WP6: a rating is only useful if the caller knows what it means."""
+    spec = next(s for s in TOOLS if s.name == "audit_admin_accounts")
+    description = spec.description
+    # The two HIGH cases and the disabled demotion are the load-bearing claims.
+    assert "PASSWD_NOTREQD" in description
+    assert "kerberoastable" in description
+    assert "disabled" in description
+    # lastLogon's per-DC replication caveat must be disclosed to the caller.
+    assert "not replicated" in description

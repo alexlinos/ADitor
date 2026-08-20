@@ -265,7 +265,17 @@ can be told apart from a clean domain."""
 
 AUDIT_ADMIN_ACCOUNTS_DESC = """Audit administrative accounts for security compliance.
 
-Reviews privileged accounts for policy compliance and risk."""
+Reviews the members of Domain Admins, Enterprise Admins, Schema Admins and
+Administrators. risk_level rates how usable the account is to an attacker, so the
+list can be triaged: HIGH is PASSWD_NOTREQD on an enabled account, an enabled
+SPN-bearing account whose password is a year or more old (kerberoastable), or a
+non-expiring password over five years old; MEDIUM is a non-expiring password, a
+fresher SPN account, or 180+ days without a logon; LOW is informational,
+including a disabled account, which cannot authenticate and so is not
+exploitable, though it should still be removed from the group. Each account
+carries risk_drivers saying what drove its rating, and the payload restates the
+model in risk_model. days_since_logon comes from lastLogon, which is per-DC and
+not replicated, so it can read older than reality; it never drives HIGH alone."""
 
 CHECK_PASSWORD_POLICY_DESC = """Check the domain password policy against a baseline (read-only).
 
