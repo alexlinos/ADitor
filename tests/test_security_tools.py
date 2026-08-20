@@ -664,3 +664,49 @@ class TestPasswordExpiryIsNotClaimedForExemptAccounts:
 
         assert payload['count'] == 0
         assert payload['excluded_counts']['exempt_from_expiry'] == 0
+
+
+class TestComputerAccountsAreNotAPasswordPolicyFinding:
+    """Fix 1b: `(objectClass=user)` also matches computers in AD."""
+
+    def test_machine_account_is_excluded_and_the_user_is_kept(
+            self, security_tools, mock_ldap_manager):
+        machine = _violation_user(
+            'WKSTN01$',
+            uac=UAC_WORKSTATION_TRUST | UAC_DONT_EXPIRE_PASSWORD,
+            pwd_age_days=500,
+            object_classes=('top', 'person', 'organizationalPerson', 'user', 'computer'),
+            dn='CN=WKSTN01,CN=Computers,DC=test,DC=local',
+        )
+        person = _violation_user('user.expired', pwd_age_days=500)
+        payload = _violations_payload(security_tools, mock_ldap_manager, [machine, person])
+
+        assert [acc['sam_account_name'] for acc in payload['password_violations']] == \
+            ['user.expired']
+        assert payload['count'] == 1
+        assert payload['excluded_counts']['computer_accounts'] == 1
+
+    def test_machine_account_recognised_by_trailing_dollar_alone(
+            self, security_tools, mock_ldap_manager):
+        """An entry without objectClass still must not be reported as a user."""
+        machine = _violation_user('SRV02$', pwd_age_days=500, object_classes=())
+        payload = _violations_payload(security_tools, mock_ldap_manager, [machine])
+
+        assert payload['count'] == 0
+        assert payload['excluded_counts']['computer_accounts'] == 1
+
+    def test_search_filter_excludes_computers_at_the_directory(
+            self, security_tools, mock_ldap_manager):
+        """The query itself must not ask for computers."""
+        _violations_payload(security_tools, mock_ldap_manager,
+                            [_violation_user('user.fresh', pwd_age_days=1)])
+
+        user_filters = [
+            call.kwargs['search_filter']
+            for call in mock_ldap_manager.search.call_args_list
+            if 'objectClass=domain' not in call.kwargs.get('search_filter', '')
+        ]
+        assert user_filters, 'expected a user search'
+        for search_filter in user_filters:
+            assert 'objectCategory=person' in search_filter
+            assert search_filter != '(objectClass=user)'
