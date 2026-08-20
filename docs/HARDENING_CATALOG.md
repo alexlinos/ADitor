@@ -35,7 +35,7 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 | DEVORE-02-SMBV1-REMOVAL | 2 | directory-state | ⚠️ feature state, no reg |
 | DEVORE-03-LDAP-SERVER-SIGNING | 3 | gpo-security-template | ✅ 1/2 quoted |
 | DEVORE-03-LDAP-CLIENT-SIGNING | 3 | gpo-security-template | ✅ 0/1/2 quoted; os_default 1 |
-| DEVORE-03-LDAP-DIAG-LOGGING | 3 | gpo-registry-pol | ✅ =2 (audit helper) |
+| DEVORE-03-LDAP-DIAG-LOGGING | 3 | gpo-registry-pol | ✅ floor >=2 (audit helper; levels 0–5 per MS) |
 | DEVORE-04-KERB-CONFIGURE-ENCTYPES | 4 | gpo-security-template | ❌ reg path not stated |
 | DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES | 4 | gpo-registry-pol | ✅ 0x38 quoted |
 | DEVORE-04-MSDS-SUPPORTEDENCTYPES | 4 | directory-state | ⚠️ per-account attribute |
@@ -111,6 +111,19 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
    value is absent so it does not correct drift, and `U`/`R` rewrite it on every
    refresh.
 
+   A third trap, closed in P2-WP5: an item can be scoped to a **key** rather
+   than a value. `<Properties action="D" hive="..." key="...\Wintrust\Config"/>`
+   carries no name, type or value, so it never matches a value path — and while
+   it was dropped as a "bare item", a GPO *deleting the key that contains a
+   hardened value* was invisible and the value read as configured. Bare items are
+   now split by action: a create/update/replace still configures nothing and is
+   dropped, while a key-scoped `D` is emitted (`value_name: None`,
+   `deletes_key: true`) and **disclosed** in the finding's notes — naming the GPO,
+   saying that if the control passes another GPO is removing the key underneath
+   the value, and pointing at client-side extension ordering as what decides,
+   which this scan does not resolve. A disabled item deletes nothing and is not
+   disclosed.
+
 3. **Pass/fail is not binary — it's phased.** Almost every network control is
    *audit-first, then enforce* with an interim and a final target (NTLM level 3→5,
    LDAP signing 1→2, channel binding 1→2, NTLM audit→deny). The report should show
@@ -127,7 +140,36 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
    `LdapEnforceChannelBinding` has no key by default, which is exactly why
    setting it matters.
 
-5. **Least Privilege (Part 7) is a mini-product of its own** — group membership
+5. **Absence from every GPO is not always evidence.** For most controls a GPO
+   *is* the delivery mechanism, so a key that appears in no GPO is strong
+   evidence that nothing sets it — that is what licenses `missing_result: fail`.
+   A few controls are different: the source's own remediation writes the registry
+   directly on the domain controllers (`reg add`), which leaves no trace in
+   SYSVOL, so "not in any GPO" says nothing about the value on the DCs. Those
+   carry `gpo_deliverable: false`, and where their key is in no GPO the finding is
+   `result: unknown`, `rollout_state: null`, `evidence.source: unknown`, plus a
+   note giving the exact `reg query` that reads the live value (derived from
+   `registry_key`, so it cannot drift from the key asserted).
+
+   `DEVORE-03-LDAP-DIAG-LOGGING` is why: it reported a confident `fail` on a
+   domain where the value was correctly set to 3 *on the DC*, because Devore's
+   instruction for it is `reg add`, not a GPO. An `unknown` there is **more**
+   actionable than a `fail` — it says what the scan can and cannot see and hands
+   over the one command that closes the gap.
+
+   **Deliberately narrow.** Today it is set on exactly two controls
+   (`DEVORE-03-LDAP-DIAG-LOGGING`, `DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES`)
+   and a test pins that membership: turning every unset key into `unknown` would
+   gut the tool. It changes only the *absent* case — such a control found in a GPO
+   is scored on its value like any other, which is how DEVORE-04 stays a `pass` on
+   a domain that delivers `0x38` by registry preference. It also takes precedence
+   over `os_default`, for the same reason an unreadable GPO does: that branch
+   concludes the documented default is *in force*, which needs "nothing sets this
+   key" — and a direct-write remediation is exactly where absence from GPO fails
+   to establish it. Reading the live registry on a DC (remote registry / WMI) is a
+   separate capability: this makes the gap honest, it does not close it.
+
+6. **Least Privilege (Part 7) is a mini-product of its own** — group membership
    that should be empty, URA-vs-baseline diff, delegation ACLs, `TrustedForDelegation`
    queries, Protected Users. Scope it as its own control group, not one check.
 
@@ -144,7 +186,12 @@ time — deferred to its own WP). **The self-contained HTML file is the hand-off
 format**; the JSON is the source of truth the renderer consumes.
 
 **Every control row carries its proof — expected vs. found:**
-- `result`: `pass | fail | not_applicable | error`
+- `result`: `pass | fail | unknown | not_applicable | error`. `unknown` is the
+  verdict-less verdict and is distinct from `error`: nothing went wrong, but the
+  evidence a GPO scan can reach does not settle the question (build-implication
+  #5). It is never a pass, is never hidden, and renders in the report's
+  "Unknown — the scan could not decide" section alongside `error`, with its reason
+  and check command shown open on the card rather than folded away.
 - `rollout_state`: `not_started | audit | enforced` (see build-implication #3 —
   never a bare pass/fail, or a correctly mid-rollout org reads as failing)
 - `evidence`: the **actual value found** (the real registry line / AppLocker
@@ -158,8 +205,9 @@ format**; the JSON is the source of truth the renderer consumes.
   os-default pass is a hardening *opportunity* ("at the OS default, not raised"),
   never a claim that Group Policy enforces the value — and its `rollout_state` is
   capped at `audit`, because nothing enforces a default. `unknown` means the scan
-  did not establish the setting's state: either the control is not evaluated at all,
-  or GPOs could not be read. **`not-configured` is never used for a scan that
+  did not establish the setting's state: the control is not evaluated at all, GPOs
+  could not be read, or the setting is one a GPO scan structurally cannot see
+  (`gpo_deliverable: false`). **`not-configured` is never used for a scan that
   failed** — "we could not look" is not the same claim as "nothing sets it".
 - `evidence.found[].delivery`: `security-template | registry-pol |
   registry-preference` — **how** the GPO put the value there. A control asserts
@@ -173,7 +221,9 @@ format**; the JSON is the source of truth the renderer consumes.
   - the item's **action** is carried alongside (`evidence.found[].preference`).
     `C` (Create) means drift will not be corrected; `D` (Delete) is never counted
     as configuring the value, and is reported in the scan notes instead — a GPO
-    deleting the value is usually the explanation for the failure being read.
+    deleting the value is usually the explanation for the failure being read. A
+    `D` scoped to the **key** rather than the value is disclosed the same way,
+    one level up.
   - **item-level targeting** (`<Filters>`) is *not* resolved. A filtered item is
     flagged as such so the verdict reads "configured where the filter matches"
     rather than implying domain-wide coverage.
@@ -297,10 +347,17 @@ pragmatic route. Until then, a browser printing the HTML covers the rare case �
   assert:
     registry_path: 'HKLM\SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics\16 LDAP Interface Events'
     type: REG_DWORD
-    expected: 2
-    operator: equals
+    final_expected: 2        # a FLOOR, not an exact value
+    operator: gte            # levels run 0-5 with increasing verbosity (MS, "AD and
+                             # LDS diagnostic event logging"; default 0), so a DC at 3
+                             # logs strictly more than one at 2 and still emits 2889
   severity: informational
-  caveats: ["Generates 2889 (client IP + account + Binding Type). 2887=daily unsigned volume; 2888=rejected after enforcement."]
+  gpo_deliverable: false     # Devore remediates with `reg add` on the DCs, so
+                             # absence from GPO is not evidence of absence
+  caveats:
+    - "Generates 2889 (client IP + account + Binding Type). 2887=daily unsigned volume; 2888=rejected after enforcement."
+    - "Leaving it raised permanently is noisy; normally raised for the audit window only."
+    - "`equals 2` was a false negative (fixed P2-WP5): a DC at 3 is MORE compliant and scored fail."
 
 # PART 4 — Enforcing AES for Kerberos (GPO + explicit DC reg + directory-state)
 - id: DEVORE-04-KERB-CONFIGURE-ENCTYPES
@@ -329,6 +386,9 @@ pragmatic route. Until then, a browser printing the HTML covers the rare case �
     expected: 0x38           # quoted; disables RC4 (see KB5021131)
     operator: equals
   severity: high
+  gpo_deliverable: false     # Devore says create the value ON THE DCs; where a GPO
+                             # does deliver it (0x38 by preference on the verified
+                             # domain) it is scored normally
   caveats: ["Post warns big-bang use is 'too aggressive for most'; treat as final lock-in after per-account remediation."]
 
 - id: DEVORE-04-MSDS-SUPPORTEDENCTYPES   # *** directory-state ***

@@ -25,6 +25,17 @@ When settings disagree, the verdict follows the **least compliant** of them.
 A "pass" that some other GPO silently overrides is a lie, and refusing to issue
 one is what makes the no-RSoP approach defensible rather than merely simpler.
 
+**An unset key is not always readable evidence.** A control flagged
+``gpo_deliverable: false`` documents a remediation that writes the registry
+directly on the domain controllers, so its key is not expected to appear in a GPO
+even where the setting *is* applied. For those controls an empty match list
+proves nothing, and the finding is ``result: "unknown"`` with ``rollout_state``
+``None``, ``evidence.source: "unknown"``, and a note giving the ``reg query``
+that reads the live value. ``DEVORE-03-LDAP-DIAG-LOGGING`` reported a confident
+``fail`` on a domain where the value was correctly set to 3 on the DC; that is
+the false negative this closes. It changes only the absent case — such a control
+found in a GPO is judged on its value like any other.
+
 **An unset key is not automatically a failure.** Where Microsoft documents an OS
 default for a setting, the control carries ``os_default`` and a domain that sets
 nothing is judged against that default rather than reported as ``fail`` /
@@ -71,6 +82,11 @@ information and every found value records it in ``delivery``:
   item says so in the evidence rather than implying domain-wide coverage.
 * a policy and a preference setting the same key to different values is a
   conflict like any other, reported as ``policy-preference-disagreement``.
+* a preference item can delete a whole **key**, not just a value. That removes
+  the key and everything in it, so a key-delete covering a control's key is
+  disclosed in the finding's notes — if the control passes, another GPO is
+  removing the key under the value that passed it, and which lands depends on
+  client-side extension ordering, which this scan does not resolve.
 """
 
 from __future__ import annotations
@@ -90,11 +106,21 @@ from .catalog import (
     Control,
 )
 
-# Results a finding can carry.
+# Results a finding can carry. ``unknown`` is the verdict-less verdict: the scan
+# established neither compliance nor non-compliance, and says so instead of
+# guessing. It is distinct from ``error`` — nothing went wrong, the evidence a
+# GPO scan can reach simply does not settle the question (see
+# :func:`_no_gpo_trace_finding`).
 RESULT_PASS = "pass"
 RESULT_FAIL = "fail"
+RESULT_UNKNOWN = "unknown"
 RESULT_NOT_APPLICABLE = "not_applicable"
 RESULT_ERROR = "error"
+
+# Every value ``result`` can take. Advertised by the tool layer, so it lives
+# next to the constants rather than being retyped there.
+RESULTS = (RESULT_PASS, RESULT_FAIL, RESULT_UNKNOWN, RESULT_NOT_APPLICABLE,
+           RESULT_ERROR)
 
 # Rollout states, ordered least to most compliant.
 STATE_NOT_STARTED = "not_started"
@@ -153,6 +179,13 @@ NON_WRITE_DISABLED = "disabled"
 NON_WRITE_DELETE = "delete"
 NON_WRITE_UNRECOGNISED_ACTION = "unrecognised-action"
 
+# A preference item that deletes the whole KEY the control's value lives in.
+# Reported by :func:`find_preference_key_deletes` rather than by
+# :func:`find_preference_non_writes`: it names no value at all, so it is not a
+# "this item does not write the value" case but a "something is removing the
+# ground the value stands on" case.
+NON_WRITE_KEY_DELETE = "key-delete"
+
 _PRESENCE_ONLY_NOTE = (
     "Operator 'present': the source states this setting's registry path but not "
     "its compliant numeric value, so the control asserts only that the policy is "
@@ -207,6 +240,22 @@ _MIXED_DELIVERY_DETAIL = (
     "while the policy value reverts. Confirm the effective value on a "
     "representative machine before trusting either."
 )
+_NO_GPO_TRACE_NOTE = (
+    "Reported as 'unknown', not as a failure. This control's documented "
+    "remediation is a direct registry write on the domain controllers, which "
+    "leaves no trace in Group Policy at all, so the key appearing in no GPO is "
+    "NOT evidence that the value is unset. This scan reads Group Policy and not "
+    "the machines, so it cannot see the live value either way and issues no "
+    "verdict. Check it on each domain controller with: {command}"
+)
+_NO_GPO_TRACE_NOTE_NO_COMMAND = (
+    "Reported as 'unknown', not as a failure. This control's documented "
+    "remediation is a direct registry write on the domain controllers, which "
+    "leaves no trace in Group Policy at all, so the key appearing in no GPO is "
+    "NOT evidence that the value is unset. This scan reads Group Policy and not "
+    "the machines, so it cannot see the live value either way and issues no "
+    "verdict. Read the value directly on each domain controller to settle it."
+)
 _UNREADABLE_OS_DEFAULT_NOTE = (
     "No GPO that could be read sets this key, but {unreadable} of {total} GPO(s) "
     "could not be read at all, so 'nothing sets this key' is unproven. The "
@@ -249,7 +298,7 @@ class GpoSnapshot:
         registry_pol_entries: ``{key, value, type, data}`` dicts from
             ``parse_registry_pol`` over the machine ``Registry.pol``.
         registry_xml_entries: ``{hive, key, value_name, type, type_name, value,
-            action, order, has_filters, disabled}`` dicts from
+            action, order, has_filters, disabled, deletes_key}`` dicts from
             ``parse_registry_xml`` over the machine
             ``Preferences\\Registry\\Registry.xml``. Defaults to empty, so a
             caller that does not read preferences behaves exactly as before.
@@ -389,6 +438,78 @@ def find_preference_non_writes(control: Control,
     return excluded
 
 
+def find_preference_key_deletes(control: Control,
+                                gpos: Iterable[GpoSnapshot]
+                                ) -> List[Dict[str, Any]]:
+    """Preference items that delete a whole **key** covering the control's key.
+
+    A GPP registry item can be scoped to a key rather than a value:
+    ``<Properties action="D" hive="HKEY_LOCAL_MACHINE" key="...\\Wintrust\\Config"/>``
+    removes that key and everything in it. Such an item names no value, so it can
+    never appear in :func:`find_matches` or :func:`find_preference_non_writes`,
+    both of which compare a full value path — which is exactly how it went
+    unnoticed: a GPO clearing the key underneath a hardened value was invisible,
+    and the value read as configured.
+
+    "Covers" means the deleted key **is** the control's key path, or is a parent
+    of it: deleting ``...\\Wintrust`` takes ``...\\Wintrust\\Config`` with it.
+    Matching is on path components, so ``...\\Config`` never matches
+    ``...\\ConfigExtra``.
+
+    A **disabled** item is not reported: it writes nothing and deletes nothing,
+    so disclosing it as removing the key would be its own false statement.
+
+    Like :func:`find_preference_non_writes`, this is restricted to
+    ``gpo-registry-pol`` controls, matching where :func:`find_matches` looks at
+    preferences at all. Widening it would change verdict evidence for
+    security-template controls, which is not what this fix is for.
+
+    Returns:
+        One dict per covering key-delete: the GPO's identity, the key it deletes
+        (as written), and the preference evidence. These are *disclosures*, never
+        matches — the evaluator has no precedence model and does not pretend to
+        know whether the delete or the write wins.
+    """
+    deletes: List[Dict[str, Any]] = []
+    wanted_path = normalize_registry_key(control.registry_key_path,
+                                         MACHINE_POL_HIVE)
+    if not wanted_path or control.check_type != "gpo-registry-pol":
+        return deletes
+
+    for gpo in gpos:
+        for entry in gpo.registry_xml_entries or ():
+            if not entry.get("deletes_key") or entry.get("disabled"):
+                continue
+            deleted = normalize_registry_key(
+                "\\".join(part for part in (entry.get("hive"), entry.get("key"))
+                          if part),
+                MACHINE_POL_HIVE)
+            if not deleted or not _key_covers(deleted, wanted_path):
+                continue
+            deletes.append({
+                "gpo_dn": gpo.dn,
+                "gpo_display_name": gpo.display_name,
+                "gpo_guid": gpo.guid,
+                "deleted_key": "\\".join(
+                    part for part in (entry.get("hive"), entry.get("key"))
+                    if part),
+                "delivery": DELIVERY_REGISTRY_PREFERENCE,
+                "source_file": SOURCE_FILE_REGISTRY_XML,
+                "reason": NON_WRITE_KEY_DELETE,
+                "preference": _preference_evidence(entry),
+            })
+    return deletes
+
+
+def _key_covers(deleted: str, wanted_path: str) -> bool:
+    """Whether a deleted key is, or contains, ``wanted_path``.
+
+    Both arguments must already be normalised. The separator check is what stops
+    ``...\\CONFIG`` from being read as covering ``...\\CONFIGEXTRA``.
+    """
+    return wanted_path == deleted or wanted_path.startswith(deleted + "\\")
+
+
 def _preference_key(entry: Dict[str, Any]) -> str:
     """Rejoin a preference item's hive, key and value name into one path."""
     parts = [entry.get("hive"), entry.get("key"), entry.get("value_name")]
@@ -515,9 +636,9 @@ def evaluate_control(control: Control,
                      gpos: Iterable[GpoSnapshot]) -> Dict[str, Any]:
     """Evaluate one control against every GPO, returning one finding.
 
-    The finding carries ``result`` (``pass``/``fail``/``not_applicable``/
-    ``error``), ``rollout_state``, ``evidence`` (expected versus found, with the
-    source GPO DN and link path) and ``conflict``.
+    The finding carries ``result`` (``pass``/``fail``/``unknown``/
+    ``not_applicable``/``error``), ``rollout_state``, ``evidence`` (expected
+    versus found, with the source GPO DN and link path) and ``conflict``.
 
     Controls flagged ``needs_baseline_value`` are not evaluated at all: they come
     back ``not_applicable`` with ``scored: False`` and the catalog's
@@ -540,14 +661,17 @@ def evaluate_control(control: Control,
     try:
         matches = find_matches(control, gpos)
         non_writes = find_preference_non_writes(control, gpos)
+        key_deletes = find_preference_key_deletes(control, gpos)
     except Exception as exc:  # pragma: no cover - defensive
         return _error_finding(control, f"could not scan GPO content: {exc}",
                               [], gpos)
 
     # Preference items that name the key but delete it, are disabled, or carry
     # an action we do not recognise. They set nothing, so they are not matches —
-    # but they are usually the explanation for whatever verdict follows.
-    extra_notes = _non_write_notes(non_writes)
+    # but they are usually the explanation for whatever verdict follows. A
+    # key-scoped delete is the same story one level up: it removes the key the
+    # value lives in, which no value-path comparison can see.
+    extra_notes = _non_write_notes(non_writes) + _key_delete_notes(key_deletes)
 
     if control.operator == "absent":
         return _absent_finding(control, matches, gpos, extra_notes)
@@ -618,7 +742,8 @@ def evaluate_controls(controls: Iterable[Control],
         ``pass`` to get "passes a GPO configures".
     """
     gpos = list(gpos)
-    counts = {RESULT_PASS: 0, RESULT_FAIL: 0, RESULT_NOT_APPLICABLE: 0,
+    counts = {RESULT_PASS: 0, RESULT_FAIL: 0, RESULT_UNKNOWN: 0,
+              RESULT_NOT_APPLICABLE: 0,
               RESULT_ERROR: 0, "needs_baseline_value": 0, "conflicts": 0,
               "os_default": 0, "os_default_pass": 0, "scored": 0,
               "rendered": 0, "hidden": 0, "total": 0}
@@ -737,6 +862,34 @@ def _non_write_notes(non_writes: Sequence[Dict[str, Any]]) -> List[str]:
             f"because whether they write the value is unknown - and unknown is "
             f"not a pass.")
     return notes
+
+
+def _key_delete_notes(key_deletes: Sequence[Dict[str, Any]]) -> List[str]:
+    """Disclose preference items that delete the key this value lives in.
+
+    The shape mirrors the value-level Delete disclosure, one level up. It is a
+    *disclosure*, not a verdict: this scan has no precedence model, so it says
+    what both GPOs do, names them, and points at the mechanism that decides —
+    client-side extension ordering, which link precedence cannot settle.
+    """
+    if not key_deletes:
+        return []
+
+    names = ", ".join(item.get("gpo_display_name") or item.get("gpo_dn") or "?"
+                      for item in key_deletes)
+    keys = ", ".join(sorted({str(item.get("deleted_key") or "?")
+                             for item in key_deletes}))
+    return [
+        f"{len(key_deletes)} Group Policy preference item(s) DELETE a registry "
+        f"KEY that contains this control's value, rather than deleting the value "
+        f"itself ({names}; key(s): {keys}). A key delete removes the key and "
+        f"everything in it, so it is never counted as configuring anything. If "
+        f"this control passes, another GPO is removing the key underneath the "
+        f"value that passed it, and which one takes effect depends on the order "
+        f"the Group Policy client-side extensions run - not on link precedence, "
+        f"and this scan resolves neither. Confirm the effective state on a "
+        f"representative machine before trusting this verdict."
+    ]
 
 
 def _detect_conflict(assessed: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -897,8 +1050,23 @@ def _missing_finding(control: Control, gpos: Sequence[GpoSnapshot],
     those into errors as well would change every verdict on any domain with one
     unreadable GPO, which is a far larger change than the unsound-pass this fix
     exists to close.
+
+    **And unless a GPO was never the delivery mechanism.** A control flagged
+    ``gpo_deliverable: false`` documents a remediation that writes the registry
+    directly on the domain controllers, so its key is not expected to appear in a
+    GPO even on a domain that has applied it. For those controls an empty match
+    list is not evidence of anything, and the finding is ``unknown`` (see
+    :func:`_no_gpo_trace_finding`).
+
+    That branch is checked **first**, before the os-default branch, for the same
+    reason the unreadable-GPO branch exists: the os-default branch concludes that
+    the Windows default is the effective value, which needs "nothing sets this
+    key" to be established, and a documented direct-write remediation is exactly
+    the case where absence from GPO does not establish it.
     """
     note = control.missing_note or "No GPO in the domain sets this key."
+    if not control.gpo_deliverable:
+        return _no_gpo_trace_finding(control, gpos, note, extra_notes)
     if control.os_default is not None:
         unreadable = _unreadable_gpos(gpos)
         if unreadable:
@@ -908,6 +1076,46 @@ def _missing_finding(control: Control, gpos: Sequence[GpoSnapshot],
     return _finding(control, control.missing_result or RESULT_FAIL,
                     STATE_NOT_STARTED, [], gpos,
                     notes=[note] + list(extra_notes))
+
+
+def _no_gpo_trace_finding(control: Control, gpos: Sequence[GpoSnapshot],
+                          missing_note: str,
+                          extra_notes: Sequence[str] = ()) -> Dict[str, Any]:
+    """The key is in no GPO, and for this control that proves nothing.
+
+    ``DEVORE-03-LDAP-DIAG-LOGGING`` was the case that exposed this: Devore's own
+    instruction for it is ``reg add`` on the domain controllers, not a GPO, so a
+    domain with the value correctly set to 3 *directly on the DC* reported
+    ``fail`` / ``not-configured``. That is a false negative asserted with full
+    confidence — the scanner claiming a fact ("this is not configured") that the
+    evidence it holds cannot support — and it cost real remediation time.
+
+    So the verdict is ``unknown`` with ``rollout_state`` ``None``: no rollout step
+    was reached because no value was read, and inventing ``not_started`` would
+    imply a value below the interim step. ``evidence.source`` is ``unknown``,
+    never ``not-configured``: "we cannot see it" is a different claim from
+    "nothing sets it", which is the whole point of the fix.
+
+    This is **more** actionable than a bare ``fail``, not less. The notes say
+    exactly what the scan can and cannot see, and hand the reader the one
+    ``reg query`` that closes the gap — derived from the control's own
+    ``registry_key``, so it always names the key actually asserted.
+
+    ``result`` is not ``error``: nothing went wrong, and an error means the scan
+    broke. It is not ``not_applicable`` either — the control applies perfectly
+    well, and ``not_applicable`` findings are hidden by default, which would bury
+    precisely the thing the reader needs. ``unknown`` is never hidden.
+
+    The field only affects the *absent* case. A ``gpo_deliverable: false`` control
+    whose key **is** found in a GPO never reaches here: it is judged on the value
+    exactly like any other control.
+    """
+    command = control.absence_check_command
+    reason = (_NO_GPO_TRACE_NOTE.format(command=command) if command
+              else _NO_GPO_TRACE_NOTE_NO_COMMAND)
+    return _finding(control, RESULT_UNKNOWN, None, [], gpos,
+                    notes=[missing_note, reason] + list(extra_notes),
+                    evidence_source=EVIDENCE_SOURCE_UNKNOWN)
 
 
 def _incomplete_scan_finding(control: Control, gpos: Sequence[GpoSnapshot],

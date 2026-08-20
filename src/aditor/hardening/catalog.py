@@ -33,6 +33,23 @@ because "enforced" means Group Policy holds the value and nothing enforces a
 default. That cap lives in the evaluator, not here: it is a property of what an OS
 default is, so no catalog value can opt out of it.
 
+**Absence from every GPO is not always evidence.** For most controls a GPO *is*
+the delivery mechanism, so a key that appears in no GPO is strong evidence that
+nothing sets it — that is what licenses ``missing_result: "fail"``. A few
+controls are different: the source's own remediation writes the registry
+directly on the domain controllers (``reg add``), which leaves no trace in
+SYSVOL at all, so "not in any GPO" says nothing about the value on the DCs.
+Those controls carry ``gpo_deliverable: false``, and the evaluator reports
+``unknown`` instead of ``fail`` when their key is found in no GPO, with the
+exact ``reg query`` command that closes the gap.
+
+The field is deliberately **narrow**, and the loader only accepts it on an
+active control with a full ``registry_key`` (the check command is derived from
+the key, so a control without one could not produce it). Setting it broadly
+would turn every unset key into ``unknown`` and gut the tool. It changes only
+the *absent* case: a ``gpo_deliverable: false`` control that **is** found in a
+GPO is judged on the value exactly like any other.
+
 **Only known values are asserted.** A control whose exact expected value the
 source does not state is carried with ``status: "needs_baseline_value"``, no
 expected values at all, and a ``baseline_gap`` explaining what is missing and
@@ -93,6 +110,7 @@ _CONTROL_FIELDS = frozenset({
     "interim_expected", "final_expected", "os_default", "os_default_source",
     "presence_rollout_state", "missing_result", "missing_note", "value_source",
     "baseline_gap", "remediation", "caveats", "audit_before_enforce",
+    "gpo_deliverable",
 })
 
 _REQUIRED_CONTROL_FIELDS = ("id", "title", "source", "scope", "check_type",
@@ -134,6 +152,22 @@ class Control:
     baseline_gap: Optional[str] = None
     caveats: Tuple[str, ...] = ()
     audit_before_enforce: Optional[str] = None
+    gpo_deliverable: bool = True
+
+    @property
+    def absence_check_command(self) -> Optional[str]:
+        """The command that reads this key's live value on a domain controller.
+
+        Derived from ``registry_key`` rather than stored as a second catalog
+        field, so it cannot drift away from the key the control asserts. Used by
+        the evaluator when a ``gpo_deliverable: false`` control's key is in no
+        GPO: the finding is ``unknown``, and this is the one command that turns
+        it into a fact.
+        """
+        if not self.registry_key_path or not self.registry_value_name:
+            return None
+        return (f'reg query "{self.registry_key_path}" '
+                f'/v "{self.registry_value_name}"')
 
     @property
     def scored(self) -> bool:
@@ -378,6 +412,13 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
     os_default = raw.get("os_default")
     presence_state = raw.get("presence_rollout_state")
     missing_result = raw.get("missing_result")
+    gpo_deliverable = raw.get("gpo_deliverable")
+
+    if gpo_deliverable is not None and not isinstance(gpo_deliverable, bool):
+        raise CatalogError(
+            f"{where}: 'gpo_deliverable' must be true or false — it declares "
+            f"whether absence from every GPO is evidence that this key is unset "
+            f"— got {type(gpo_deliverable).__name__}")
 
     if registry_key is not None and not isinstance(registry_key, str):
         raise CatalogError(f"{where}: 'registry_key' must be a string or null")
@@ -412,6 +453,11 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
             raise CatalogError(
                 f"{where} is flagged {STATUS_NEEDS_BASELINE_VALUE}, which is "
                 f"never evaluated, so 'missing_result' must be null")
+        if gpo_deliverable is False:
+            raise CatalogError(
+                f"{where} is flagged {STATUS_NEEDS_BASELINE_VALUE}, which is "
+                f"never evaluated, so 'gpo_deliverable: false' cannot change any "
+                f"verdict and can only mislead the next editor")
     else:
         if not registry_key or not registry_key.strip():
             raise CatalogError(f"{where} is active but has no 'registry_key' to "
@@ -432,6 +478,13 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
         if operator == "in" and not isinstance(final, list):
             raise CatalogError(
                 f"{where}: operator 'in' needs 'final_expected' to be a list")
+        if gpo_deliverable is False and "\\" not in registry_key:
+            raise CatalogError(
+                f"{where}: 'gpo_deliverable: false' makes the finding 'unknown' "
+                f"when no GPO sets the key, and that finding has to carry the "
+                f"'reg query' command that checks the live value on a domain "
+                f"controller. That command is derived from 'registry_key', so the "
+                f"key must be a full path including its value name")
         if raw.get("baseline_gap"):
             raise CatalogError(
                 f"{where} is active but carries a 'baseline_gap'; a control with "
@@ -483,6 +536,7 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
         baseline_gap=raw.get("baseline_gap"),
         caveats=tuple(str(c) for c in caveats),
         audit_before_enforce=raw.get("audit_before_enforce"),
+        gpo_deliverable=True if gpo_deliverable is None else gpo_deliverable,
     )
 
 

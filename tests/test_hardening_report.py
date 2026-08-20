@@ -43,6 +43,7 @@ from aditor.hardening.report import (
     SECTION_UNKNOWN,
     SECTIONS,
     ReportPathError,
+    _delivered_by_preference,
     group_findings,
     headline_counts,
     render_report,
@@ -597,13 +598,23 @@ class TestFailureCard:
         assert 'class="flagged"' in card  # the PHASED: caveat is emphasised
 
     def test_rc4_control_surfaces_the_service_account_warning(self, catalog):
-        """Part 4: remediate service accounts before disabling RC4 domain-wide."""
+        """Part 4: remediate service accounts before disabling RC4 domain-wide.
+
+        The failing fixture is a GPO that sets the value *wrongly* (0x26, which
+        re-enables RC4) rather than an empty domain: since P2-WP5 an empty domain
+        makes this control ``unknown``, because its documented remediation writes
+        the registry directly on the DCs and leaves no GPO trace. A wrong value
+        that a GPO really does deliver is still a failure, and that is the card
+        this test is about.
+        """
         payload = scan_payload(
-            [snapshot(GUID_A, "Empty GPO", links=[GpoLink(target_dn=BASE_DN)])],
-            catalog=catalog,
-            control_ids=["DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES"])
-        card = card_of(render_report(payload), SECTION_FAIL,
-                       "DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES")
+            [snapshot(GUID_A, "Enc Types By Policy",
+                      pol_entries=[kdc_pol_entry(value=38)],
+                      links=[GpoLink(target_dn=BASE_DN)])],
+            catalog=catalog, control_ids=[KDC_CONTROL])
+        document = render_report(payload)
+        assert KDC_CONTROL in sections_of(document)[SECTION_FAIL]
+        card = card_of(document, SECTION_FAIL, KDC_CONTROL)
         assert "Rollout order" in card
         assert "too aggressive for most" in card
 
@@ -1341,3 +1352,292 @@ class TestPolicyVersusPreferenceConflictIsRendered:
 
         assert "38" in card
         assert "56" in card
+
+
+# --------------------------------------------------------------------------- #
+# P2-WP5 — an `unknown` result that is neither a read failure nor an error
+# --------------------------------------------------------------------------- #
+
+DIAG_CONTROL = "DEVORE-03-LDAP-DIAG-LOGGING"
+DIAG_REG_QUERY = ('reg query &quot;HKLM\\SYSTEM\\CurrentControlSet\\Services'
+                  '\\NTDS\\Diagnostics&quot; /v &quot;16 LDAP Interface '
+                  'Events&quot;')
+
+
+class TestUnknownVerdictThatIsNotAReadFailure:
+    """Acceptance 7: the new ``unknown`` result renders correctly.
+
+    Every GPO was read successfully, nothing errored, and the control still has
+    no verdict — because its documented remediation writes the registry directly
+    on the domain controllers and leaves no GPO trace. The report has to make
+    that legible without the reader mistaking the row for a pass.
+    """
+
+    @pytest.fixture
+    def payload(self, catalog):
+        return scan_payload(
+            [snapshot(GUID_A, "Some Unrelated Policy",
+                      links=[GpoLink(target_dn=BASE_DN)])],
+            catalog=catalog, control_ids=[DIAG_CONTROL])
+
+    @pytest.fixture
+    def document(self, payload):
+        return render_report(payload)
+
+    def test_it_lands_in_the_unknown_section(self, document):
+        rendered = sections_of(document)
+
+        assert DIAG_CONTROL in rendered[SECTION_UNKNOWN]
+
+    def test_it_is_in_no_other_section(self, document):
+        rendered = sections_of(document)
+
+        for section_id in (SECTION_PASSES, SECTION_FAIL, SECTION_OPPORTUNITIES,
+                           SECTION_NOT_JUDGED, SECTION_NOT_APPLICABLE,
+                           SECTION_CONFLICTS):
+            assert DIAG_CONTROL not in rendered[section_id], section_id
+
+    def test_the_card_cannot_be_mistaken_for_a_pass(self, document):
+        card = card_of(document, SECTION_UNKNOWN, DIAG_CONTROL)
+        text = visible_text(card)
+
+        assert "badge-result-unknown" in card
+        assert "Unknown" in text
+        assert "this is not a pass" in text
+        assert "No verdict was issued for this control." in text
+        assert "Pass" not in text
+
+    def test_the_card_carries_the_reg_query_command_in_the_open(self, document):
+        """Not folded into the collapsed notes: the command is the deliverable."""
+        card = card_of(document, SECTION_UNKNOWN, DIAG_CONTROL)
+        reason = card[card.index("Why this is unknown"):]
+
+        assert DIAG_REG_QUERY in reason
+        assert "Scan notes" not in card, \
+            "the notes are rendered open here, so the collapsed copy is dropped"
+
+    def test_the_card_says_why_group_policy_cannot_answer_it(self, document):
+        text = visible_text(card_of(document, SECTION_UNKNOWN, DIAG_CONTROL))
+
+        assert "direct registry write on the domain controllers" in text
+        assert "no trace in Group Policy" in text
+
+    def test_the_card_still_carries_remediation_and_rollout_guidance(
+            self, document):
+        card = card_of(document, SECTION_UNKNOWN, DIAG_CONTROL)
+
+        assert "Remediation" in card
+        assert "Rollout order" in card
+        assert "NOT GPO-DELIVERED" in card  # the catalog's own caveat
+
+    def test_it_is_not_reported_as_a_read_failure(self, document):
+        """The distinction acceptance 7 asks for: nothing failed to read."""
+        assert "All GPOs read." in document
+        assert '<section class="alert"' not in document
+
+    def test_the_section_lede_explains_both_kinds_of_unknown(self, document):
+        lede = visible_text(sections_of(document)[SECTION_UNKNOWN])
+
+        assert "could not read what it needed" in lede
+        assert "leaves no trace in Group Policy" in lede
+        assert "unknown, not clean, and not passes" in lede
+
+    def test_the_headline_tile_counts_it_as_unknown(self, document):
+        summary = document[document.index('id="summary"'):
+                           document.index('<nav class="toc"')]
+        text = visible_text(summary)
+
+        assert re.search(r"1\s+Unknown", text), text
+        assert "0 Passes" in re.sub(r"\s+", " ", text)
+
+    def test_the_tile_breakdown_separates_unread_from_unseeable(self, document):
+        text = re.sub(r"\s+", " ", visible_text(document))
+
+        assert ("Of the 1 unknown, 0 could not be read by this scan and 1 name "
+                "a setting Group Policy does not deliver") in text
+
+    def test_the_table_of_contents_counts_it(self, document):
+        toc = document[document.index('<nav class="toc"'):
+                       document.index("</nav>")]
+        entry = toc[toc.index('href="#unknown"'):]
+
+        assert "(1)" in entry[:80]
+
+    def test_the_headline_counts_expose_it_separately_from_error(self, payload):
+        headline = headline_counts(payload)
+
+        assert headline["unknown"] == 1
+        assert headline["error"] == 0
+        assert headline["pass"] == 0
+        assert headline["fail"] == 0
+
+    def test_grouping_puts_unknown_and_error_in_one_section(self, catalog):
+        """Both mean "no verdict", so a reader has one place to look."""
+        payload = scan_payload(
+            [snapshot(GUID_A, "Some Unrelated Policy",
+                      links=[GpoLink(target_dn=BASE_DN)]),
+             snapshot(GUID_C, "Unreadable Policy",
+                      read_error="STATUS_ACCESS_DENIED")],
+            catalog=catalog,
+            control_ids=[DIAG_CONTROL, CLIENT_SIGNING_CONTROL])
+        grouped = group_findings(payload["findings"])
+        ids = {f["control_id"]: f["result"]
+               for f in grouped[SECTION_UNKNOWN]}
+
+        assert ids == {DIAG_CONTROL: "unknown",
+                       CLIENT_SIGNING_CONTROL: "error"}
+
+    def test_a_gpo_delivered_value_on_the_same_control_renders_as_a_pass(
+            self, catalog):
+        """The field changes only the absent case, in the report too."""
+        payload = scan_payload(
+            [snapshot(GUID_A, "NTDS Diagnostics",
+                      pol_entries=[{
+                          "key": r"SYSTEM\CurrentControlSet\Services\NTDS"
+                                 r"\Diagnostics",
+                          "value": "16 LDAP Interface Events",
+                          "type": "REG_DWORD", "data": 3}],
+                      links=[GpoLink(target_dn=BASE_DN)])],
+            catalog=catalog, control_ids=[DIAG_CONTROL])
+        document = render_report(payload)
+
+        assert DIAG_CONTROL in sections_of(document)[SECTION_PASSES]
+        assert DIAG_CONTROL not in sections_of(document)[SECTION_UNKNOWN]
+
+
+class TestByPreferenceBadgeIsOnlyForPreferenceOnlyPasses:
+    """Fix 2: the badge said "only" in the docs and "any" in the code.
+
+    The badge exists because a preference tattoos and may not correct drift, so
+    a pass that *depends* on one is a weaker statement about ongoing state. Where
+    a policy also delivers a compliant value the pass does not depend on the
+    preference — the evaluator treats that as two mechanisms agreeing — and
+    labelling it weaker misleads the reader in the one place they skim.
+
+    The mixed-delivery case was the one nothing pinned.
+    """
+
+    POL_KEY = r"System\CurrentControlSet\services\KDC"
+
+    def payload(self, *gpos):
+        return scan_payload(list(gpos), control_ids=[KDC_CONTROL])
+
+    def preference_gpo(self, guid=GUID_A, name="Enc Types By Preference"):
+        return snapshot(guid, name, preference_entries=[preference_entry(56)],
+                        links=[GpoLink(target_dn=BASE_DN)])
+
+    def policy_gpo(self, guid=GUID_B, name="Enc Types By Policy"):
+        return snapshot(guid, name, pol_entries=[kdc_pol_entry(56)],
+                       links=[GpoLink(target_dn=BASE_DN)])
+
+    def test_a_preference_only_pass_is_badged(self):
+        row = pass_row_of(render_report(self.payload(self.preference_gpo())),
+                          KDC_CONTROL)
+
+        assert "BY PREFERENCE" in row
+
+    def test_a_mixed_policy_and_preference_pass_is_not_badged(self):
+        """Two mechanisms agreeing: the pass is not preference-dependent."""
+        document = render_report(
+            self.payload(self.policy_gpo(), self.preference_gpo()))
+        row = pass_row_of(document, KDC_CONTROL)
+
+        assert "BY PREFERENCE" not in row
+
+    def test_the_mixed_pass_is_still_a_pass_with_both_values_in_evidence(self):
+        """Guards against "fixed" by suppressing the finding instead."""
+        document = render_report(
+            self.payload(self.policy_gpo(), self.preference_gpo()))
+        row = pass_row_of(document, KDC_CONTROL)
+
+        assert "Group Policy preference" in row
+        assert "administrative template (policy)" in row
+        assert "tattoos" in visible_text(row), \
+            "the tattoo caveat still belongs in the expanded evidence"
+
+    def test_two_preferences_agreeing_are_still_badged(self):
+        """Every found value is a preference, so the pass does depend on them."""
+        row = pass_row_of(render_report(self.payload(
+            self.preference_gpo(),
+            self.preference_gpo(guid=GUID_B, name="Second Preference"))),
+            KDC_CONTROL)
+
+        assert "BY PREFERENCE" in row
+
+    def test_a_policy_only_pass_is_not_badged(self):
+        row = pass_row_of(render_report(self.payload(self.policy_gpo())),
+                          KDC_CONTROL)
+
+        assert "BY PREFERENCE" not in row
+
+    def test_a_pass_with_no_found_value_is_not_badged(self):
+        """An os-default pass has no found values; ``all([])`` must not badge it."""
+        payload = scan_payload(
+            [snapshot(GUID_A, "Unrelated Policy",
+                      links=[GpoLink(target_dn=BASE_DN)])],
+            control_ids=[CLIENT_SIGNING_CONTROL])
+        document = render_report(payload)
+
+        assert "BY PREFERENCE" not in document
+
+    def test_the_helper_is_unit_pinned_in_both_directions(self):
+        """The predicate itself, away from the rendering."""
+        preference = {"delivery": "registry-preference"}
+        policy = {"delivery": "registry-pol"}
+
+        assert _delivered_by_preference([preference]) is True
+        assert _delivered_by_preference([preference, preference]) is True
+        assert _delivered_by_preference([preference, policy]) is False
+        assert _delivered_by_preference([policy, preference]) is False
+        assert _delivered_by_preference([policy]) is False
+        assert _delivered_by_preference([]) is False
+        assert _delivered_by_preference(None) is False
+        assert _delivered_by_preference(["not a dict"]) is False
+
+
+class TestKeyScopedDeleteIsVisibleInTheReport:
+    """Fix 3 through the renderer: the disclosure has to reach the reader.
+
+    The finding is a pass — this scan does not resolve precedence — so the row is
+    a compact pass row, which is exactly where a "another GPO deletes the key
+    under this value" note would be easiest to lose.
+    """
+
+    KDC_PREF_KEY = r"SYSTEM\CurrentControlSet\Services\Kdc"
+
+    def key_delete_entry(self, key=None):
+        """A parsed key-scoped delete: no value name, `deletes_key` set."""
+        return {"hive": "HKEY_LOCAL_MACHINE", "key": key or self.KDC_PREF_KEY,
+                "value_name": None, "type": None, "type_name": None,
+                "value": None, "action": "D", "order": 1,
+                "has_filters": False, "disabled": False, "deletes_key": True}
+
+    @pytest.fixture
+    def document(self):
+        payload = scan_payload([
+            snapshot(GUID_A, "Enc Types By Preference",
+                     preference_entries=[preference_entry(56)],
+                     links=[GpoLink(target_dn=BASE_DN)]),
+            snapshot(GUID_B, "Undo Enc Types",
+                     preference_entries=[self.key_delete_entry()],
+                     links=[GpoLink(target_dn=BASE_DN)]),
+        ], control_ids=[KDC_CONTROL])
+        return render_report(payload)
+
+    def test_the_pass_row_discloses_the_key_delete(self, document):
+        text = visible_text(pass_row_of(document, KDC_CONTROL))
+
+        assert "DELETE a registry KEY" in text
+        assert "Undo Enc Types" in text
+
+    def test_the_reader_is_told_what_decides_the_outcome(self, document):
+        text = visible_text(pass_row_of(document, KDC_CONTROL))
+
+        assert "another GPO is removing the key underneath the value" in text
+        assert "client-side extensions run" in text
+        assert "not on link precedence" in text
+
+    def test_the_deleted_key_is_named(self, document):
+        row = pass_row_of(document, KDC_CONTROL)
+
+        assert "Kdc" in row

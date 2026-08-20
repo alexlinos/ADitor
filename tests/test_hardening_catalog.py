@@ -840,3 +840,122 @@ class TestCitationHonesty:
         assert catalog.version and catalog.version[0].isdigit()
         assert catalog.baseline.get("primary_source")
         assert catalog.baseline.get("value_policy")
+
+
+# --------------------------------------------------------------------------- #
+# P2-WP5 — gpo_deliverable
+# --------------------------------------------------------------------------- #
+
+class TestGpoDeliverableField:
+    """``gpo_deliverable: false`` says absence from GPO is not evidence.
+
+    A control whose documented remediation writes the registry directly on the
+    domain controllers leaves no trace in SYSVOL, so "this key is in no GPO"
+    tells the scan nothing about the value on the DCs. The loader keeps the
+    field narrow: it is meaningless on a control that is never evaluated, and it
+    is refused on a control whose ``registry_key`` cannot produce the
+    ``reg query`` command the resulting ``unknown`` finding has to carry.
+    """
+
+    def test_the_default_is_true_so_existing_controls_are_untouched(self):
+        control = build_catalog(a_catalog(a_control())).controls[0]
+
+        assert control.gpo_deliverable is True
+
+    def test_false_loads_and_is_exposed_on_the_control(self):
+        control = build_catalog(a_catalog(
+            a_control(gpo_deliverable=False))).controls[0]
+
+        assert control.gpo_deliverable is False
+
+    def test_the_check_command_is_derived_from_the_registry_key(self):
+        """Derived, not a second field, so it cannot drift from the key."""
+        control = build_catalog(a_catalog(a_control(
+            registry_key=r"HKLM\SYSTEM\CurrentControlSet\Services\NTDS"
+                         r"\Diagnostics\16 LDAP Interface Events",
+            gpo_deliverable=False))).controls[0]
+
+        assert control.absence_check_command == (
+            'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\NTDS'
+            '\\Diagnostics" /v "16 LDAP Interface Events"')
+
+    @pytest.mark.parametrize("bad", ["false", 0, [], {}])
+    def test_a_non_boolean_is_a_load_error(self, bad):
+        with pytest.raises(CatalogError, match="must be true or false"):
+            build_catalog(a_catalog(a_control(gpo_deliverable=bad)))
+
+    def test_it_is_refused_on_a_control_that_is_never_evaluated(self):
+        flagged = a_control(
+            id="TEST-GAP", status=STATUS_NEEDS_BASELINE_VALUE,
+            operator="present", registry_key=None, final_expected=_OMIT,
+            missing_result=_OMIT, gpo_deliverable=False,
+            baseline_gap="the post names the policy but prints no value")
+
+        with pytest.raises(CatalogError, match="gpo_deliverable"):
+            build_catalog(a_catalog(flagged))
+
+    def test_it_is_refused_when_no_check_command_can_be_derived(self):
+        """A bare key with no value name cannot produce a `reg query`."""
+        with pytest.raises(CatalogError, match="full path including its value"):
+            build_catalog(a_catalog(a_control(
+                registry_key="HKLM", gpo_deliverable=False)))
+
+    def test_true_is_accepted_explicitly_as_well_as_by_omission(self):
+        control = build_catalog(a_catalog(
+            a_control(gpo_deliverable=True))).controls[0]
+
+        assert control.gpo_deliverable is True
+
+
+class TestGpoDeliverableIsScopedToTwoShippedControls:
+    """The field must stay narrow, and the catalog is where that is enforced.
+
+    For most controls a GPO *is* the delivery mechanism, so absence from every
+    GPO is strong evidence that nothing sets the key — which is what licenses
+    ``missing_result: fail``. Marking controls broadly would turn every unset
+    key into ``unknown`` and gut the tool, so the exact membership of this set is
+    pinned rather than left to a reviewer's memory.
+    """
+
+    NON_DELIVERABLE = ("DEVORE-03-LDAP-DIAG-LOGGING",
+                       "DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES")
+
+    @pytest.fixture
+    def catalog(self):
+        return load_catalog()
+
+    def test_exactly_these_two_controls_carry_the_field(self, catalog):
+        marked = [c.id for c in catalog.controls if not c.gpo_deliverable]
+
+        assert sorted(marked) == sorted(self.NON_DELIVERABLE)
+
+    def test_no_other_control_carries_it(self, catalog):
+        for control in catalog.controls:
+            if control.id in self.NON_DELIVERABLE:
+                continue
+            assert control.gpo_deliverable is True, control.id
+
+    @pytest.mark.parametrize("control_id", NON_DELIVERABLE)
+    def test_each_marked_control_can_produce_its_check_command(
+            self, catalog, control_id):
+        control = catalog.by_id(control_id)
+
+        assert control.absence_check_command
+        assert control.absence_check_command.startswith("reg query ")
+
+    @pytest.mark.parametrize("control_id", NON_DELIVERABLE)
+    def test_each_marked_control_says_so_in_its_caveats(self, catalog,
+                                                       control_id):
+        """The report renders caveats; the limitation must not hide in code."""
+        caveats = catalog.by_id(control_id).caveats
+
+        assert any("NOT GPO-DELIVERED" in caveat for caveat in caveats), caveats
+
+    @pytest.mark.parametrize("control_id", NON_DELIVERABLE)
+    def test_each_marked_control_does_not_assert_the_key_is_unset(
+            self, catalog, control_id):
+        """``missing_note`` is rendered verbatim, so it must not claim more."""
+        note = catalog.by_id(control_id).missing_note
+
+        assert "no GPO trace" in note
+        assert "not evidence" in note
