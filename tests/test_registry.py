@@ -119,6 +119,17 @@ def test_expected_security_tools_are_registered(server):
     assert expected <= set(server._tool_handlers)
 
 
+def test_password_policy_violations_exposes_include_disabled():
+    """P2-WP6: the disabled-account opt-in has to reach the MCP schema."""
+    spec = next(s for s in TOOLS if s.name == "get_password_policy_violations")
+    parameter = spec.input_schema["properties"]["include_disabled"]
+    assert parameter["type"] == "boolean"
+    assert parameter["default"] is False
+    assert "required" not in spec.input_schema
+    # The description has to state the scope, or a caller cannot read the count.
+    assert "include_disabled" in spec.description
+
+
 def test_expected_tool_count(server):
     # 9 user + 8 group + 9 computer + 7 OU + 7 security + 4 GPO
     # + 2 hardening + 3 system = 49
@@ -144,3 +155,15 @@ def test_write_hardening_report_is_registered(server):
     # carries the domain's GPO names and registry values.
     assert "self-contained" in spec.description
     assert "only side effect" in spec.description
+
+
+def test_audit_admin_accounts_description_states_the_risk_model():
+    """P2-WP6: a rating is only useful if the caller knows what it means."""
+    spec = next(s for s in TOOLS if s.name == "audit_admin_accounts")
+    description = spec.description
+    # The two HIGH cases and the disabled demotion are the load-bearing claims.
+    assert "PASSWD_NOTREQD" in description
+    assert "kerberoastable" in description
+    assert "disabled" in description
+    # lastLogon's per-DC replication caveat must be disclosed to the caller.
+    assert "not replicated" in description
