@@ -228,16 +228,34 @@ button:disabled { opacity: 0.5; cursor: default; }
 /* --- progress ------------------------------------------------------------ */
 
 .progress { margin-top: 18px; }
+/* A <progress> rather than a div with an inline width: the page's CSP forbids
+   inline styles, so a div-based bar could never move. Both vendor prefixes are
+   needed -- WebKit on macOS and WebKitGTK, Chromium/WebView2 on Windows, Gecko
+   where pywebview falls back to it. */
 .progress-track {
+  display: block;
+  width: 100%;
   height: 6px;
-  background: var(--steel-100);
+  border: 0;
   border-radius: 3px;
+  background: var(--steel-100);
+  color: var(--amber);
+  -webkit-appearance: none;
+  appearance: none;
   overflow: hidden;
 }
-.progress-bar {
-  height: 100%;
+.progress-track::-webkit-progress-bar {
+  background: var(--steel-100);
+  border-radius: 3px;
+}
+.progress-track::-webkit-progress-value {
   background: var(--amber);
+  border-radius: 3px;
   transition: width 220ms linear;
+}
+.progress-track::-moz-progress-bar {
+  background: var(--amber);
+  border-radius: 3px;
 }
 .progress-text { margin: 8px 0 0; font-weight: 600; font-size: 13px; }
 

@@ -16,8 +16,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!--
+    Content-Security-Policy. What it buys and what it cannot:
+
+    * default-src 'none' plus connect-src 'none' is the part that matters here.
+      This page renders directory content (GPO names, DNs, registry values), and
+      those two directives mean it can make no network request of any kind — no
+      fetch, no XHR, no WebSocket, no remote image, no web font, no CDN. Nothing
+      can be exfiltrated and nothing can creep in later.
+    * form-action / base-uri 'none' close the two navigation-based ways round
+      the above.
+    * 'unsafe-eval' is required by pywebview, not wanted by us. pywebview serves
+      this page from a local HTTP server and installs window.pywebview — and
+      every js_api call and evaluate_js — through eval. With script-src 'self'
+      alone the bridge never appears and every button in the window is dead.
+      This was measured, not assumed: the strict policy was tried first and the
+      web view reported "Refused to evaluate a string as JavaScript".
+      So CSP is not the layer that stops injected script here. The layer that
+      does is aditor.app.render, where every value that reaches this page goes
+      through one escaper.
+  -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'none'">
+        content="default-src 'none'; style-src 'self'; script-src 'self' 'unsafe-eval'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
   <title>ADitor</title>
   <link rel="stylesheet" href="app.css">
 </head>
@@ -193,9 +213,15 @@
             Open report</button>
         </div>
         <div class="progress" id="scan-progress" hidden>
-          <div class="progress-track">
-            <div class="progress-bar" id="scan-bar" style="width:0%"></div>
-          </div>
+          <!--
+            A real <progress>, not a styled div with an inline width. The page's
+            Content-Security-Policy forbids inline styles (style-src 'self'),
+            which silently blocked a div-based bar from ever moving; an element
+            whose value is an attribute needs no inline style, and it is
+            announced properly by a screen reader into the bargain.
+          -->
+          <progress id="scan-bar" class="progress-track" max="100" value="0"
+                    aria-label="Scan progress"></progress>
           <p class="progress-text" id="scan-message" aria-live="polite"></p>
           <p class="hint" id="scan-elapsed"></p>
         </div>

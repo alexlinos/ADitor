@@ -65,6 +65,48 @@ chmod 600 ad-config/config.json
 The `password` field supports `${ENV_VAR}` expansion, so the secret can be supplied
 at runtime rather than stored on disk. `config.json` is gitignored.
 
+## The desktop app
+
+For an administrator who would rather not use a terminal, ADitor ships a desktop
+app: four screens, none of which can change the directory.
+
+```bash
+uv pip install -e ".[gui,smb]"
+python -m aditor.app
+```
+
+`pywebview` is an **optional extra** (`gui`) — the headless server installs and
+runs without it. `python -m aditor.app --check` prints the generated client
+config and the exposure assessment without opening a window.
+
+| Screen | What it does |
+|---|---|
+| **Connection** | Enter and test read-only credentials. On failure it shows the *actual* LDAP error, because "invalid credentials", "certificate not trusted" and "host unreachable" have different fixes. |
+| **Scan** | One button. Runs the read-only hardening scan once through `write_hardening_snapshot`, shows that scan's counts and progress, and opens the report. |
+| **History** | The snapshot archive. Open a report, or pick two scans and diff them — with the diff's `attribution` shown first, and an `ambiguous` verdict rendered as a warning rather than as a count of improvements. |
+| **Connect Claude Code / Codex** | Start and stop the MCP server, and copy a config snippet generated from the server's live host, port and path — trailing slash included. |
+
+**The app exposes none of the 22 write tools.** Directory management stays in the
+MCP server, where an operator has to ask for it explicitly.
+
+**Credentials.** The bind password is never written to disk. It goes to the OS
+credential store — Windows Credential Manager (DPAPI) or the macOS Keychain,
+under the same `admcp-ldap` service name `start_server_keychain.sh` uses — and
+the app's own config file holds the `${AD_MCP_PASSWORD}` placeholder, exactly as
+the server config does. If no OS credential store is available, the app **says so
+and refuses to save** rather than falling back to a file.
+
+**The server the app starts binds loopback by default**, so it accepts
+connections only from that machine and needs no firewall change. If it is bound
+anywhere else the Connect screen says so, warns that the endpoint has no
+authentication and no TLS while binding a privileged account, and gives a
+`New-NetFirewallRule` command scoped with `-RemoteAddress` — see
+[`docs/REPLATFORM_BRIEF.md`](docs/REPLATFORM_BRIEF.md) §8, which makes endpoint
+auth and TLS a hard gate before any non-localhost deployment.
+
+Packaging into a Windows `.exe` / macOS `.app` is a separate work package; today
+the app runs from source.
+
 ## Running
 
 ADitor runs as an HTTP MCP server:

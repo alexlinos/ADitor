@@ -202,7 +202,7 @@ async function pollScan() {
     return;                            // a dropped poll is not worth reporting
   }
   const progress = update.progress || {};
-  el('scan-bar').style.width = (progress.percent || 0) + '%';
+  el('scan-bar').value = progress.percent || 0;
   el('scan-message').textContent = progress.message || '';
   el('scan-elapsed').textContent = progress.elapsed_seconds
     ? progress.elapsed_seconds + 's elapsed'
