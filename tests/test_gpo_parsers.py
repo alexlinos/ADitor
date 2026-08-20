@@ -626,6 +626,9 @@ class TestParseRegistryXml:
             "order": 1,
             "has_filters": False,
             "disabled": False,
+            # Every entry carries the flag, so a caller reads a boolean rather
+            # than a missing key. Only a key-scoped delete sets it (P2-WP5).
+            "deletes_key": False,
         }]
 
     def test_the_full_hive_name_folds_onto_hklm_for_comparison(self):
@@ -750,7 +753,7 @@ class TestParseRegistryXml:
         assert entries[0]["action"] == "Z"
         assert entries[0]["action"] not in REGISTRY_XML_ACTIONS
 
-    # --- bare key-creation items ------------------------------------------
+    # --- bare key items: creation dropped, deletion kept ------------------
 
     def test_a_bare_key_creation_item_is_skipped(self):
         """Creating a key configures no value, so it must not become one."""
@@ -788,6 +791,96 @@ class TestParseRegistryXml:
         assert [entry["order"] for entry in entries] == [1, 2], \
             "order counts emitted values, so skipped key items leave no gaps"
         assert "WOW6432Node" in entries[1]["key"]
+
+    @pytest.mark.parametrize("action", ["C", "U", "R", "", "Z"])
+    def test_a_bare_key_item_is_dropped_for_every_non_delete_action(
+            self, action):
+        """The skip rule tests name-and-type, so it must be stated that way.
+
+        The docstring used to say the rule dropped "key-creation items", which is
+        not what the condition tests: it drops a bare item whatever its action,
+        and before P2-WP5 that silently included a whole-key delete.
+        """
+        entries = parse_registry_xml(self.document(self.item(
+            f'action="{action}" hive="HKEY_LOCAL_MACHINE" '
+            f'key="SOFTWARE\\Test\\Sub"')))
+
+        assert entries == []
+
+    # --- key-scoped deletes (P2-WP5) --------------------------------------
+
+    WINTRUST_KEY = r"SOFTWARE\Microsoft\Cryptography\Wintrust\Config"
+
+    def key_delete(self, key=None, item_attrs=""):
+        """The observed shape: action="D" on a key, with no name/type/value."""
+        return self.item(
+            f'action="D" hive="HKEY_LOCAL_MACHINE" '
+            f'key="{key or self.WINTRUST_KEY}"', item_attrs=item_attrs)
+
+    def test_a_whole_key_delete_is_emitted_rather_than_dropped(self):
+        """It has no name, type or value, and it removes a hardened value's key.
+
+        Dropping it made a GPP item deleting the key that *contains* a hardened
+        value invisible to the evaluator — the P2-WP4 false-pass class one level
+        up.
+        """
+        entries = parse_registry_xml(self.document(self.key_delete()))
+
+        assert len(entries) == 1
+        assert entries[0]["deletes_key"] is True
+        assert entries[0]["action"] == "D"
+
+    def test_the_key_delete_names_no_value(self):
+        entry = parse_registry_xml(self.document(self.key_delete()))[0]
+
+        assert entry["value_name"] is None
+        assert entry["value"] is None
+        assert entry["type"] is None
+        assert entry["type_name"] is None
+
+    def test_the_key_delete_keeps_the_key_and_hive_as_written(self):
+        entry = parse_registry_xml(self.document(self.key_delete()))[0]
+
+        assert entry["hive"] == "HKEY_LOCAL_MACHINE"
+        assert entry["key"] == self.WINTRUST_KEY
+
+    def test_a_value_delete_is_still_a_value_item(self):
+        """A named Delete keeps its value_name; only the bare form is key-scoped."""
+        entry = parse_registry_xml(self.document(self.item(
+            f'action="D" hive="HKEY_LOCAL_MACHINE" key="{self.WINTRUST_KEY}" '
+            f'name="EnableCertPaddingCheck" type="REG_SZ" value="1"')))[0]
+
+        assert entry["deletes_key"] is False
+        assert entry["value_name"] == "EnableCertPaddingCheck"
+
+    def test_a_disabled_key_delete_still_parses_and_says_so(self):
+        """Parsing is not filtering: the caller decides what a disabled item means."""
+        entry = parse_registry_xml(self.document(
+            self.key_delete(item_attrs=' disabled="1"')))[0]
+
+        assert entry["deletes_key"] is True
+        assert entry["disabled"] is True
+
+    def test_a_key_delete_alongside_a_value_keeps_document_order(self):
+        entries = parse_registry_xml(self.document(
+            self.item(f'action="U" hive="HKEY_LOCAL_MACHINE" '
+                      f'key="{self.WINTRUST_KEY}" '
+                      f'name="EnableCertPaddingCheck" type="REG_SZ" value="1"'),
+            self.key_delete(),
+        ))
+
+        assert [e["deletes_key"] for e in entries] == [False, True]
+        assert [e["order"] for e in entries] == [1, 2]
+
+    def test_every_entry_carries_the_flag(self):
+        entries = parse_registry_xml(self.document(
+            self.item('action="U" hive="HKEY_LOCAL_MACHINE" '
+                      'key="SOFTWARE\\Test" name="Flag" type="REG_DWORD" '
+                      'value="00000001"'),
+            self.key_delete(),
+        ))
+
+        assert [entry["deletes_key"] for entry in entries] == [False, True]
 
     def test_an_item_with_a_name_but_no_type_is_still_reported(self):
         """Half-written is not the same as absent — report it, type unknown."""
