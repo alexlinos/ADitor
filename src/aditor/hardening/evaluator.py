@@ -82,6 +82,11 @@ information and every found value records it in ``delivery``:
   item says so in the evidence rather than implying domain-wide coverage.
 * a policy and a preference setting the same key to different values is a
   conflict like any other, reported as ``policy-preference-disagreement``.
+* a preference item can delete a whole **key**, not just a value. That removes
+  the key and everything in it, so a key-delete covering a control's key is
+  disclosed in the finding's notes — if the control passes, another GPO is
+  removing the key under the value that passed it, and which lands depends on
+  client-side extension ordering, which this scan does not resolve.
 """
 
 from __future__ import annotations
@@ -173,6 +178,13 @@ SOURCE_FILE_REGISTRY_XML = "Preferences\\Registry\\Registry.xml"
 NON_WRITE_DISABLED = "disabled"
 NON_WRITE_DELETE = "delete"
 NON_WRITE_UNRECOGNISED_ACTION = "unrecognised-action"
+
+# A preference item that deletes the whole KEY the control's value lives in.
+# Reported by :func:`find_preference_key_deletes` rather than by
+# :func:`find_preference_non_writes`: it names no value at all, so it is not a
+# "this item does not write the value" case but a "something is removing the
+# ground the value stands on" case.
+NON_WRITE_KEY_DELETE = "key-delete"
 
 _PRESENCE_ONLY_NOTE = (
     "Operator 'present': the source states this setting's registry path but not "
@@ -286,7 +298,7 @@ class GpoSnapshot:
         registry_pol_entries: ``{key, value, type, data}`` dicts from
             ``parse_registry_pol`` over the machine ``Registry.pol``.
         registry_xml_entries: ``{hive, key, value_name, type, type_name, value,
-            action, order, has_filters, disabled}`` dicts from
+            action, order, has_filters, disabled, deletes_key}`` dicts from
             ``parse_registry_xml`` over the machine
             ``Preferences\\Registry\\Registry.xml``. Defaults to empty, so a
             caller that does not read preferences behaves exactly as before.
@@ -424,6 +436,78 @@ def find_preference_non_writes(control: Control,
                 "preference": _preference_evidence(entry),
             })
     return excluded
+
+
+def find_preference_key_deletes(control: Control,
+                                gpos: Iterable[GpoSnapshot]
+                                ) -> List[Dict[str, Any]]:
+    """Preference items that delete a whole **key** covering the control's key.
+
+    A GPP registry item can be scoped to a key rather than a value:
+    ``<Properties action="D" hive="HKEY_LOCAL_MACHINE" key="...\\Wintrust\\Config"/>``
+    removes that key and everything in it. Such an item names no value, so it can
+    never appear in :func:`find_matches` or :func:`find_preference_non_writes`,
+    both of which compare a full value path — which is exactly how it went
+    unnoticed: a GPO clearing the key underneath a hardened value was invisible,
+    and the value read as configured.
+
+    "Covers" means the deleted key **is** the control's key path, or is a parent
+    of it: deleting ``...\\Wintrust`` takes ``...\\Wintrust\\Config`` with it.
+    Matching is on path components, so ``...\\Config`` never matches
+    ``...\\ConfigExtra``.
+
+    A **disabled** item is not reported: it writes nothing and deletes nothing,
+    so disclosing it as removing the key would be its own false statement.
+
+    Like :func:`find_preference_non_writes`, this is restricted to
+    ``gpo-registry-pol`` controls, matching where :func:`find_matches` looks at
+    preferences at all. Widening it would change verdict evidence for
+    security-template controls, which is not what this fix is for.
+
+    Returns:
+        One dict per covering key-delete: the GPO's identity, the key it deletes
+        (as written), and the preference evidence. These are *disclosures*, never
+        matches — the evaluator has no precedence model and does not pretend to
+        know whether the delete or the write wins.
+    """
+    deletes: List[Dict[str, Any]] = []
+    wanted_path = normalize_registry_key(control.registry_key_path,
+                                         MACHINE_POL_HIVE)
+    if not wanted_path or control.check_type != "gpo-registry-pol":
+        return deletes
+
+    for gpo in gpos:
+        for entry in gpo.registry_xml_entries or ():
+            if not entry.get("deletes_key") or entry.get("disabled"):
+                continue
+            deleted = normalize_registry_key(
+                "\\".join(part for part in (entry.get("hive"), entry.get("key"))
+                          if part),
+                MACHINE_POL_HIVE)
+            if not deleted or not _key_covers(deleted, wanted_path):
+                continue
+            deletes.append({
+                "gpo_dn": gpo.dn,
+                "gpo_display_name": gpo.display_name,
+                "gpo_guid": gpo.guid,
+                "deleted_key": "\\".join(
+                    part for part in (entry.get("hive"), entry.get("key"))
+                    if part),
+                "delivery": DELIVERY_REGISTRY_PREFERENCE,
+                "source_file": SOURCE_FILE_REGISTRY_XML,
+                "reason": NON_WRITE_KEY_DELETE,
+                "preference": _preference_evidence(entry),
+            })
+    return deletes
+
+
+def _key_covers(deleted: str, wanted_path: str) -> bool:
+    """Whether a deleted key is, or contains, ``wanted_path``.
+
+    Both arguments must already be normalised. The separator check is what stops
+    ``...\\CONFIG`` from being read as covering ``...\\CONFIGEXTRA``.
+    """
+    return wanted_path == deleted or wanted_path.startswith(deleted + "\\")
 
 
 def _preference_key(entry: Dict[str, Any]) -> str:
@@ -577,14 +661,17 @@ def evaluate_control(control: Control,
     try:
         matches = find_matches(control, gpos)
         non_writes = find_preference_non_writes(control, gpos)
+        key_deletes = find_preference_key_deletes(control, gpos)
     except Exception as exc:  # pragma: no cover - defensive
         return _error_finding(control, f"could not scan GPO content: {exc}",
                               [], gpos)
 
     # Preference items that name the key but delete it, are disabled, or carry
     # an action we do not recognise. They set nothing, so they are not matches —
-    # but they are usually the explanation for whatever verdict follows.
-    extra_notes = _non_write_notes(non_writes)
+    # but they are usually the explanation for whatever verdict follows. A
+    # key-scoped delete is the same story one level up: it removes the key the
+    # value lives in, which no value-path comparison can see.
+    extra_notes = _non_write_notes(non_writes) + _key_delete_notes(key_deletes)
 
     if control.operator == "absent":
         return _absent_finding(control, matches, gpos, extra_notes)
@@ -775,6 +862,34 @@ def _non_write_notes(non_writes: Sequence[Dict[str, Any]]) -> List[str]:
             f"because whether they write the value is unknown - and unknown is "
             f"not a pass.")
     return notes
+
+
+def _key_delete_notes(key_deletes: Sequence[Dict[str, Any]]) -> List[str]:
+    """Disclose preference items that delete the key this value lives in.
+
+    The shape mirrors the value-level Delete disclosure, one level up. It is a
+    *disclosure*, not a verdict: this scan has no precedence model, so it says
+    what both GPOs do, names them, and points at the mechanism that decides —
+    client-side extension ordering, which link precedence cannot settle.
+    """
+    if not key_deletes:
+        return []
+
+    names = ", ".join(item.get("gpo_display_name") or item.get("gpo_dn") or "?"
+                      for item in key_deletes)
+    keys = ", ".join(sorted({str(item.get("deleted_key") or "?")
+                             for item in key_deletes}))
+    return [
+        f"{len(key_deletes)} Group Policy preference item(s) DELETE a registry "
+        f"KEY that contains this control's value, rather than deleting the value "
+        f"itself ({names}; key(s): {keys}). A key delete removes the key and "
+        f"everything in it, so it is never counted as configuring anything. If "
+        f"this control passes, another GPO is removing the key underneath the "
+        f"value that passed it, and which one takes effect depends on the order "
+        f"the Group Policy client-side extensions run - not on link precedence, "
+        f"and this scan resolves neither. Confirm the effective state on a "
+        f"representative machine before trusting this verdict."
+    ]
 
 
 def _detect_conflict(assessed: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

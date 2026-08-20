@@ -111,6 +111,19 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
    value is absent so it does not correct drift, and `U`/`R` rewrite it on every
    refresh.
 
+   A third trap, closed in P2-WP5: an item can be scoped to a **key** rather
+   than a value. `<Properties action="D" hive="..." key="...\Wintrust\Config"/>`
+   carries no name, type or value, so it never matches a value path — and while
+   it was dropped as a "bare item", a GPO *deleting the key that contains a
+   hardened value* was invisible and the value read as configured. Bare items are
+   now split by action: a create/update/replace still configures nothing and is
+   dropped, while a key-scoped `D` is emitted (`value_name: None`,
+   `deletes_key: true`) and **disclosed** in the finding's notes — naming the GPO,
+   saying that if the control passes another GPO is removing the key underneath
+   the value, and pointing at client-side extension ordering as what decides,
+   which this scan does not resolve. A disabled item deletes nothing and is not
+   disclosed.
+
 3. **Pass/fail is not binary — it's phased.** Almost every network control is
    *audit-first, then enforce* with an interim and a final target (NTLM level 3→5,
    LDAP signing 1→2, channel binding 1→2, NTLM audit→deny). The report should show
@@ -208,7 +221,9 @@ format**; the JSON is the source of truth the renderer consumes.
   - the item's **action** is carried alongside (`evidence.found[].preference`).
     `C` (Create) means drift will not be corrected; `D` (Delete) is never counted
     as configuring the value, and is reported in the scan notes instead — a GPO
-    deleting the value is usually the explanation for the failure being read.
+    deleting the value is usually the explanation for the failure being read. A
+    `D` scoped to the **key** rather than the value is disclosed the same way,
+    one level up.
   - **item-level targeting** (`<Filters>`) is *not* resolved. A filtered item is
     flagged as such so the verdict reads "configured where the filter matches"
     rather than implying domain-wide coverage.

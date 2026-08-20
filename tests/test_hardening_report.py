@@ -1593,3 +1593,51 @@ class TestByPreferenceBadgeIsOnlyForPreferenceOnlyPasses:
         assert _delivered_by_preference([]) is False
         assert _delivered_by_preference(None) is False
         assert _delivered_by_preference(["not a dict"]) is False
+
+
+class TestKeyScopedDeleteIsVisibleInTheReport:
+    """Fix 3 through the renderer: the disclosure has to reach the reader.
+
+    The finding is a pass — this scan does not resolve precedence — so the row is
+    a compact pass row, which is exactly where a "another GPO deletes the key
+    under this value" note would be easiest to lose.
+    """
+
+    KDC_PREF_KEY = r"SYSTEM\CurrentControlSet\Services\Kdc"
+
+    def key_delete_entry(self, key=None):
+        """A parsed key-scoped delete: no value name, `deletes_key` set."""
+        return {"hive": "HKEY_LOCAL_MACHINE", "key": key or self.KDC_PREF_KEY,
+                "value_name": None, "type": None, "type_name": None,
+                "value": None, "action": "D", "order": 1,
+                "has_filters": False, "disabled": False, "deletes_key": True}
+
+    @pytest.fixture
+    def document(self):
+        payload = scan_payload([
+            snapshot(GUID_A, "Enc Types By Preference",
+                     preference_entries=[preference_entry(56)],
+                     links=[GpoLink(target_dn=BASE_DN)]),
+            snapshot(GUID_B, "Undo Enc Types",
+                     preference_entries=[self.key_delete_entry()],
+                     links=[GpoLink(target_dn=BASE_DN)]),
+        ], control_ids=[KDC_CONTROL])
+        return render_report(payload)
+
+    def test_the_pass_row_discloses_the_key_delete(self, document):
+        text = visible_text(pass_row_of(document, KDC_CONTROL))
+
+        assert "DELETE a registry KEY" in text
+        assert "Undo Enc Types" in text
+
+    def test_the_reader_is_told_what_decides_the_outcome(self, document):
+        text = visible_text(pass_row_of(document, KDC_CONTROL))
+
+        assert "another GPO is removing the key underneath the value" in text
+        assert "client-side extensions run" in text
+        assert "not on link precedence" in text
+
+    def test_the_deleted_key_is_named(self, document):
+        row = pass_row_of(document, KDC_CONTROL)
+
+        assert "Kdc" in row

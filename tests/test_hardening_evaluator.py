@@ -60,6 +60,7 @@ from aditor.hardening.evaluator import (
     STATE_ENFORCED,
     STATE_NOT_STARTED,
     NON_WRITE_DELETE,
+    NON_WRITE_KEY_DELETE,
     UNSCORED_NEEDS_BASELINE_VALUE,
     GpoLink,
     GpoSnapshot,
@@ -67,6 +68,7 @@ from aditor.hardening.evaluator import (
     evaluate_control,
     evaluate_controls,
     find_matches,
+    find_preference_key_deletes,
     find_preference_non_writes,
     satisfies,
 )
@@ -2629,3 +2631,176 @@ class TestUnknownFindingsInTheCounts:
         assert counts[RESULT_UNKNOWN] == 2
         assert counts[RESULT_ERROR] == 0
         assert counts["total"] == len(catalog.controls)
+
+
+class TestKeyScopedDeletesAreDisclosed:
+    """Fix 3: a GPP item deleting the KEY a hardened value lives in.
+
+    ``<Properties action="D" hive="..." key="...\\Wintrust\\Config"/>`` names no
+    value, so no value-path comparison can see it — which is how it stayed
+    invisible to both ``find_matches`` and ``find_preference_non_writes``. A
+    value could therefore read as configured while another GPO removed the key
+    underneath it: the P2-WP4 false-pass class one level up.
+
+    The evaluator does not resolve it, because it has no precedence model. It
+    discloses it: names the GPO, says what happens if the control passes anyway,
+    and points at client-side extension ordering as the thing that decides.
+    """
+
+    WINTRUST_KEY = r"SOFTWARE\Microsoft\Cryptography\Wintrust\Config"
+    WINTRUST_CONTROL_KEY = (r"HKLM\SOFTWARE\Microsoft\Cryptography\Wintrust"
+                            r"\Config\EnableCertPaddingCheck")
+
+    def wintrust_control(self, **overrides):
+        fields = {"registry_key": self.WINTRUST_CONTROL_KEY,
+                  "final_expected": 1}
+        fields.update(overrides)
+        return pol_control(**fields)
+
+    def key_delete_gpo(self, key=None, guid=GUID_CONFLICT,
+                       name="Undo Wintrust", item_attrs=""):
+        return preference_gpo(guid, name, (
+            f'action="D" hive="HKEY_LOCAL_MACHINE" '
+            f'key="{key or self.WINTRUST_KEY}"', item_attrs, ""))
+
+    def value_gpo(self, guid=GUID_SIGNING, name="CVE-2013-3900"):
+        return preference_gpo(guid, name, properties(
+            self.WINTRUST_KEY, "EnableCertPaddingCheck", "1",
+            reg_type="REG_SZ"))
+
+    def test_the_key_delete_is_found(self):
+        found = find_preference_key_deletes(self.wintrust_control(),
+                                           [self.key_delete_gpo()])
+
+        assert len(found) == 1
+        assert found[0]["reason"] == NON_WRITE_KEY_DELETE
+        assert found[0]["deleted_key"].endswith(self.WINTRUST_KEY)
+        assert found[0]["delivery"] == DELIVERY_REGISTRY_PREFERENCE
+
+    def test_it_is_not_counted_as_configuring_the_value(self):
+        assert find_matches(self.wintrust_control(),
+                           [self.key_delete_gpo()]) == []
+
+    def test_a_passing_value_is_told_that_a_gpo_removes_the_key(self):
+        """The false pass this closes: the value is set, the key is deleted."""
+        finding = evaluate_control(self.wintrust_control(),
+                                  [self.value_gpo(), self.key_delete_gpo()])
+
+        assert finding["result"] == RESULT_PASS, \
+            "precedence is not resolved, so the pass stands - but it is disclosed"
+        notes = " ".join(finding["evidence"]["notes"])
+        assert "DELETE a registry KEY that contains this control's value" in notes
+        assert "Undo Wintrust" in notes
+        assert "another GPO is removing the key underneath the value" in notes
+        assert "client-side extensions run" in notes
+        assert "not on link precedence" in notes
+
+    def test_the_note_names_the_key_being_deleted(self):
+        finding = evaluate_control(self.wintrust_control(),
+                                   [self.value_gpo(), self.key_delete_gpo()])
+
+        assert any(self.WINTRUST_KEY in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_failing_control_is_told_too(self):
+        """It is very often the explanation for the failure being read."""
+        finding = evaluate_control(self.wintrust_control(),
+                                   [self.key_delete_gpo()])
+
+        assert finding["result"] == RESULT_FAIL
+        assert any("DELETE a registry KEY" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_a_parent_key_delete_also_covers_the_value(self):
+        """Deleting ...\\Wintrust takes ...\\Wintrust\\Config with it."""
+        parent = r"SOFTWARE\Microsoft\Cryptography\Wintrust"
+
+        found = find_preference_key_deletes(
+            self.wintrust_control(), [self.key_delete_gpo(key=parent)])
+
+        assert len(found) == 1
+
+    def test_an_unrelated_key_delete_is_not_reported(self):
+        found = find_preference_key_deletes(
+            self.wintrust_control(),
+            [self.key_delete_gpo(key=r"SOFTWARE\Something\Else")])
+
+        assert found == []
+
+    def test_a_sibling_key_with_a_shared_prefix_is_not_reported(self):
+        """Path components, not string prefixes: ...\\Config != ...\\ConfigExtra."""
+        found = find_preference_key_deletes(
+            self.wintrust_control(),
+            [self.key_delete_gpo(
+                key=r"SOFTWARE\Microsoft\Cryptography\Wintrust\ConfigExtra")])
+
+        assert found == []
+
+    def test_a_disabled_key_delete_deletes_nothing_and_is_not_disclosed(self):
+        """Saying a disabled item removes the key would be its own false claim."""
+        gpo = self.key_delete_gpo(item_attrs=' disabled="1"')
+
+        assert find_preference_key_deletes(self.wintrust_control(), [gpo]) == []
+        finding = evaluate_control(self.wintrust_control(),
+                                   [self.value_gpo(), gpo])
+        assert not any("DELETE a registry KEY" in note
+                       for note in finding["evidence"]["notes"])
+
+    def test_the_hive_spelling_does_not_matter(self):
+        """HKEY_LOCAL_MACHINE in the file, HKLM in the catalog."""
+        found = find_preference_key_deletes(
+            self.wintrust_control(),
+            [self.key_delete_gpo(key=self.WINTRUST_KEY.lower())])
+
+        assert len(found) == 1
+
+    def test_a_bare_key_creation_item_is_still_no_disclosure(self):
+        """Fix 3 keeps dropping key creations: they configure nothing."""
+        creation = preference_gpo(GUID_CONFLICT, "Create Wintrust Key", (
+            f'action="C" hive="HKEY_LOCAL_MACHINE" key="{self.WINTRUST_KEY}"',
+            "", ""))
+
+        assert creation.registry_xml_entries == []
+        assert find_preference_key_deletes(self.wintrust_control(),
+                                          [creation]) == []
+        finding = evaluate_control(self.wintrust_control(),
+                                   [self.value_gpo(), creation])
+        assert not any("DELETE a registry KEY" in note
+                       for note in finding["evidence"]["notes"])
+
+    def test_a_value_delete_still_reports_as_a_value_delete(self):
+        """The two disclosures are distinct and must not be conflated."""
+        value_delete = preference_gpo(GUID_CONFLICT, "Undo The Value", properties(
+            self.WINTRUST_KEY, "EnableCertPaddingCheck", "1",
+            reg_type="REG_SZ", action="D"))
+
+        notes = evaluate_control(self.wintrust_control(),
+                                 [value_delete])["evidence"]["notes"]
+
+        assert any("DELETE this value" in note for note in notes)
+        assert not any("DELETE a registry KEY" in note for note in notes)
+
+    def test_a_security_template_control_is_unaffected(self):
+        """Preferences are only searched for gpo-registry-pol controls."""
+        assert find_preference_key_deletes(control(), [self.key_delete_gpo()]) == []
+
+    def test_a_key_delete_does_not_break_an_absent_control(self):
+        finding = evaluate_control(
+            self.wintrust_control(operator="absent", final_expected=None,
+                                  interim_expected=None),
+            [self.key_delete_gpo()])
+
+        assert finding["result"] == RESULT_PASS
+        assert any("DELETE a registry KEY" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_the_shipped_catalog_still_evaluates_with_a_key_delete_present(self):
+        catalog = load_catalog()
+
+        findings, counts = evaluate_controls(
+            catalog.controls, [self.key_delete_gpo()],
+            include_not_applicable=True)
+
+        assert counts["total"] == len(catalog.controls)
+        assert counts[RESULT_ERROR] == 0
+        assert len(findings) == len(catalog.controls)

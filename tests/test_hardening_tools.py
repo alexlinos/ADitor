@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from aditor.gpo.parsers import parse_registry_xml
 from aditor.hardening import SCAN_ENGINE_VERSION
 from aditor.tools.gpo import GPOTools
 from aditor.tools.hardening import (
@@ -1043,3 +1044,47 @@ class TestUnknownVerdictThroughTheScan:
         assert "gpo_deliverable" in notes
         assert "reg query" in notes
         assert "narrow by design" in notes
+
+
+class TestKeyScopedDeleteThroughTheScan:
+    """Fix 3 end to end: a GPO deleting the key under a hardened value.
+
+    The preference item is produced by running the real ``parse_registry_xml``
+    over hand-written XML, exactly as ``get_gpo_contents`` does before the scan
+    sees it, so the parser change and the evaluator disclosure are exercised
+    together rather than a hand-shaped dict being asserted against itself.
+    """
+
+    KDC_PREF_KEY = r"SYSTEM\CurrentControlSet\Services\Kdc"
+
+    def key_delete_entry(self):
+        document = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<RegistrySettings clsid="{A3CCFC41-0000-0000-0000-000000000002}">'
+            '<Registry name="Item"><Properties action="D" '
+            f'hive="HKEY_LOCAL_MACHINE" key="{self.KDC_PREF_KEY}"/>'
+            '</Registry></RegistrySettings>').encode("utf-8")
+        entries = parse_registry_xml(document)
+        assert entries and entries[0]["deletes_key"] is True
+        return entries[0]
+
+    def test_a_pass_is_disclosed_as_standing_on_a_key_another_gpo_deletes(
+            self, tools, mock_ldap_manager):
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Enc Types By Preference"),
+                   gpo_entry(GUID_OVERRIDE, "Undo Enc Types")], [])
+
+        response = run_scan(
+            tools,
+            {GUID_SIGNING: sysvol_contents(
+                preference_entries=[preference_entry()]),
+             GUID_OVERRIDE: sysvol_contents(
+                 preference_entries=[self.key_delete_entry()])},
+            control_ids=["DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES"])
+
+        finding = response["findings"][0]
+        assert finding["result"] == "pass"
+        notes = " ".join(finding["evidence"]["notes"])
+        assert "DELETE a registry KEY" in notes
+        assert "Undo Enc Types" in notes
+        assert "client-side extensions run" in notes
