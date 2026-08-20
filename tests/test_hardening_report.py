@@ -1238,6 +1238,69 @@ class TestWideEvidenceTablesScrollThemselves:
         assert ".table-wrap{overflow-x:auto}" in document
         assert "<script" not in document.lower()
 
+    def test_the_read_failure_table_scrolls_too(self, unreadable_scan):
+        document = render_report(unreadable_scan)
+        tables = re.findall(r'(.{24})<table class="grid', document)
+
+        assert tables, "the banner should contain a read-failure table"
+        assert all(chunk == '<div class="table-wrap">' for chunk in tables), \
+            tables
+
+
+class TestKeyValueTablesNeverScrollThePage:
+    """The identity, expected and provenance tables are wide too.
+
+    Their right-hand cells carry registry keys, DNs and bare citation URLs --
+    unbroken runs of 200 characters -- which set a min-content width far past a
+    phone-sized column and put the whole document into horizontal scroll. Long
+    values break, and the table scrolls in its own box if it still has to. This
+    is the pre-existing .kv shape, not anything the delivery column introduced.
+    """
+
+    @pytest.fixture
+    def document(self, mixed_scan):
+        return render_report(mixed_scan)
+
+    def test_every_key_value_table_sits_in_a_scroll_container(self, document):
+        tables = re.findall(r'(.{24})<table class="kv"', document)
+
+        assert tables, "the document should contain key/value tables"
+        assert all(chunk == '<div class="table-wrap">' for chunk in tables), \
+            tables
+
+    def test_the_provenance_header_is_one_of_them(self, document):
+        provenance = document[document.index('id="provenance"'):]
+
+        assert provenance.index('<div class="table-wrap">') < \
+            provenance.index('<table class="kv">')
+
+    def test_long_values_break_instead_of_widening_the_table(self, document):
+        # overflow-wrap:anywhere, not break-word: only "anywhere" lets a long
+        # token shrink the cell's min-content width, which is what forces the
+        # page wide in the first place.
+        assert "overflow-wrap:anywhere}" in document
+        assert re.search(r"\.kv td\{[^}]*overflow-wrap:anywhere", document), \
+            "the wrapping rule has to be on the .kv value cell"
+
+    def test_the_offending_value_is_a_real_shape_not_a_hypothetical(self,
+                                                                    document):
+        # The widest .kv value in a real report is the catalog's value_source,
+        # rendered as plain text rather than inside <code>, so the code
+        # word-break rule never reaches it. If this run stops producing an
+        # unbroken run this long, the rules above are no longer load-bearing
+        # and someone should find out why before deleting them.
+        cells = [cell for table in
+                 re.findall(r'<table class="kv">.*?</table>', document, re.S)
+                 for cell in re.findall(r"<td>(.*?)</td>", table, re.S)]
+        runs = [max((len(word) for word in visible_text(cell).split()),
+                    default=0) for cell in cells]
+
+        assert max(runs, default=0) > 120, max(runs, default=0)
+
+    def test_still_one_file_with_no_script(self, document):
+        assert "<script" not in document.lower()
+        assert "<link" not in document.lower()
+
 
 class TestPolicyVersusPreferenceConflictIsRendered:
     """The conflict a reader must not try to settle with link precedence."""
