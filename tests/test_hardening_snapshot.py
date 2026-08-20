@@ -229,10 +229,15 @@ class TestWriteSnapshot:
         document = snapshot.report_path.read_text(encoding="utf-8")
 
         assert document.startswith("<!DOCTYPE html>")
+        assert '<meta charset="utf-8">' in document
         assert document.rstrip().endswith("</html>")
-        for token in ("<script", "src=", "<link ", "@import", "http://",
-                      "https://"):
+        # The forbidden set ``TestSelfContained`` in test_hardening_report.py
+        # pins: nothing that fetches a resource, nothing that executes.
+        for token in ("<script", "src=", "<link ", "@import", "url(",
+                      "<iframe", "<object", "<embed", "onerror=", "onload=",
+                      "onclick=", "javascript:"):
             assert token not in document, token
+        assert document.count("<style>") == 1
 
     def test_missing_parent_directories_are_created(self, tmp_path):
         snapshot = write_snapshot(scan_payload(),
