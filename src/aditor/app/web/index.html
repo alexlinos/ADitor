@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<!--
+  The ADitor desktop app shell.
+
+  Static chrome only. Every value derived from data — a GPO name, a DN, an LDAP
+  error, a diff — is rendered in Python by aditor.app.render, which escapes it,
+  and arrives here as a ready HTML fragment. See that module's docstring.
+
+  No CDN, no framework, no web font. One stylesheet and one script, both local,
+  for the same reason the hardening report is a single self-contained file: this
+  window has to work on a locked-down admin workstation with no internet.
+
+  The shield mark is assets/aditor-shield.svg, inlined.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'none'">
+  <title>ADitor</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="shell">
+
+  <nav class="sidebar" aria-label="Main">
+    <div class="brand">
+      <svg class="mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 144"
+           role="img" aria-label="ADitor">
+        <title>ADitor</title>
+        <g fill="none" stroke="#7C8A99" stroke-width="5" stroke-linecap="butt"
+           stroke-linejoin="round">
+          <path d="M 15 28 Q 15 19 24 19 L 96 19 Q 105 19 105 28 L 105 76
+                   C 105 102 85 121 60 132 C 35 121 15 102 15 76 Z"/>
+          <path d="M 60 48 V 60"/>
+          <path d="M 40 60 H 80"/>
+          <path d="M 40 60 V 68"/>
+          <path d="M 80 60 V 68"/>
+          <path d="M 42 90 H 78"/>
+          <path d="M 42 90 V 96"/>
+          <path d="M 60 90 V 96"/>
+          <path d="M 78 90 V 96"/>
+          <rect x="33" y="68" width="14" height="14"/>
+          <rect x="73" y="68" width="14" height="14"/>
+        </g>
+        <g fill="#7C8A99">
+          <rect x="36" y="96" width="12" height="13" rx="1.5"/>
+          <rect x="54" y="96" width="12" height="13" rx="1.5"/>
+          <rect x="72" y="96" width="12" height="13" rx="1.5"/>
+        </g>
+        <rect x="53" y="34" width="14" height="14" fill="none" stroke="#F5A623"
+              stroke-width="5"/>
+      </svg>
+      <div class="wordmark"><strong>AD</strong>itor</div>
+      <div class="tagline">Active Directory hardening audit</div>
+    </div>
+
+    <ul class="nav" role="tablist">
+      <li><button type="button" role="tab" class="nav-item is-current"
+                  data-screen="connection" aria-selected="true">
+        <span class="nav-n">1</span> Connection</button></li>
+      <li><button type="button" role="tab" class="nav-item" data-screen="scan"
+                  aria-selected="false">
+        <span class="nav-n">2</span> Scan</button></li>
+      <li><button type="button" role="tab" class="nav-item" data-screen="history"
+                  aria-selected="false">
+        <span class="nav-n">3</span> History</button></li>
+      <li><button type="button" role="tab" class="nav-item" data-screen="connect"
+                  aria-selected="false">
+        <span class="nav-n">4</span> Connect Claude Code / Codex</button></li>
+    </ul>
+
+    <div class="sidebar-foot">
+      <p class="read-only-badge">Read-only</p>
+      <p>This app runs audit reads only. It exposes none of the server's
+         directory-management tools.</p>
+    </div>
+  </nav>
+
+  <main class="content">
+
+    <!-- 1. Connection ------------------------------------------------------ -->
+    <section class="screen is-current" id="screen-connection" role="tabpanel">
+      <header class="screen-head">
+        <h1>Connection</h1>
+        <p class="lede">Where to read the directory from, and which account to
+          read it with.</p>
+      </header>
+
+      <div class="card card-note">
+        <h2>A read-only account is enough</h2>
+        <p>Scanning never writes to Active Directory. It enumerates Group Policy
+          objects over LDAPS and reads their content from SYSVOL over SMB, and
+          that is all. <strong>Use a read-only bind account</strong> — an
+          ordinary domain user with read access to the Policies container and
+          SYSVOL. It does not need to be, and should not be, a Domain
+          Admin.</p>
+      </div>
+
+      <div id="credential-store"></div>
+
+      <form class="card" id="connection-form" autocomplete="off">
+        <h2>Domain controller</h2>
+        <div class="field">
+          <label for="f-server">LDAPS server</label>
+          <input id="f-server" name="server" type="text" spellcheck="false"
+                 placeholder="ldaps://dc01.example.com:636">
+          <p class="hint">Use the name on the controller's certificate. Port 636
+            is LDAPS; 389 is plain LDAP and will fail a TLS handshake.</p>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="f-domain">Domain</label>
+            <input id="f-domain" name="domain" type="text" spellcheck="false"
+                   placeholder="example.com">
+          </div>
+          <div class="field">
+            <label for="f-base-dn">Base DN</label>
+            <input id="f-base-dn" name="base_dn" type="text" spellcheck="false"
+                   placeholder="DC=example,DC=com">
+          </div>
+        </div>
+
+        <h2>Bind account</h2>
+        <div class="field">
+          <label for="f-bind-dn">Bind account</label>
+          <input id="f-bind-dn" name="bind_dn" type="text" spellcheck="false"
+                 placeholder="CN=svc-aditor,OU=Service Accounts,DC=example,DC=com">
+          <p class="hint">Its distinguished name, or
+            <code>user@example.com</code>.</p>
+        </div>
+        <div class="field">
+          <label for="f-password">Password</label>
+          <input id="f-password" name="password" type="password"
+                 autocomplete="new-password">
+          <p class="hint" id="password-hint">Kept in the operating system's
+            credential store. It is never written to ADitor's settings file or
+            to any other file.</p>
+        </div>
+
+        <div class="field field-check">
+          <input id="f-validate" name="validate_certificate" type="checkbox"
+                 checked>
+          <label for="f-validate">Validate the controller's certificate
+            (recommended)</label>
+          <p class="hint">Clearing this leaves the LDAPS session encrypted but
+            unauthenticated, so it can be intercepted. The correct fix for a
+            certificate error is to trust the issuing CA on this machine.</p>
+        </div>
+
+        <h2>Where scans are stored</h2>
+        <div class="field">
+          <label for="f-snapshot-dir">Snapshot folder</label>
+          <input id="f-snapshot-dir" name="snapshot_dir" type="text"
+                 spellcheck="false">
+          <p class="hint">Each scan gets its own dated sub-folder holding
+            <code>scan.json</code> and <code>report.html</code>. Both contain
+            directory content — Group Policy names, registry values, DNs.</p>
+        </div>
+
+        <div class="actions">
+          <button type="button" class="secondary" id="btn-test">Test
+            connection</button>
+          <button type="button" class="primary" id="btn-save">Save
+            connection</button>
+          <button type="button" class="ghost" id="btn-forget">Forget
+            password</button>
+        </div>
+      </form>
+
+      <div id="connection-result" class="result" aria-live="polite"></div>
+    </section>
+
+    <!-- 2. Scan ------------------------------------------------------------ -->
+    <section class="screen" id="screen-scan" role="tabpanel">
+      <header class="screen-head">
+        <h1>Scan</h1>
+        <p class="lede">One read-only pass over the domain's Group Policy,
+          scored against the hardening catalog.</p>
+      </header>
+
+      <div class="card">
+        <p>The scan enumerates every Group Policy object, reads its settings
+          from SYSVOL, and compares them with the catalog. It writes one
+          snapshot folder — the JSON payload and the HTML report, both from the
+          same single scan — and <strong>changes nothing in the
+          directory</strong>.</p>
+        <div class="actions">
+          <button type="button" class="primary big" id="btn-scan">Run
+            scan</button>
+          <button type="button" class="secondary" id="btn-open-report" hidden>
+            Open report</button>
+        </div>
+        <div class="progress" id="scan-progress" hidden>
+          <div class="progress-track">
+            <div class="progress-bar" id="scan-bar" style="width:0%"></div>
+          </div>
+          <p class="progress-text" id="scan-message" aria-live="polite"></p>
+          <p class="hint" id="scan-elapsed"></p>
+        </div>
+      </div>
+
+      <div id="scan-result" class="result" aria-live="polite"></div>
+    </section>
+
+    <!-- 3. History --------------------------------------------------------- -->
+    <section class="screen" id="screen-history" role="tabpanel">
+      <header class="screen-head">
+        <h1>History</h1>
+        <p class="lede">Every scan you have kept. Open a report, or pick two and
+          compare them.</p>
+      </header>
+
+      <div class="card">
+        <div class="actions actions-left">
+          <button type="button" class="secondary" id="btn-refresh-history">
+            Refresh</button>
+          <button type="button" class="primary" id="btn-diff">Compare the two
+            selected</button>
+        </div>
+        <p class="hint">Pick the <strong>earlier</strong> scan in the first
+          column and the <strong>later</strong> one in the second. Getting them
+          the wrong way round would turn every regression into an
+          improvement.</p>
+        <div id="history-list"></div>
+      </div>
+
+      <div id="diff-result" class="result" aria-live="polite"></div>
+    </section>
+
+    <!-- 4. Connect --------------------------------------------------------- -->
+    <section class="screen" id="screen-connect" role="tabpanel">
+      <header class="screen-head">
+        <h1>Connect Claude Code / Codex</h1>
+        <p class="lede">Start the MCP server, then paste the generated config
+          into your client.</p>
+      </header>
+
+      <div class="card">
+        <div class="actions actions-left">
+          <button type="button" class="primary" id="btn-start-server">Start
+            server</button>
+          <button type="button" class="secondary" id="btn-stop-server">Stop
+            server</button>
+          <button type="button" class="ghost" id="btn-refresh-server">
+            Refresh</button>
+        </div>
+        <div id="server-status"></div>
+      </div>
+
+      <div class="card">
+        <h2>Who can reach this server</h2>
+        <div id="server-exposure"></div>
+      </div>
+
+      <div id="snippets"></div>
+    </section>
+
+  </main>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
