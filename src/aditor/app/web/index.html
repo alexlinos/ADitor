@@ -190,6 +190,42 @@
       </form>
 
       <div id="connection-result" class="result" aria-live="polite"></div>
+
+      <!--
+        Certificate and trust. A panel on Connection rather than a fifth tab:
+        it is about this connection, and it is only ever wanted immediately
+        after a certificate error on this screen.
+
+        There is deliberately no "Trust this certificate" button here or in
+        anything aditor.app.render emits. Every certificate the panel shows
+        arrived over the connection that is failing to verify, so a button that
+        installed it would install whatever is on the other end -- including an
+        interceptor's certificate, turning a loud detected failure into a
+        silent permanent one. The panel hands over a file, a command and a
+        fingerprint instead. See aditor/app/certificates.py.
+      -->
+      <div class="card" id="certificate-card">
+        <h2>Certificate and trust</h2>
+        <p>If the test above reports an untrusted certificate, inspect the
+          chain here. ADitor shows what the controller presented, compares it
+          against the CA certificates Active Directory publishes, and gives you
+          the <code>.crt</code> file and the exact command.</p>
+        <p><strong>It does not install anything.</strong> Trusting a root
+          certificate changes what this entire machine believes, and that is a
+          decision for you — at an elevation prompt, after you have confirmed
+          the fingerprint against the certification authority itself.</p>
+        <div class="actions actions-left">
+          <button type="button" class="secondary" id="btn-inspect-cert">
+            Inspect certificate chain</button>
+        </div>
+        <p class="hint">This opens a TLS connection with verification switched
+          off, because that is the only way to see a chain this machine does not
+          trust. It sends no credentials over that connection and it
+          authenticates nothing — everything it reports is the server's own
+          unverified claim.</p>
+      </div>
+
+      <div id="certificate-result" class="result" aria-live="polite"></div>
     </section>
 
     <!-- 2. Scan ------------------------------------------------------------ -->

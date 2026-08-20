@@ -163,6 +163,65 @@ async function forgetPassword() {
   }
 }
 
+/* --- 1b. certificate and trust -------------------------------------------
+ *
+ * Note what is absent: there is no function here that trusts or installs a
+ * certificate, because there is no bridge method to call. exportCa() asks
+ * Python to write a .crt file; copyCommand() puts text on the clipboard. The
+ * operator runs the command. See aditor/app/certificates.py for why that
+ * division is the whole point of this panel.
+ */
+
+async function inspectCertificate() {
+  const button = el('btn-inspect-cert');
+  busy(button, true, 'Inspecting…');
+  try {
+    const result = await call('certificate_screen', readForm());
+    paint('certificate-result', result.html);
+    if (!result.ok) { toast(result.message); return; }
+    // Three outcomes, three messages. "Could not check" never gets a
+    // reassuring one.
+    if (result.corroboration === 'disagree') {
+      toast("Active Directory does not publish this chain's anchor. Read the "
+            + 'warning before trusting anything.');
+    } else if (result.corroboration === 'unavailable') {
+      toast('The chain could not be checked against Active Directory. That is '
+            + 'not a pass.');
+    } else if (result.expiry_warning) {
+      toast('A certificate here is expired or close to it — see the panel.');
+    } else {
+      toast('Chain read. Confirm the fingerprint before trusting it.');
+    }
+  } catch (error) {
+    toast(String(error.message || error));
+  } finally {
+    busy(button, false);
+  }
+}
+
+async function exportCa(fingerprint) {
+  try {
+    const result = await call('export_ca_certificate', fingerprint);
+    paint('certificate-result', result.html);
+    toast(result.ok
+      ? 'Certificate written. ADitor has not installed it — run the command '
+        + 'yourself once you have verified the fingerprint.'
+      : result.message);
+  } catch (error) {
+    toast(String(error.message || error));
+  }
+}
+
+async function copyCommand(text) {
+  if (!text) { return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Command copied. Read it before you run it.');
+  } catch (error) {
+    toast('Could not reach the clipboard. Select the command and copy it.');
+  }
+}
+
 /* --- 2. scan ------------------------------------------------------------- */
 
 let scanTimer = null;
@@ -333,6 +392,7 @@ function wire() {
   el('btn-test').addEventListener('click', testConnection);
   el('btn-save').addEventListener('click', saveConnection);
   el('btn-forget').addEventListener('click', forgetPassword);
+  el('btn-inspect-cert').addEventListener('click', inspectCertificate);
 
   el('btn-scan').addEventListener('click', startScan);
   el('btn-open-report').addEventListener('click', openLastReport);
@@ -352,7 +412,11 @@ function wire() {
     const opener = event.target.closest('[data-open-report]');
     if (opener) { openReport(opener.dataset.openReport); return; }
     const copier = event.target.closest('[data-copy]');
-    if (copier) { copySnippet(copier.dataset.copy); }
+    if (copier) { copySnippet(copier.dataset.copy); return; }
+    const exporter = event.target.closest('[data-export-ca]');
+    if (exporter) { exportCa(exporter.dataset.exportCa); return; }
+    const commandCopier = event.target.closest('[data-copy-text]');
+    if (commandCopier) { copyCommand(commandCopier.dataset.copyText); }
   });
 }
 

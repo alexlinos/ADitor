@@ -64,6 +64,7 @@ KIND_ACCOUNT_LOCKED = "account-locked"
 KIND_ACCOUNT_DISABLED = "account-disabled"
 KIND_PASSWORD_EXPIRED = "password-expired"
 KIND_UNTRUSTED_CERTIFICATE = "untrusted-certificate"
+KIND_CERTIFICATE_EXPIRED = "certificate-expired"
 KIND_CERTIFICATE_HOSTNAME = "certificate-hostname"
 KIND_TLS = "tls"
 KIND_DNS = "dns"
@@ -107,17 +108,40 @@ _CLASSIFIERS: Tuple[Tuple[str, Tuple[str, ...], str, str], ...] = (
      "Connect using the exact name on the domain controller's certificate — "
      "usually its fully-qualified name (dc01.example.com), not its short name "
      "or its IP address."),
+    # Before the untrusted-certificate entry, deliberately. An expired
+    # certificate is a *different* failure with a different remedy: no amount
+    # of installing CA certificates fixes it, and an operator told "not
+    # trusted" will spend an hour in the trust store before noticing the date.
+    (KIND_CERTIFICATE_EXPIRED,
+     ("certificate has expired", "certificate is expired",
+      "certificate_expired", "cert_has_expired", "certificate is not yet "
+      "valid", "certificate_not_yet_valid"),
+     "The domain controller's certificate is outside its validity period.",
+     "This is not a trust problem and installing a CA certificate will not fix "
+     "it: the certificate itself has expired (or has not started yet). It has "
+     "to be reissued on the domain controller — where AD CS is in use, "
+     "autoenrollment normally renews it, so 'certutil -pulse' on the "
+     "controller and a look at the Certificate Auto Enrollment policy is the "
+     "place to start. Check this machine's clock as well: a clock running "
+     "ahead of the controller's makes a perfectly valid certificate look "
+     "expired. The Certificate and trust panel shows the exact validity "
+     "dates."),
     (KIND_UNTRUSTED_CERTIFICATE,
      ("certificate verify failed", "certificate_verify_failed",
       "unable to get local issuer", "self signed certificate",
-      "self-signed certificate", "certificate has expired",
+      "self-signed certificate",
       "unable to verify the first certificate"),
      "The domain controller's certificate is not trusted by this machine.",
      "This is a certificate problem, not a password problem. Install the "
      "issuing CA certificate in this machine's Trusted Root store (that is the "
      "correct fix), or clear 'Validate certificate' to connect without "
      "checking it — which leaves the LDAPS connection open to interception and "
-     "should be a temporary diagnostic step only."),
+     "should be a temporary diagnostic step only. The Certificate and trust "
+     "panel below shows what the controller presented, the SHA-256 "
+     "fingerprint to confirm against the certification authority itself, "
+     "whether Active Directory publishes that same CA, and the exact command "
+     "to run — ADitor will not install it for you, because changing what this "
+     "machine trusts is your decision to make."),
     (KIND_TLS,
      ("ssl", "tls", "wrap_socket", "wrong version number",
       "socket ssl wrapping error"),
@@ -372,6 +396,7 @@ def run_connection_test(settings: ConnectionSettings, password: str,
 __all__ = [
     "KIND_ACCOUNT_DISABLED",
     "KIND_ACCOUNT_LOCKED",
+    "KIND_CERTIFICATE_EXPIRED",
     "KIND_CERTIFICATE_HOSTNAME",
     "KIND_DNS",
     "KIND_INVALID_CREDENTIALS",

@@ -38,8 +38,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: Everything the page is allowed to call. Adding to this list is a deliberate
 #: act, which is the point of writing it down.
 ALLOWED_API_METHODS = {
+    "certificate_screen",
     "connect_screen",
     "diff",
+    "export_ca_certificate",
     "forget_password",
     "history",
     "open_path",
