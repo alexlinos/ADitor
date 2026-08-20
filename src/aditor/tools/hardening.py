@@ -433,7 +433,11 @@ class HardeningTools(BaseTool):
                 "statement about ongoing state. A preference item's action is "
                 "also carried: 'C' (Create) writes only when the value is absent "
                 "and so does not correct drift, while 'D' (Delete) removes the "
-                "value and is never counted as configuring it. Item-level "
+                "value and is never counted as configuring it. A 'D' scoped to "
+                "the whole KEY (no value name) is disclosed in the finding's "
+                "notes: it removes the key the value lives in, so if the control "
+                "passes, another GPO is clearing the ground under it and which "
+                "one lands depends on client-side extension ordering. Item-level "
                 "targeting (<Filters>) is not resolved, but a filtered item says "
                 "so in the evidence rather than implying domain-wide coverage.",
                 "A policy value and a preference value disagreeing on the same "
