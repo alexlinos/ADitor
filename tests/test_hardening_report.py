@@ -43,6 +43,7 @@ from aditor.hardening.report import (
     SECTION_UNKNOWN,
     SECTIONS,
     ReportPathError,
+    _delivered_by_preference,
     group_findings,
     headline_counts,
     render_report,
@@ -1502,3 +1503,93 @@ class TestUnknownVerdictThatIsNotAReadFailure:
 
         assert DIAG_CONTROL in sections_of(document)[SECTION_PASSES]
         assert DIAG_CONTROL not in sections_of(document)[SECTION_UNKNOWN]
+
+
+class TestByPreferenceBadgeIsOnlyForPreferenceOnlyPasses:
+    """Fix 2: the badge said "only" in the docs and "any" in the code.
+
+    The badge exists because a preference tattoos and may not correct drift, so
+    a pass that *depends* on one is a weaker statement about ongoing state. Where
+    a policy also delivers a compliant value the pass does not depend on the
+    preference — the evaluator treats that as two mechanisms agreeing — and
+    labelling it weaker misleads the reader in the one place they skim.
+
+    The mixed-delivery case was the one nothing pinned.
+    """
+
+    POL_KEY = r"System\CurrentControlSet\services\KDC"
+
+    def payload(self, *gpos):
+        return scan_payload(list(gpos), control_ids=[KDC_CONTROL])
+
+    def preference_gpo(self, guid=GUID_A, name="Enc Types By Preference"):
+        return snapshot(guid, name, preference_entries=[preference_entry(56)],
+                        links=[GpoLink(target_dn=BASE_DN)])
+
+    def policy_gpo(self, guid=GUID_B, name="Enc Types By Policy"):
+        return snapshot(guid, name, pol_entries=[kdc_pol_entry(56)],
+                       links=[GpoLink(target_dn=BASE_DN)])
+
+    def test_a_preference_only_pass_is_badged(self):
+        row = pass_row_of(render_report(self.payload(self.preference_gpo())),
+                          KDC_CONTROL)
+
+        assert "BY PREFERENCE" in row
+
+    def test_a_mixed_policy_and_preference_pass_is_not_badged(self):
+        """Two mechanisms agreeing: the pass is not preference-dependent."""
+        document = render_report(
+            self.payload(self.policy_gpo(), self.preference_gpo()))
+        row = pass_row_of(document, KDC_CONTROL)
+
+        assert "BY PREFERENCE" not in row
+
+    def test_the_mixed_pass_is_still_a_pass_with_both_values_in_evidence(self):
+        """Guards against "fixed" by suppressing the finding instead."""
+        document = render_report(
+            self.payload(self.policy_gpo(), self.preference_gpo()))
+        row = pass_row_of(document, KDC_CONTROL)
+
+        assert "Group Policy preference" in row
+        assert "administrative template (policy)" in row
+        assert "tattoos" in visible_text(row), \
+            "the tattoo caveat still belongs in the expanded evidence"
+
+    def test_two_preferences_agreeing_are_still_badged(self):
+        """Every found value is a preference, so the pass does depend on them."""
+        row = pass_row_of(render_report(self.payload(
+            self.preference_gpo(),
+            self.preference_gpo(guid=GUID_B, name="Second Preference"))),
+            KDC_CONTROL)
+
+        assert "BY PREFERENCE" in row
+
+    def test_a_policy_only_pass_is_not_badged(self):
+        row = pass_row_of(render_report(self.payload(self.policy_gpo())),
+                          KDC_CONTROL)
+
+        assert "BY PREFERENCE" not in row
+
+    def test_a_pass_with_no_found_value_is_not_badged(self):
+        """An os-default pass has no found values; ``all([])`` must not badge it."""
+        payload = scan_payload(
+            [snapshot(GUID_A, "Unrelated Policy",
+                      links=[GpoLink(target_dn=BASE_DN)])],
+            control_ids=[CLIENT_SIGNING_CONTROL])
+        document = render_report(payload)
+
+        assert "BY PREFERENCE" not in document
+
+    def test_the_helper_is_unit_pinned_in_both_directions(self):
+        """The predicate itself, away from the rendering."""
+        preference = {"delivery": "registry-preference"}
+        policy = {"delivery": "registry-pol"}
+
+        assert _delivered_by_preference([preference]) is True
+        assert _delivered_by_preference([preference, preference]) is True
+        assert _delivered_by_preference([preference, policy]) is False
+        assert _delivered_by_preference([policy, preference]) is False
+        assert _delivered_by_preference([policy]) is False
+        assert _delivered_by_preference([]) is False
+        assert _delivered_by_preference(None) is False
+        assert _delivered_by_preference(["not a dict"]) is False

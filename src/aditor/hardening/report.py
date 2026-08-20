@@ -1016,10 +1016,28 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
 
 
 def _delivered_by_preference(found: Sequence[Any]) -> bool:
-    """Whether any found value came from a Group Policy preference item."""
-    return any(isinstance(match, dict)
-               and match.get("delivery") == "registry-preference"
-               for match in found or ())
+    """Whether **every** found value came from a Group Policy preference item.
+
+    ``all``, not ``any``, and the difference is the whole point of the badge. It
+    exists because a preference *tattoos* and may not correct drift, so a pass
+    that depends on one is a weaker guarantee about ongoing state. If a policy
+    *also* delivers a compliant value, the pass does not depend on the
+    preference — the evaluator already treats that as two mechanisms agreeing,
+    not as a conflict — and badging it would tell the reader the pass is weaker
+    than it is. In a pass, every found value met at least the interim step (the
+    verdict follows the least compliant of them), so "every found value" is
+    "every compliant found value".
+
+    An empty ``found`` is **not** badged: a pass with no found value rests on a
+    documented OS default or on an ``absent`` assertion, neither of which
+    involves a preference at all. ``all()`` over an empty sequence is ``True``,
+    so this has to be said explicitly rather than left to the built-in.
+    """
+    matches = [match for match in found or () if isinstance(match, dict)]
+    if not matches:
+        return False
+    return all(match.get("delivery") == "registry-preference"
+               for match in matches)
 
 
 def _render_pass_row(finding: Dict[str, Any]) -> str:
@@ -1036,9 +1054,10 @@ def _render_pass_row(finding: Dict[str, Any]) -> str:
     state = finding.get("rollout_state")
     conflict = ' <span class="badge badge-conflict">CONFLICT</span>' if \
         finding.get("conflict") else ""
-    # A pass held only by a preference is a weaker pass, and the compact row is
+    # A pass held ONLY by a preference is a weaker pass, and the compact row is
     # where a reader skims. Say so on the always-visible line, not only inside
-    # the expanded evidence.
+    # the expanded evidence. A pass a policy also delivers is not weaker and is
+    # deliberately not badged — see _delivered_by_preference.
     preference = (' <span class="badge badge-preference">BY PREFERENCE</span>'
                   if _delivered_by_preference(found) else "")
 
