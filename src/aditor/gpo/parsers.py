@@ -400,10 +400,16 @@ def parse_registry_xml(data: Any) -> List[Dict[str, Any]]:
       they are part of the truth about the GPO — but a caller must not treat
       one as configuring the value it names; see
       :data:`REGISTRY_XML_WRITE_ACTIONS`.
-    * **Bare key-creation items** carry a ``key`` with no ``name`` and no
-      ``type`` (GPMC writes one per key when a preference creates a key tree).
-      They configure no value, so they are skipped rather than emitted as a
-      value with empty data.
+    * **Bare items** carry a ``key`` with no ``name`` and no ``type``, so they
+      concern the key rather than a value in it, and the ``action`` decides what
+      they mean. A bare **create/update/replace** is the key-creation item GPMC
+      writes per key when a preference builds a key tree: it configures no value
+      and is **skipped**, rather than emitted as a value with empty data. A bare
+      **delete** (``action="D"``) removes the whole key and everything in it —
+      including a hardened value some other GPO sets there — so it is
+      **emitted**, with ``value_name`` ``None`` and ``deletes_key`` ``True``.
+      Dropping those hid a GPO clearing the key under a value the scan then
+      reported as configured (P2-WP5); the evaluator discloses them.
     * ``<Collection>`` groups nest ``<Registry>`` items arbitrarily deep, so the
       whole tree is walked; entries come back in document order.
     * ``REG_SZ``/``REG_EXPAND_SZ`` values stay literal — ``value="1"`` is the
@@ -426,11 +432,14 @@ def parse_registry_xml(data: Any) -> List[Dict[str, Any]]:
         data: Raw file bytes (or text). ``None``/empty yields ``[]``.
 
     Returns:
-        One dict per value-configuring item, in document order:
+        One dict per value-configuring item **plus one per key-scoped delete**,
+        in document order:
 
         * ``hive`` / ``key`` / ``value_name`` — exactly as written in the file.
           Join them (and normalise) to get the full path; nothing here is
           upper-cased, because these fields are what a report shows a reader.
+          ``value_name`` is ``None`` on a key-scoped delete, which names no
+          value.
         * ``type`` — the numeric Windows type code, or ``None`` for a type name
           Windows does not define (or an item with no ``type`` at all).
         * ``type_name`` — the type as the file names it, or ``None``.
@@ -440,6 +449,9 @@ def parse_registry_xml(data: Any) -> List[Dict[str, Any]]:
         * ``order`` — 1-based position in the file, so two items that set the
           same value can be told apart in evidence.
         * ``has_filters`` / ``disabled`` — booleans, as above.
+        * ``deletes_key`` — ``True`` only for a key-scoped delete, which sets no
+          value and whose ``key`` is the key being removed. Present on every
+          entry so a caller reads a boolean rather than a missing key.
 
         Malformed, truncated or non-XML input returns ``[]`` and never raises: an
         unreadable preferences file must not abort a domain-wide scan.
@@ -468,12 +480,23 @@ def parse_registry_xml(data: Any) -> List[Dict[str, Any]]:
                  for name, value in properties.attrib.items()}
         value_name = (attrs.get("name") or "").strip()
         type_name = (attrs.get("type") or "").strip().upper() or None
+        action = _preference_action(attrs.get("action"))
 
-        # A bare key-creation item names neither a value nor a type. It creates
-        # the key and nothing else, so emitting it would invent a configured
-        # value that the GPO does not set.
+        # A bare item names neither a value nor a type, so it is about the KEY
+        # rather than about a value in it — and the action decides which of two
+        # very different things that is. With a create/update/replace it is the
+        # key-creation item GPMC writes per key when a preference builds a key
+        # tree: it configures no value, so emitting it would invent a configured
+        # value the GPO does not set, and it is dropped. With ``D`` it deletes
+        # the whole key and everything in it, which can include a hardened value
+        # another GPO put there, so dropping it would hide a real change and let
+        # such a value read as configured. Those are emitted, with no
+        # ``value_name`` and ``deletes_key`` set.
+        deletes_key = False
         if not value_name and not type_name:
-            continue
+            if action != "D":
+                continue
+            deletes_key = True
 
         type_code = _REG_TYPE_CODES.get(type_name) if type_name else None
         multi_values = [child.text or "" for child in properties.iter()
@@ -483,15 +506,16 @@ def parse_registry_xml(data: Any) -> List[Dict[str, Any]]:
         entries.append({
             "hive": (attrs.get("hive") or "").strip(),
             "key": (attrs.get("key") or "").strip(),
-            "value_name": value_name,
-            "type": type_code,
-            "type_name": type_name,
-            "value": _decode_preference_value(type_code, attrs.get("value"),
-                                              multi_values),
-            "action": _preference_action(attrs.get("action")),
+            "value_name": None if deletes_key else value_name,
+            "type": None if deletes_key else type_code,
+            "type_name": None if deletes_key else type_name,
+            "value": None if deletes_key else _decode_preference_value(
+                type_code, attrs.get("value"), multi_values),
+            "action": action,
             "order": order,
             "has_filters": has_filters,
             "disabled": _xml_flag(element.attrib.get("disabled")),
+            "deletes_key": deletes_key,
         })
     return entries
 
