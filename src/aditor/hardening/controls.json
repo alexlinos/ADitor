@@ -2,7 +2,7 @@
   "catalog_version": "2026.08.2",
   "spec": "docs/HARDENING_CATALOG.md",
   "baseline": {
-    "primary_source": "Jerry Devore, \"Active Directory Hardening Series\" Parts 1-8, Microsoft Core Infrastructure and Security Blog (series verified Aug 2026; there is no Part 9).",
+    "primary_source": "Jerry Devore, \"Active Directory Hardening Series\", Microsoft Core Infrastructure and Security Blog (series verified Aug 2026).",
     "value_policy": "Expected values are only carried where the source states them. A control whose exact value the source does not state is present with status 'needs_baseline_value', no expected values, and is excluded from scoring. Values are never inferred or guessed.",
     "pending_value_source": "Microsoft Security Baselines (Security Compliance Toolkit) and/or CIS Benchmarks — needed to close the 'needs_baseline_value' controls."
   },
