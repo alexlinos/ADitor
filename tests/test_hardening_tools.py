@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from aditor.gpo.parsers import parse_registry_xml
 from aditor.hardening import SCAN_ENGINE_VERSION
 from aditor.tools.gpo import GPOTools
 from aditor.tools.hardening import (
@@ -460,6 +461,12 @@ class TestScanHardening:
 
     def test_a_preference_that_deletes_the_value_does_not_pass(
             self, tools, mock_ldap_manager):
+        """Not a pass — and since P2-WP5 not a `fail` either, but `unknown`.
+
+        A Delete item is not a match, so no value was read. This control's
+        documented remediation is a direct write on the DCs, so "no value read"
+        does not license a failure verdict; the delete is still disclosed.
+        """
         wire_ldap(mock_ldap_manager,
                   [gpo_entry(GUID_SIGNING, "Undo Enc Types")], [])
 
@@ -470,7 +477,9 @@ class TestScanHardening:
             control_ids=["DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES"])
 
         finding = response["findings"][0]
-        assert finding["result"] == "fail"
+        assert finding["result"] == "unknown"
+        assert finding["result"] != "pass"
+        assert finding["rollout_state"] is None
         assert finding["evidence"]["found"] == []
         assert any("DELETE this value" in note
                    for note in finding["evidence"]["notes"])
@@ -940,3 +949,142 @@ class TestScanId:
         document = out.read_text(encoding="utf-8")
         assert "Scan id" in document
         assert re.search(r"\b[0-9a-f]{32}\b", document), "no scan id in the document"
+
+
+# --------------------------------------------------------------------------- #
+# P2-WP5 — the `unknown` result end to end through the tool layer
+# --------------------------------------------------------------------------- #
+
+DIAG_CONTROL_ID = "DEVORE-03-LDAP-DIAG-LOGGING"
+DIAG_POL_ENTRY = {
+    "key": r"SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics",
+    "value": "16 LDAP Interface Events",
+    "type": "REG_DWORD",
+    "data": 3,
+}
+
+
+class TestUnknownVerdictThroughTheScan:
+    """A control whose remediation leaves no GPO trace, scanned for real.
+
+    Same stubbed-SMB path production takes, so the ``unknown`` result, its note
+    and its counts are exercised through ``scan_hardening`` rather than only
+    against the evaluator.
+    """
+
+    def test_a_domain_with_no_gpo_for_the_key_reports_unknown(
+            self, tools, mock_ldap_manager):
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Some Unrelated Policy")], [])
+
+        response = run_scan(tools, {GUID_SIGNING: sysvol_contents()},
+                            control_ids=[DIAG_CONTROL_ID])
+
+        finding = response["findings"][0]
+        assert finding["result"] == "unknown"
+        assert finding["rollout_state"] is None
+        assert finding["evidence"]["source"] == "unknown"
+        assert response["counts"]["unknown"] == 1
+        assert response["counts"]["fail"] == 0
+        assert response["counts"]["error"] == 0
+
+    def test_the_finding_carries_the_reg_query_command(
+            self, tools, mock_ldap_manager):
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Some Unrelated Policy")], [])
+
+        response = run_scan(tools, {GUID_SIGNING: sysvol_contents()},
+                            control_ids=[DIAG_CONTROL_ID])
+
+        notes = response["findings"][0]["evidence"]["notes"]
+        assert any('reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\NTDS'
+                   '\\Diagnostics" /v "16 LDAP Interface Events"' in note
+                   for note in notes), notes
+
+    def test_a_gpo_delivered_level_of_three_passes(self, tools,
+                                                   mock_ldap_manager):
+        """Fix 1a and 1b together, through the scan: 3 is a pass, not a fail."""
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "NTDS Diagnostics")], [])
+
+        response = run_scan(
+            tools, {GUID_SIGNING: sysvol_contents(pol_entries=[DIAG_POL_ENTRY])},
+            control_ids=[DIAG_CONTROL_ID])
+
+        finding = response["findings"][0]
+        assert finding["result"] == "pass"
+        assert finding["evidence"]["found"][0]["value"] == 3
+        assert finding["evidence"]["source"] == "gpo"
+
+    def test_the_headline_counts_report_the_unknown(self, tools,
+                                                   mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Some Unrelated Policy")], [])
+        out = tmp_path / "r.html"
+
+        def read_sysvol(sysvol_path, include_registry=True,
+                        max_value_chars=6000):
+            return sysvol_contents()
+
+        with patch.dict(sys.modules, {"smbclient": Mock()}), \
+             patch.object(GPOTools, "_read_gpo_sysvol", side_effect=read_sysvol):
+            response = json.loads(
+                tools.write_hardening_report(str(out))[0].text)
+
+        assert response["headline"]["unknown"] >= 1
+        document = out.read_text(encoding="utf-8")
+        assert "this is not a pass" in document
+
+    def test_schema_info_advertises_the_unknown_result(self, tools):
+        info = tools.get_schema_info()
+
+        assert info["results"] == ["pass", "fail", "unknown",
+                                   "not_applicable", "error"]
+        notes = " ".join(info["notes"])
+        assert "gpo_deliverable" in notes
+        assert "reg query" in notes
+        assert "narrow by design" in notes
+
+
+class TestKeyScopedDeleteThroughTheScan:
+    """Fix 3 end to end: a GPO deleting the key under a hardened value.
+
+    The preference item is produced by running the real ``parse_registry_xml``
+    over hand-written XML, exactly as ``get_gpo_contents`` does before the scan
+    sees it, so the parser change and the evaluator disclosure are exercised
+    together rather than a hand-shaped dict being asserted against itself.
+    """
+
+    KDC_PREF_KEY = r"SYSTEM\CurrentControlSet\Services\Kdc"
+
+    def key_delete_entry(self):
+        document = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<RegistrySettings clsid="{A3CCFC41-0000-0000-0000-000000000002}">'
+            '<Registry name="Item"><Properties action="D" '
+            f'hive="HKEY_LOCAL_MACHINE" key="{self.KDC_PREF_KEY}"/>'
+            '</Registry></RegistrySettings>').encode("utf-8")
+        entries = parse_registry_xml(document)
+        assert entries and entries[0]["deletes_key"] is True
+        return entries[0]
+
+    def test_a_pass_is_disclosed_as_standing_on_a_key_another_gpo_deletes(
+            self, tools, mock_ldap_manager):
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Enc Types By Preference"),
+                   gpo_entry(GUID_OVERRIDE, "Undo Enc Types")], [])
+
+        response = run_scan(
+            tools,
+            {GUID_SIGNING: sysvol_contents(
+                preference_entries=[preference_entry()]),
+             GUID_OVERRIDE: sysvol_contents(
+                 preference_entries=[self.key_delete_entry()])},
+            control_ids=["DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES"])
+
+        finding = response["findings"][0]
+        assert finding["result"] == "pass"
+        notes = " ".join(finding["evidence"]["notes"])
+        assert "DELETE a registry KEY" in notes
+        assert "Undo Enc Types" in notes
+        assert "client-side extensions run" in notes

@@ -20,7 +20,7 @@ in a scan's provenance header alongside the catalog version, so a stored report
 can always say which engine, which renderer and which baseline produced it.
 """
 
-SCAN_ENGINE_VERSION = "1.2.0"
+SCAN_ENGINE_VERSION = "1.3.0"
 
 from .catalog import (  # noqa: E402  (re-exported for callers' convenience)
     Catalog,
