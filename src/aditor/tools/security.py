@@ -524,7 +524,13 @@ class SecurityTools(BaseTool):
     def audit_admin_accounts(self) -> List[Dict[str, Any]]:
         """
         Audit administrative accounts for security compliance.
-        
+
+        Every account carries a ``risk_level`` rating how exploitable it is (see
+        :meth:`_assess_admin_risk` for the ladder and the reasoning) plus
+        ``risk_drivers`` saying what drove that rating, and the payload restates
+        the model in ``risk_model``. Rating everything HIGH would leave a reader
+        with nothing to prioritise.
+
         Returns:
             List of MCP content objects with admin account audit information
         """
@@ -553,50 +559,75 @@ class SecurityTools(BaseTool):
                                 attributes=[
                                     'sAMAccountName', 'displayName', 'mail',
                                     'userAccountControl', 'lastLogon', 'pwdLastSet',
-                                    'logonCount', 'badPwdCount'
+                                    'logonCount', 'badPwdCount', 'servicePrincipalName'
                                 ],
                                 search_scope=ldap3.BASE
                             )
-                            
+
                             if user_results:
                                 user_entry = user_results[0]
-                                uac = self._get_attr_value(user_entry['attributes'], 'userAccountControl', 0)
+                                attributes = user_entry['attributes']
+                                uac = self._get_attr_value(attributes, 'userAccountControl', 0)
 
-                                # Check for security issues
-                                security_issues = []
+                                enabled = not bool(uac & 0x0002)           # ACCOUNTDISABLE
+                                password_never_expires = bool(uac & 0x10000)  # DONT_EXPIRE_PASSWORD
+                                password_not_required = bool(uac & 0x0020)    # PASSWD_NOTREQD
 
-                                # Check if account is enabled
-                                if bool(uac & 0x0002):  # ACCOUNTDISABLE
-                                    security_issues.append("Account disabled")
+                                spns = [
+                                    str(spn) for spn in
+                                    self._get_attr_list(attributes, 'servicePrincipalName')
+                                ]
 
-                                # Check if password never expires
-                                if bool(uac & 0x10000):  # DONT_EXPIRE_PASSWORD
-                                    security_issues.append("Password never expires")
-
-                                # Check if password not required
-                                if bool(uac & 0x0020):  # PASSWD_NOTREQD
-                                    security_issues.append("Password not required")
+                                pwd_last_set_dt = self._normalize_filetime(
+                                    self._get_attr_value(attributes, 'pwdLastSet', 0)
+                                )
+                                password_age_days = (
+                                    max(0, (datetime.now() - pwd_last_set_dt).days)
+                                    if pwd_last_set_dt else None
+                                )
 
                                 # Check last logon (may be datetime or FILETIME int)
-                                last_logon = self._get_attr_value(user_entry['attributes'], 'lastLogon', 0)
+                                last_logon = self._get_attr_value(attributes, 'lastLogon', 0)
                                 last_logon_dt = self._normalize_filetime(last_logon)
                                 days_since_logon = max(0, (datetime.now() - last_logon_dt).days) if last_logon_dt else None
-                                if days_since_logon and days_since_logon > 90:
-                                    security_issues.append(f"No logon for {days_since_logon} days")
+
+                                security_issues = self._admin_security_issues(
+                                    enabled=enabled,
+                                    password_never_expires=password_never_expires,
+                                    password_not_required=password_not_required,
+                                    spns=spns,
+                                    password_age_days=password_age_days,
+                                    days_since_logon=days_since_logon,
+                                )
+
+                                risk = self._assess_admin_risk(
+                                    enabled=enabled,
+                                    password_never_expires=password_never_expires,
+                                    password_not_required=password_not_required,
+                                    has_spn=bool(spns),
+                                    password_age_days=password_age_days,
+                                    days_since_logon=days_since_logon,
+                                )
 
                                 admin_info = {
                                     'dn': user_entry['dn'],
-                                    'sam_account_name': self._get_attr_value(user_entry['attributes'], 'sAMAccountName', ''),
-                                    'display_name': self._get_attr_value(user_entry['attributes'], 'displayName', ''),
-                                    'mail': self._get_attr_value(user_entry['attributes'], 'mail', ''),
+                                    'sam_account_name': self._get_attr_value(attributes, 'sAMAccountName', ''),
+                                    'display_name': self._get_attr_value(attributes, 'displayName', ''),
+                                    'mail': self._get_attr_value(attributes, 'mail', ''),
                                     'privileged_group': group_name,
-                                    'enabled': not bool(uac & 0x0002),
+                                    'enabled': enabled,
                                     'last_logon': last_logon_dt.isoformat() if last_logon_dt else 'Never',
                                     'days_since_logon': days_since_logon,
-                                    'logon_count': self._get_attr_value(user_entry['attributes'], 'logonCount', 0),
-                                    'bad_pwd_count': self._get_attr_value(user_entry['attributes'], 'badPwdCount', 0),
+                                    'password_last_set': pwd_last_set_dt.isoformat() if pwd_last_set_dt else 'Never',
+                                    'password_age_days': password_age_days,
+                                    'password_never_expires': password_never_expires,
+                                    'password_not_required': password_not_required,
+                                    'spn_count': len(spns),
+                                    'logon_count': self._get_attr_value(attributes, 'logonCount', 0),
+                                    'bad_pwd_count': self._get_attr_value(attributes, 'badPwdCount', 0),
                                     'security_issues': security_issues,
-                                    'risk_level': self._calculate_admin_risk_level(security_issues, days_since_logon)
+                                    'risk_level': risk['level'],
+                                    'risk_drivers': risk['drivers']
                                 }
 
                                 # Avoid duplicates
@@ -611,17 +642,22 @@ class SecurityTools(BaseTool):
                     self.logger.warning(f"Failed to audit group {group_name}: {group_error}")
                     continue
             
-            # Sort by risk level and name
-            admin_accounts.sort(key=lambda x: (x['risk_level'], x['sam_account_name']))
-            
+            # Sort by severity, then name. Sorting on the level *string* put
+            # HIGH, LOW, MEDIUM in that order, which is not a priority order.
+            admin_accounts.sort(
+                key=lambda x: (self.ADMIN_RISK_ORDER.get(x['risk_level'], 99),
+                               x['sam_account_name'])
+            )
+
             log_ldap_operation("audit_admin_accounts", self.ldap.ad_config.base_dn, True, f"Audited {len(admin_accounts)} admin accounts")
-            
+
             return self._format_response({
                 "admin_accounts": admin_accounts,
                 "total_admin_accounts": len(admin_accounts),
                 "high_risk_count": len([acc for acc in admin_accounts if acc['risk_level'].lower() == 'high']),
                 "medium_risk_count": len([acc for acc in admin_accounts if acc['risk_level'].lower() == 'medium']),
-                "low_risk_count": len([acc for acc in admin_accounts if acc['risk_level'].lower() == 'low'])
+                "low_risk_count": len([acc for acc in admin_accounts if acc['risk_level'].lower() == 'low']),
+                "risk_model": self._admin_risk_model_description(),
             }, "audit_admin_accounts")
             
         except Exception as e:
@@ -705,33 +741,241 @@ class SecurityTools(BaseTool):
             "recommendation": self._get_security_recommendation(risk_level, risk_factors)
         }
     
-    def _calculate_admin_risk_level(self, security_issues: List[str], days_since_logon: Optional[int]) -> str:
-        """Calculate risk level for admin accounts."""
-        if not security_issues:
-            return "LOW"
-        
-        high_risk_issues = [
-            "Password not required",
-            "Account disabled"
-        ]
-        
-        medium_risk_issues = [
-            "Password never expires"
-        ]
-        
-        # Check for high risk issues
-        if any(issue in security_issues for issue in high_risk_issues):
-            return "HIGH"
-        
-        # Check for medium risk issues or long inactivity
-        if (any(issue in security_issues for issue in medium_risk_issues) or
-            (days_since_logon and days_since_logon > 180)):
-            return "HIGH"
-        elif days_since_logon and days_since_logon > 90:
-            return "MEDIUM"
-        
-        return "MEDIUM" if security_issues else "LOW"
-    
+    # ---- Privileged-account risk model (P2-WP6) ----------------------------
+    # The thresholds are named constants, not inline numbers, so the judgement
+    # is auditable and can be asserted in tests.
+    #
+    # Any domain user can request a service ticket for an SPN-bearing account
+    # and crack it offline at their leisure, so such an account's only defences
+    # are password length and rotation. A year is the longest rotation interval
+    # mainstream guidance tolerates for a service account - Microsoft's own
+    # managed service accounts rotate every 30 days - so past a year the
+    # credential has had unbounded offline exposure.
+    KERBEROASTABLE_PASSWORD_AGE_DAYS = 365
+
+    # A non-expiring privileged credential older than five years cannot have
+    # been rotated in response to any breach, staff departure or guidance change
+    # in that window, and is far past "we rotate annually and slipped".
+    STALE_ADMIN_PASSWORD_DAYS = 1825
+
+    # An unused privileged account is a removal candidate; on its own it is not
+    # a way in. Reported from 90 days, escalated at 180. Note that lastLogon is
+    # per-DC and not replicated, so this signal reads older than reality on a
+    # multi-DC domain - a second reason it never drives HIGH by itself.
+    STALE_LOGON_REPORT_DAYS = 90
+    STALE_LOGON_MEDIUM_DAYS = 180
+
+    ADMIN_RISK_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+
+    def _admin_security_issues(
+        self,
+        *,
+        enabled: bool,
+        password_never_expires: bool = False,
+        password_not_required: bool = False,
+        spns: Optional[List[str]] = None,
+        password_age_days: Optional[int] = None,
+        days_since_logon: Optional[int] = None,
+    ) -> List[str]:
+        """List the reportable findings for one privileged account.
+
+        Reporting and severity are deliberately separate: everything worth
+        telling the reader about is listed here, and
+        :meth:`_assess_admin_risk` decides how much of it is exploitable.
+        """
+        spns = spns or []
+        issues: List[str] = []
+
+        if not enabled:
+            issues.append("Account disabled")
+
+        if password_never_expires:
+            issues.append("Password never expires")
+
+        if password_not_required:
+            issues.append("Password not required")
+
+        if spns:
+            issues.append(
+                f"Service principal name set on a privileged account ({len(spns)} SPN)"
+            )
+
+        # Reported from the kerberoasting threshold whether or not an SPN is
+        # set: a year-old privileged password is worth a reader's attention
+        # even where it is not the top of the ladder.
+        if (password_age_days is not None
+                and password_age_days >= self.KERBEROASTABLE_PASSWORD_AGE_DAYS):
+            issues.append(f"Password unchanged for {password_age_days} days")
+
+        if (days_since_logon is not None
+                and days_since_logon > self.STALE_LOGON_REPORT_DAYS):
+            issues.append(f"No logon for {days_since_logon} days")
+
+        return issues
+
+    def _assess_admin_risk(
+        self,
+        *,
+        enabled: bool,
+        password_never_expires: bool = False,
+        password_not_required: bool = False,
+        has_spn: bool = False,
+        password_age_days: Optional[int] = None,
+        days_since_logon: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Rate one privileged account, and say why.
+
+        Severity here means *how usable this account is to an attacker*, so
+        that a reader with seven admins to triage can tell them apart. The
+        ladder:
+
+        HIGH - reachable today:
+          * ``PASSWD_NOTREQD`` on an enabled account (the password may be empty
+            and the length policy does not apply to it);
+          * an enabled account with an SPN whose password is at least
+            :attr:`KERBEROASTABLE_PASSWORD_AGE_DAYS` old (kerberoastable: the
+            documented path from any domain user to Domain Admin);
+          * an enabled non-expiring password at least
+            :attr:`STALE_ADMIN_PASSWORD_DAYS` old.
+
+        MEDIUM - weakens the account without handing anyone a way in:
+          non-expiring password, an SPN with a fresher (or unknown-age)
+          password, or no logon for :attr:`STALE_LOGON_MEDIUM_DAYS`+ days.
+
+        LOW - informational: a disabled account (it cannot authenticate, so
+          nothing about it is exploitable - it should still be removed from the
+          privileged group), a 90-179 day logon gap, or nothing found.
+
+        Password *age* is used rather than the never-expire flag alone: a
+        non-expiring password set last quarter is a different proposition from
+        one set eleven years ago, and flattening them was half of why every
+        account came back HIGH.
+        """
+        # A disabled account cannot authenticate. Rating it HIGH (as this model
+        # used to) put untidiness above an enabled account with no password
+        # required, which is backwards.
+        if not enabled:
+            return {
+                "level": "LOW",
+                "drivers": [
+                    "Account is disabled, so it cannot authenticate and is not "
+                    "exploitable. Still worth removing from the privileged group."
+                ],
+            }
+
+        high: List[str] = []
+
+        if password_not_required:
+            high.append(
+                "PASSWD_NOTREQD is set on an enabled privileged account: its "
+                "password may be empty and the domain minimum-length policy "
+                "does not apply to it."
+            )
+
+        if (has_spn and password_age_days is not None
+                and password_age_days >= self.KERBEROASTABLE_PASSWORD_AGE_DAYS):
+            high.append(
+                f"Kerberoastable: an SPN is set and the password has not changed "
+                f"for {password_age_days} days, so any authenticated domain user "
+                f"can request a service ticket for it and crack it offline with "
+                f"no lockout or rate limit."
+            )
+
+        if (password_never_expires and password_age_days is not None
+                and password_age_days >= self.STALE_ADMIN_PASSWORD_DAYS):
+            high.append(
+                f"Password never expires and has not changed for "
+                f"{password_age_days} days, so this privileged credential has "
+                f"survived every incident and policy change of that period."
+            )
+
+        if high:
+            return {"level": "HIGH", "drivers": high}
+
+        medium: List[str] = []
+
+        if password_never_expires:
+            age = ("age unknown" if password_age_days is None
+                   else f"{password_age_days} days old")
+            medium.append(
+                f"Password never expires ({age}), so the domain maximum password "
+                f"age does not apply to a privileged account."
+            )
+
+        if has_spn:
+            medium.append(
+                "An SPN is set on a privileged account, which exposes it to "
+                "kerberoasting; the password is recent enough that offline "
+                "cracking is the limiting factor."
+            )
+
+        if (days_since_logon is not None
+                and days_since_logon >= self.STALE_LOGON_MEDIUM_DAYS):
+            medium.append(
+                f"No logon recorded for {days_since_logon} days: privilege that "
+                f"nobody is using, and misuse would be unlikely to be noticed."
+            )
+
+        if medium:
+            return {"level": "MEDIUM", "drivers": medium}
+
+        drivers: List[str] = []
+        if (days_since_logon is not None
+                and days_since_logon > self.STALE_LOGON_REPORT_DAYS):
+            drivers.append(
+                f"No logon recorded for {days_since_logon} days; below the "
+                f"{self.STALE_LOGON_MEDIUM_DAYS}-day threshold that raises this "
+                f"to MEDIUM."
+            )
+
+        return {"level": "LOW", "drivers": drivers}
+
+    def _admin_risk_model_description(self) -> Dict[str, Any]:
+        """The risk model, stated in the payload so a verdict can be checked."""
+        return {
+            "levels": ["HIGH", "MEDIUM", "LOW"],
+            "meaning": "How usable the account is to an attacker today, not how "
+                       "untidy it is.",
+            "HIGH": [
+                "PASSWD_NOTREQD on an enabled account",
+                f"enabled account with an SPN and a password at least "
+                f"{self.KERBEROASTABLE_PASSWORD_AGE_DAYS} days old (kerberoastable)",
+                f"enabled account with a non-expiring password at least "
+                f"{self.STALE_ADMIN_PASSWORD_DAYS} days old",
+            ],
+            "MEDIUM": [
+                "non-expiring password on an enabled account",
+                "SPN on an enabled account with a more recent password",
+                f"no logon for {self.STALE_LOGON_MEDIUM_DAYS}+ days",
+            ],
+            "LOW": [
+                "disabled account: it cannot authenticate, so it is not "
+                "exploitable, but it should be removed from the privileged group",
+                f"no logon for {self.STALE_LOGON_REPORT_DAYS}-"
+                f"{self.STALE_LOGON_MEDIUM_DAYS - 1} days",
+                "nothing found",
+            ],
+            "caveats": [
+                "days_since_logon comes from lastLogon, which is maintained "
+                "per-domain-controller and is not replicated, so it can read far "
+                "older than reality. Treat a staleness finding as a prompt to "
+                "check every DC, not as proof. This is why staleness never "
+                "drives HIGH on its own.",
+                "password_age_days comes from pwdLastSet; 'Never' means the "
+                "account must change its password at next logon, and the age is "
+                "reported as null rather than guessed.",
+            ],
+        }
+
+    def _calculate_admin_risk_level(self, **facts: Any) -> str:
+        """Risk level for one privileged account.
+
+        Thin wrapper over :meth:`_assess_admin_risk`, which carries the model
+        and the reasoning; takes the same keyword arguments.
+        """
+        return self._assess_admin_risk(**facts)['level']
+
+
     def _get_security_recommendation(self, risk_level: str, risk_factors: List[str]) -> str:
         """Get security recommendation based on risk assessment."""
         if risk_level == "HIGH":
@@ -1057,7 +1301,18 @@ class SecurityTools(BaseTool):
                     "include_disabled": "boolean, default false",
                 },
             },
+            "admin_risk_model": self._admin_risk_model_description(),
             "notes": [
+                "audit_admin_accounts rates each privileged account HIGH/MEDIUM/"
+                "LOW by how usable it is to an attacker (see admin_risk_model), "
+                "and carries risk_drivers per account. The generic risk_levels "
+                "list above is the lowercase scale used by get_user_permissions.",
+                "get_inactive_users and get_stale_computers read lastLogon, "
+                "which is maintained per-domain-controller and is not "
+                "replicated, so on a multi-DC domain they can report an active "
+                "account as stale. Known limitation, not yet fixed: the fix is "
+                "lastLogonTimestamp, or querying every DC and taking the "
+                "maximum.",
                 "get_password_policy_violations reports user accounts only "
                 "((objectCategory=person)(objectClass=user)): in the AD schema "
                 "`computer` derives from `user`, so a bare (objectClass=user) "

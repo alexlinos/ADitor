@@ -214,9 +214,13 @@ class TestSecurityTools:
         # Parse JSON response
         response_data = json.loads(result[0].text)
         assert response_data['total_admin_accounts'] == 3
-        assert response_data['high_risk_count'] == 1
+
+        # P2-WP6 re-rated this fixture. Nothing in it is reachable by an
+        # attacker today - no PASSWD_NOTREQD, no SPN, no decade-old password -
+        # so nothing here is HIGH. See TestAdminRiskLevel for the full ladder.
+        assert response_data['high_risk_count'] == 0
         assert response_data['medium_risk_count'] == 1
-        assert response_data['low_risk_count'] == 1
+        assert response_data['low_risk_count'] == 2
 
         # Verify specific accounts (real output keys)
         accounts = {acc['sam_account_name']: acc for acc in response_data['admin_accounts']}
@@ -226,13 +230,21 @@ class TestSecurityTools:
         assert admin['enabled'] == True
         assert admin['risk_level'] == 'LOW'
 
-        # Stale admin account flagged for inactivity
-        assert accounts['admin.user']['risk_level'] == 'MEDIUM'
+        # 120 days idle: reported, but a 90-179 day gap does not escalate.
+        stale = accounts['admin.user']
+        assert stale['risk_level'] == 'LOW'
+        assert 'No logon for 120 days' in stale['security_issues']
 
-        # Service account with 'password never expires' flag is high risk
+        # A non-expiring password on an enabled account is MEDIUM: it defeats
+        # the domain maximum password age, but it is not a way in.
         svc_admin = accounts['svc.admin']
-        assert svc_admin['risk_level'] == 'HIGH'
+        assert svc_admin['risk_level'] == 'MEDIUM'
         assert 'Password never expires' in svc_admin['security_issues']
+        assert svc_admin['risk_drivers'], 'a rating must say what drove it'
+
+        # Highest risk first, so the list is a priority order.
+        levels = [acc['risk_level'] for acc in response_data['admin_accounts']]
+        assert levels == sorted(levels, key=lambda l: {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2}[l])
     
     def test_security_risk_assessment(self, security_tools):
         """Test security risk assessment logic."""
@@ -778,3 +790,253 @@ class TestDisabledAccountsAreExcludedByDefault:
     def test_schema_info_advertises_the_new_parameter(self, security_tools):
         parameters = security_tools.get_schema_info()['operation_parameters']
         assert 'include_disabled' in parameters['get_password_policy_violations']
+
+
+# ---------------------------------------------------------------------------
+# audit_admin_accounts risk model (P2-WP6 Fix 2)
+# ---------------------------------------------------------------------------
+
+
+class TestAdminRiskLevel:
+    """Fix 2: a rating that is HIGH for every account tells the reader nothing.
+
+    These call _calculate_admin_risk_level directly, over the combinations that
+    the old model collapsed.
+    """
+
+    @pytest.mark.parametrize('facts,expected', [
+        # --- nothing found -------------------------------------------------
+        ({'enabled': True}, 'LOW'),
+        ({'enabled': True, 'password_age_days': 30, 'days_since_logon': 1}, 'LOW'),
+
+        # --- 2a: never-expire alone is MEDIUM, not HIGH --------------------
+        ({'enabled': True, 'password_never_expires': True}, 'MEDIUM'),
+        ({'enabled': True, 'password_never_expires': True,
+          'password_age_days': 90}, 'MEDIUM'),
+        # ...but age discriminates within it: an eleven-year-old credential.
+        ({'enabled': True, 'password_never_expires': True,
+          'password_age_days': 4015}, 'HIGH'),
+
+        # --- 2b: disabled is informational, never HIGH ---------------------
+        ({'enabled': False}, 'LOW'),
+        ({'enabled': False, 'password_never_expires': True}, 'LOW'),
+        # The whole point of 2b: disabled must not outrank an enabled account
+        # with no password required.
+        ({'enabled': False, 'password_not_required': True}, 'LOW'),
+        ({'enabled': False, 'has_spn': True, 'password_age_days': 4015,
+          'days_since_logon': 4000}, 'LOW'),
+
+        # --- HIGH: reachable today -----------------------------------------
+        ({'enabled': True, 'password_not_required': True}, 'HIGH'),
+        ({'enabled': True, 'password_not_required': True,
+          'password_age_days': 1}, 'HIGH'),
+        # Kerberoastable: SPN plus an old password.
+        ({'enabled': True, 'has_spn': True, 'password_age_days': 400}, 'HIGH'),
+        ({'enabled': True, 'has_spn': True, 'password_never_expires': True,
+          'password_age_days': 900}, 'HIGH'),
+
+        # --- MEDIUM --------------------------------------------------------
+        # An SPN on a privileged account still matters, but a fresh password
+        # means offline cracking is the limiting factor.
+        ({'enabled': True, 'has_spn': True, 'password_age_days': 30}, 'MEDIUM'),
+        # pwdLastSet unset: the age is unknown, so do not claim the HIGH case.
+        ({'enabled': True, 'has_spn': True, 'password_age_days': None}, 'MEDIUM'),
+        ({'enabled': True, 'days_since_logon': 200}, 'MEDIUM'),
+
+        # --- staleness below the escalation threshold ----------------------
+        ({'enabled': True, 'days_since_logon': 120}, 'LOW'),
+        ({'enabled': True, 'days_since_logon': 89}, 'LOW'),
+
+        # --- thresholds are exact ------------------------------------------
+        ({'enabled': True, 'has_spn': True, 'password_age_days': 365}, 'HIGH'),
+        ({'enabled': True, 'has_spn': True, 'password_age_days': 364}, 'MEDIUM'),
+        ({'enabled': True, 'password_never_expires': True,
+          'password_age_days': 1825}, 'HIGH'),
+        ({'enabled': True, 'password_never_expires': True,
+          'password_age_days': 1824}, 'MEDIUM'),
+        ({'enabled': True, 'days_since_logon': 180}, 'MEDIUM'),
+        ({'enabled': True, 'days_since_logon': 179}, 'LOW'),
+    ])
+    def test_risk_level(self, security_tools, facts, expected):
+        assert security_tools._calculate_admin_risk_level(**facts) == expected
+
+    def test_never_expire_alone_is_not_high(self, security_tools):
+        """2a in isolation: the medium branch used to return HIGH."""
+        assert security_tools._calculate_admin_risk_level(
+            enabled=True, password_never_expires=True) == 'MEDIUM'
+
+    def test_password_not_required_outranks_disabled(self, security_tools):
+        """2b: exploitable beats untidy."""
+        exploitable = security_tools._calculate_admin_risk_level(
+            enabled=True, password_not_required=True)
+        untidy = security_tools._calculate_admin_risk_level(
+            enabled=False, password_not_required=True)
+        order = SecurityTools.ADMIN_RISK_ORDER
+        assert order[exploitable] < order[untidy]
+
+    def test_the_dead_medium_branch_is_gone(self):
+        """2c: `return "MEDIUM" if security_issues else "LOW"` was unreachable."""
+        import inspect
+        source = (inspect.getsource(SecurityTools._assess_admin_risk)
+                  + inspect.getsource(SecurityTools._calculate_admin_risk_level))
+        assert 'if security_issues else' not in source
+        # The model must not rate on the English of the finding strings either.
+        assert 'high_risk_issues' not in source
+        assert 'medium_risk_issues' not in source
+
+    def test_low_is_reachable_beyond_the_empty_case(self, security_tools):
+        """The dead branch made LOW unreachable once anything was found."""
+        assert security_tools._calculate_admin_risk_level(
+            enabled=True, days_since_logon=120) == 'LOW'
+        assert security_tools._admin_security_issues(
+            enabled=True, days_since_logon=120) == ['No logon for 120 days']
+
+    @pytest.mark.parametrize('facts', [
+        {'enabled': True, 'password_not_required': True},
+        {'enabled': True, 'password_never_expires': True},
+        {'enabled': True, 'has_spn': True, 'password_age_days': 400},
+        {'enabled': True, 'days_since_logon': 200},
+        {'enabled': False},
+    ])
+    def test_every_rating_says_what_drove_it(self, security_tools, facts):
+        assert security_tools._assess_admin_risk(**facts)['drivers']
+
+
+def _admin_entry(sam, *, uac=UAC_NORMAL_ACCOUNT, pwd_age_days=30,
+                 logon_days_ago=1, spns=()):
+    """One synthetic privileged account. Invented names, DC=test,DC=local."""
+    dn = f'CN={sam},OU=Admins,DC=test,DC=local'
+    attributes = {
+        'sAMAccountName': [sam],
+        'displayName': [sam],
+        'userAccountControl': [uac],
+        'lastLogon': [datetime.now() - timedelta(days=logon_days_ago)],
+        'pwdLastSet': [datetime.now() - timedelta(days=pwd_age_days)],
+    }
+    if spns:
+        attributes['servicePrincipalName'] = list(spns)
+    return dn, attributes
+
+
+def _admin_audit_payload(security_tools, mock_ldap_manager, entries):
+    users_by_dn = {dn: [{'dn': dn, 'attributes': attrs}] for dn, attrs in entries}
+
+    def side_effect(*args, **kwargs):
+        search_filter = kwargs.get('search_filter', '')
+        if 'objectClass=group' in search_filter:
+            if 'sAMAccountName=Domain Admins' in search_filter:
+                return [{
+                    'dn': 'CN=Domain Admins,CN=Users,DC=test,DC=local',
+                    'attributes': {'member': list(users_by_dn)},
+                }]
+            return []
+        return users_by_dn.get(kwargs.get('search_base', ''), [])
+
+    mock_ldap_manager.search.side_effect = side_effect
+    result = security_tools.audit_admin_accounts()
+    assert len(result) == 1
+    assert isinstance(result[0], TextContent)
+    return json.loads(result[0].text)
+
+
+class TestAdminRiskDiscriminates:
+    """Fix 2, end to end: the regression that mattered was a flat rating."""
+
+    def _admins_differing_only_in_these_attributes(self):
+        # Same shape of account throughout; only the attributes the model reads
+        # differ, so any spread in the ratings comes from the model.
+        return [
+            _admin_entry('adm.clean'),
+            _admin_entry('adm.neverexpires',
+                         uac=UAC_NORMAL_ACCOUNT | UAC_DONT_EXPIRE_PASSWORD),
+            _admin_entry('adm.notreqd',
+                         uac=UAC_NORMAL_ACCOUNT | UAC_PASSWD_NOTREQD),
+            _admin_entry('adm.kerberoastable',
+                         spns=('TEST/svc.test.local',), pwd_age_days=900),
+            _admin_entry('adm.idle', logon_days_ago=400),
+            _admin_entry('adm.disabled',
+                         uac=UAC_NORMAL_ACCOUNT | UAC_ACCOUNTDISABLE
+                             | UAC_PASSWD_NOTREQD),
+        ]
+
+    def test_more_than_one_risk_level_is_produced(self, security_tools, mock_ldap_manager):
+        payload = _admin_audit_payload(security_tools, mock_ldap_manager,
+                                       self._admins_differing_only_in_these_attributes())
+
+        levels = {acc['sam_account_name']: acc['risk_level']
+                  for acc in payload['admin_accounts']}
+        assert len(set(levels.values())) > 1, (
+            f'the rating must discriminate, got {levels}'
+        )
+        # In fact all three, which is the point of the exercise.
+        assert set(levels.values()) == {'HIGH', 'MEDIUM', 'LOW'}
+        assert levels == {
+            'adm.clean': 'LOW',
+            'adm.disabled': 'LOW',
+            'adm.idle': 'MEDIUM',
+            'adm.neverexpires': 'MEDIUM',
+            'adm.notreqd': 'HIGH',
+            'adm.kerberoastable': 'HIGH',
+        }
+        assert payload['high_risk_count'] == 2
+        assert payload['medium_risk_count'] == 2
+        assert payload['low_risk_count'] == 2
+
+    def test_high_risk_first(self, security_tools, mock_ldap_manager):
+        payload = _admin_audit_payload(security_tools, mock_ldap_manager,
+                                       self._admins_differing_only_in_these_attributes())
+        levels = [acc['risk_level'] for acc in payload['admin_accounts']]
+        assert levels[:2] == ['HIGH', 'HIGH']
+        assert levels[-2:] == ['LOW', 'LOW']
+
+    def test_disabled_admin_is_reported_but_not_high(self, security_tools, mock_ldap_manager):
+        """It should be removed from the group; it is not a live exposure."""
+        payload = _admin_audit_payload(security_tools, mock_ldap_manager,
+                                       self._admins_differing_only_in_these_attributes())
+        disabled = next(acc for acc in payload['admin_accounts']
+                        if acc['sam_account_name'] == 'adm.disabled')
+        assert disabled['risk_level'] == 'LOW'
+        assert 'Account disabled' in disabled['security_issues']
+        assert 'Password not required' in disabled['security_issues']
+        assert 'disabled' in disabled['risk_drivers'][0]
+
+    def test_password_age_and_spn_are_carried_in_the_payload(
+            self, security_tools, mock_ldap_manager):
+        """A HIGH kerberoasting verdict has to show its evidence."""
+        payload = _admin_audit_payload(security_tools, mock_ldap_manager,
+                                       self._admins_differing_only_in_these_attributes())
+        roastable = next(acc for acc in payload['admin_accounts']
+                         if acc['sam_account_name'] == 'adm.kerberoastable')
+        assert roastable['spn_count'] == 1
+        assert roastable['password_age_days'] == 900
+        assert roastable['password_last_set'] != 'Never'
+        assert any('erberoast' in driver for driver in roastable['risk_drivers'])
+
+    def test_payload_states_the_model_and_its_caveats(self, security_tools, mock_ldap_manager):
+        payload = _admin_audit_payload(security_tools, mock_ldap_manager,
+                                       [_admin_entry('adm.clean')])
+        model = payload['risk_model']
+        assert model['levels'] == ['HIGH', 'MEDIUM', 'LOW']
+        assert model['HIGH'] and model['MEDIUM'] and model['LOW']
+        # lastLogon is per-DC and not replicated: the audit must say so rather
+        # than presenting days_since_logon as fact (WP6 out-of-scope follow-up).
+        assert any('not replicated' in caveat for caveat in model['caveats'])
+
+    def test_never_set_password_does_not_become_an_age(
+            self, security_tools, mock_ldap_manager):
+        dn, attributes = _admin_entry('adm.mustchange')
+        attributes['pwdLastSet'] = [0]
+        payload = _admin_audit_payload(security_tools, mock_ldap_manager, [(dn, attributes)])
+
+        account = payload['admin_accounts'][0]
+        assert account['password_age_days'] is None
+        assert account['password_last_set'] == 'Never'
+
+
+def test_schema_info_states_the_admin_risk_model(security_tools):
+    """A caller has to be able to read the levels without reading the source."""
+    schema = security_tools.get_schema_info()
+    model = schema['admin_risk_model']
+    assert model['levels'] == ['HIGH', 'MEDIUM', 'LOW']
+    # The out-of-scope lastLogon replication bug must be disclosed, not implied.
+    assert any('not replicated' in note for note in schema['notes'])
