@@ -44,7 +44,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from .certificates import CertificateFacts
+from .certificates import (
+    CertificateFacts,
+    ChainInspection,
+    Corroboration,
+    DirectoryCertificates,
+    ca_certificates_from_directory,
+    compare_chain_with_directory,
+    inspect_ldaps_chain,
+    parse_ldap_url,
+)
 
 # --------------------------------------------------------------------------- #
 # Which machine is this
@@ -439,6 +448,68 @@ def export_ca_certificate(facts: CertificateFacts,
     return path
 
 
+# --------------------------------------------------------------------------- #
+# The whole picture, assembled once
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class TrustReport:
+    """Everything the Certificate panel draws, gathered in one pass.
+
+    Assembled here rather than in :mod:`aditor.app.api` for the reason that
+    module's docstring gives: the bridge holds state and returns fragments, and
+    no domain logic lives in it. Assembled *at all* — rather than the renderer
+    calling four functions itself — because the four results have to be
+    consistent with each other: a corroboration computed against a different
+    chain than the one on screen would be worse than no corroboration.
+    """
+
+    chain: ChainInspection
+    directory: DirectoryCertificates
+    corroboration: Corroboration
+    machine: MachineContext
+    steps: Tuple[InstallStep, ...] = ()
+    #: Where the last export landed, if the operator has exported. Empty means
+    #: the commands carry :data:`PATH_PLACEHOLDER` instead of a real path.
+    export_path: str = ""
+
+    @property
+    def exportable(self) -> Tuple[CertificateFacts, ...]:
+        """The CA certificates worth offering as a file, anchor last.
+
+        Only CA certificates: exporting the domain controller's own leaf and
+        installing it as a root is a mistake the app should not make available,
+        and it would not fix anything anyway.
+        """
+        return tuple(item for item in self.chain.certificates
+                     if item.is_ca or item.self_issued)
+
+
+def build_trust_report(settings: "object", password: str, *,
+                       factory: Optional[object] = None,
+                       fetch: Optional[object] = None,
+                       system: Optional[str] = None,
+                       environ: Optional[Dict[str, str]] = None,
+                       export_path: str = "",
+                       timeout: float = 10.0) -> TrustReport:
+    """Inspect, read the directory, compare, and work out where we are.
+
+    Both injection points exist for the tests, which run with no domain
+    controller and no network: ``fetch`` stands in for the TLS handshake and
+    ``factory`` for the LDAP manager.
+    """
+    host, port = parse_ldap_url(getattr(settings, "server", ""))
+    chain = inspect_ldaps_chain(host, port, timeout=timeout, fetch=fetch)
+    directory = ca_certificates_from_directory(settings, password, factory)
+    corroboration = compare_chain_with_directory(chain, directory)
+    machine = detect_machine(system, environ)
+    path = Path(export_path) if export_path else None
+    return TrustReport(chain=chain, directory=directory,
+                       corroboration=corroboration, machine=machine,
+                       steps=install_commands(machine, path),
+                       export_path=str(export_path or ""))
+
+
 __all__ = [
     "EXPORT_DIRNAME",
     "MACHINE_MACOS",
@@ -450,6 +521,8 @@ __all__ = [
     "InstallStep",
     "MachineContext",
     "TrustExportError",
+    "TrustReport",
+    "build_trust_report",
     "detect_machine",
     "export_ca_certificate",
     "export_filename",
