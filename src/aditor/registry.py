@@ -253,14 +253,29 @@ GET_INACTIVE_USERS_DESC = """Get users who have not logged in for a number of da
 
 Identifies inactive user accounts, optionally including disabled accounts."""
 
-GET_PASSWORD_POLICY_VIOLATIONS_DESC = """Get users with password policy violations.
+GET_PASSWORD_POLICY_VIOLATIONS_DESC = """Get user accounts with password policy violations.
 
 Identifies accounts with expired passwords, never-expiring passwords, and other
-policy non-compliance."""
+policy non-compliance. Covers user accounts only - machine accounts rotate their
+own passwords and are excluded - and by default only enabled accounts;
+include_disabled=true adds the disabled ones. An account carrying
+DONT_EXPIRE_PASSWORD is exempt from maxPwdAge, so it is never reported as
+expired. Whatever was left out is counted in excluded_counts, so a short list
+can be told apart from a clean domain."""
 
 AUDIT_ADMIN_ACCOUNTS_DESC = """Audit administrative accounts for security compliance.
 
-Reviews privileged accounts for policy compliance and risk."""
+Reviews the members of Domain Admins, Enterprise Admins, Schema Admins and
+Administrators. risk_level rates how usable the account is to an attacker, so the
+list can be triaged: HIGH is PASSWD_NOTREQD on an enabled account, an enabled
+SPN-bearing account whose password is a year or more old (kerberoastable), or a
+non-expiring password over five years old; MEDIUM is a non-expiring password, a
+fresher SPN account, or 180+ days without a logon; LOW is informational,
+including a disabled account, which cannot authenticate and so is not
+exploitable, though it should still be removed from the group. Each account
+carries risk_drivers saying what drove its rating, and the payload restates the
+model in risk_model. days_since_logon comes from lastLogon, which is per-DC and
+not replicated, so it can read older than reality; it never drives HIGH alone."""
 
 CHECK_PASSWORD_POLICY_DESC = """Check the domain password policy against a baseline (read-only).
 
@@ -895,8 +910,13 @@ TOOLS: List[ToolSpec] = [
     ToolSpec(
         "get_password_policy_violations",
         GET_PASSWORD_POLICY_VIOLATIONS_DESC,
-        {"type": "object", "properties": {}},
-        lambda t, a: t.security.get_password_policy_violations(),
+        {
+            "type": "object",
+            "properties": {
+                "include_disabled": {"type": "boolean", "description": "Include disabled accounts in results", "default": False},
+            },
+        },
+        lambda t, a: t.security.get_password_policy_violations(a.get("include_disabled", False)),
     ),
     ToolSpec(
         "audit_admin_accounts",
