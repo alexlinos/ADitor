@@ -71,7 +71,7 @@ from . import SCAN_ENGINE_VERSION
 # Version of the *report layout*. Bumped when the rendered structure changes, so
 # a stored report can say which renderer produced it alongside which engine and
 # which catalog scored it.
-REPORT_FORMAT_VERSION = "1.1.0"
+REPORT_FORMAT_VERSION = "1.2.0"
 
 # The string that identifies a file as one of our reports. ``write_report``
 # refuses to overwrite an existing file that does not carry it, so a mistyped
@@ -369,10 +369,14 @@ def _badge(text: str, kind: str) -> str:
 
 
 def _rows(pairs: Sequence[Tuple[str, str]]) -> str:
-    """A definition table from (already-escaped) label/value pairs."""
+    """A definition table from (already-escaped) label/value pairs.
+
+    Scrollable like the evidence tables: these carry registry keys, DNs and
+    citation URLs, any one of which can be longer than a narrow viewport.
+    """
     body = "".join(f"<tr><th scope=\"row\">{label}</th><td>{value}</td></tr>"
                    for label, value in pairs if value is not None)
-    return f'<table class="kv">{body}</table>' if body else ""
+    return _scrollable(f'<table class="kv">{body}</table>') if body else ""
 
 
 def _notes_list(notes: Any, css_class: str = "notes") -> str:
@@ -524,10 +528,11 @@ def _render_read_failures(scan: Dict[str, Any],
         f'<p class="alert-count">{len(read_errors)} of {_esc(scanned, "?")} '
         f'GPO(s) could not be read.</p>'
         f'<p>{_READ_FAILURE_LEDE}</p>'
-        '<table class="grid"><thead><tr>'
-        '<th>GPO display name</th><th>GPO DN</th><th>Read error</th>'
-        f'</tr></thead><tbody>{rows}</tbody></table>'
-        '</section>'
+        + _scrollable(
+            '<table class="grid"><thead><tr>'
+            '<th>GPO display name</th><th>GPO DN</th><th>Read error</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table>')
+        + '</section>'
     )
 
 
@@ -647,12 +652,14 @@ def _render_found(finding: Dict[str, Any]) -> str:
 
 
 def _scrollable(table: str) -> str:
-    """Wrap a wide evidence table so it scrolls instead of the page body.
+    """Wrap a table so it scrolls instead of the page body.
 
-    These tables carry DNs, registry values and now the delivery caveats, and
-    they are read on laptops and in print. Without the wrapper the widest of them
-    pushes the whole document into horizontal scroll, which makes every other
-    section harder to read; with it, only the table scrolls.
+    These tables carry DNs, registry values, citation URLs and the delivery
+    caveats, and they are read on laptops, on phones and in print. Without the
+    wrapper the widest of them pushes the whole document into horizontal scroll,
+    which makes every other section harder to read; with it, only the table
+    scrolls. Every table in the document goes through here — a reader should
+    never have to discover which ones were exempt.
     """
     return f'<div class="table-wrap">{table}</div>'
 
@@ -1132,8 +1139,9 @@ table{border-collapse:collapse;width:100%;margin:.4rem 0}
 padding:.28rem .6rem .28rem 0;border-bottom:1px solid var(--line);
 color:var(--muted);font-size:.88rem}
 .kv td{vertical-align:top;padding:.28rem 0;border-bottom:1px solid var(--line);
-font-size:.92rem}
-/* Wide evidence tables scroll inside their own box; the page body never
+font-size:.92rem;overflow-wrap:anywhere}
+/* Every table scrolls inside its own box, and long registry keys, DNs and
+   citation URLs break rather than set a wide floor; the page body never
    scrolls sideways. */
 .table-wrap{overflow-x:auto}
 .grid{font-size:.88rem}
