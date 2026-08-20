@@ -54,6 +54,8 @@ from aditor.hardening.evaluator import (
     RESULT_FAIL,
     RESULT_NOT_APPLICABLE,
     RESULT_PASS,
+    RESULT_UNKNOWN,
+    RESULTS,
     STATE_AUDIT,
     STATE_ENFORCED,
     STATE_NOT_STARTED,
@@ -1531,9 +1533,17 @@ class TestShippedCatalogAgainstSynthesizedGpos:
 
     @pytest.mark.parametrize("control_id", [
         c.id for c in load_catalog().scored_controls
-        if c.os_default is None])
+        if c.os_default is None and c.gpo_deliverable])
     def test_every_active_control_reports_something_on_an_empty_domain(
             self, control_id):
+        """For these controls a GPO *is* the delivery mechanism.
+
+        So an empty domain really does establish that nothing sets the key, and
+        the verdict stays the control's ``missing_result``. The two controls whose
+        remediation bypasses Group Policy are excluded and covered by the next
+        test — that exclusion is the whole point of ``gpo_deliverable``, and it is
+        deliberately narrow.
+        """
         control_obj = load_catalog().by_id(control_id)
 
         finding = evaluate_control(control_obj, [])
@@ -1542,6 +1552,21 @@ class TestShippedCatalogAgainstSynthesizedGpos:
         assert finding["rollout_state"] == STATE_NOT_STARTED
         assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
         assert finding["evidence"]["notes"]
+
+    @pytest.mark.parametrize("control_id", [
+        c.id for c in load_catalog().scored_controls if not c.gpo_deliverable])
+    def test_a_control_a_gpo_scan_cannot_see_is_unknown_on_an_empty_domain(
+            self, control_id):
+        """The third empty-domain case: no GPO, and absence proves nothing."""
+        control_obj = load_catalog().by_id(control_id)
+
+        finding = evaluate_control(control_obj, [])
+
+        assert finding["result"] == RESULT_UNKNOWN
+        assert finding["rollout_state"] is None
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_UNKNOWN
+        assert any("reg query" in note
+                   for note in finding["evidence"]["notes"])
 
     @pytest.mark.parametrize("control_id", [
         c.id for c in load_catalog().scored_controls
@@ -2191,16 +2216,31 @@ class TestLiveVerifiedKdcPreferenceCase:
         assert finding["result"] == RESULT_FAIL
         assert finding["evidence"]["found"][0]["value"] == 38
 
-    def test_a_domain_with_no_kdc_preference_still_fails(self):
-        """The pre-WP4 verdict is still correct when nothing sets the key."""
+    def test_a_domain_with_no_kdc_preference_is_unknown_not_a_failure(self):
+        """P2-WP5 changed this verdict, and it is the same defect as WP4's.
+
+        Devore's instruction for this control is to create the value on the
+        domain controllers, so a domain that has done exactly that has no GPO
+        naming the key. Reporting ``fail`` there was a confident claim the scan
+        could not substantiate — the mirror image of the WP4 false pass. It is
+        still not a pass; it is not a verdict at all.
+        """
         control_obj = load_catalog().by_id(KDC_CONTROL_ID)
 
         finding = evaluate_control(control_obj, [])
 
-        assert finding["result"] == RESULT_FAIL
-        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+        assert finding["result"] == RESULT_UNKNOWN
+        assert finding["result"] != RESULT_PASS
+        assert finding["rollout_state"] is None
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_UNKNOWN
 
     def test_a_gpo_that_deletes_the_value_does_not_pass_the_control(self):
+        """Still never a pass; now ``unknown`` and it says the GPO deletes it.
+
+        A Delete item is not a match, so no value was read — and for this control
+        no value read means no verdict. The delete is disclosed either way, which
+        is the sentence that tells the reader what is going on.
+        """
         control_obj = load_catalog().by_id(KDC_CONTROL_ID)
         gpo = preference_gpo(
             GUID_SIGNING, "Undo Enc Types",
@@ -2209,7 +2249,8 @@ class TestLiveVerifiedKdcPreferenceCase:
 
         finding = evaluate_control(control_obj, [gpo])
 
-        assert finding["result"] == RESULT_FAIL
+        assert finding["result"] == RESULT_UNKNOWN
+        assert finding["result"] != RESULT_PASS
         assert any("DELETE this value" in note
                    for note in finding["evidence"]["notes"])
 
@@ -2380,3 +2421,211 @@ class TestLdapDiagnosticLoggingIsAFloorNotAnExactValue:
 
     def test_the_noisy_when_left_raised_caveat_is_kept(self, control_obj):
         assert any("noisy" in caveat for caveat in control_obj.caveats)
+
+
+class TestAbsenceFromGpoIsNotAlwaysEvidence:
+    """Fix 1b: a control a GPO scan cannot see reports ``unknown``, not ``fail``.
+
+    Confirmed live. ``DEVORE-03-LDAP-DIAG-LOGGING`` reported ``fail`` /
+    ``not-configured`` on a domain where the value *was* set — to 3, written
+    directly on the domain controller, which is what Devore's own instruction for
+    that control tells you to do. The catalog asserted a GPO check for a setting
+    the source says to set locally, so the scanner issued a confident failure it
+    could not substantiate, and an operator spent time on it.
+
+    ``unknown`` is the honest verdict and the more actionable one: it says what
+    the scan can and cannot see, and hands over the one command that settles it.
+    """
+
+    @pytest.fixture
+    def control_obj(self):
+        return load_catalog().by_id(DIAG_CONTROL_ID)
+
+    def test_the_key_in_no_gpo_is_unknown_rather_than_a_failure(
+            self, control_obj):
+        finding = evaluate_control(control_obj, [])
+
+        assert finding["result"] == RESULT_UNKNOWN
+        assert finding["result"] != RESULT_FAIL
+        assert finding["result"] != RESULT_PASS
+
+    def test_rollout_state_is_null_not_not_started(self, control_obj):
+        """``not_started`` would imply a value was read and found too low."""
+        finding = evaluate_control(control_obj, [])
+
+        assert finding["rollout_state"] is None
+
+    def test_the_evidence_source_is_unknown_not_not_configured(
+            self, control_obj):
+        """"We cannot see it" is a different claim from "nothing sets it"."""
+        finding = evaluate_control(control_obj, [])
+
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_UNKNOWN
+        assert finding["evidence"]["source"] != EVIDENCE_SOURCE_NOT_CONFIGURED
+        assert finding["evidence"]["found"] == []
+        assert finding["evidence"]["found_count"] == 0
+
+    def test_a_note_gives_the_exact_reg_query_command(self, control_obj):
+        """Acceptance 3. The exact string, because a paraphrase is not a command."""
+        notes = evaluate_control(control_obj, [])["evidence"]["notes"]
+
+        assert any(
+            'reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\NTDS'
+            '\\Diagnostics" /v "16 LDAP Interface Events"' in note
+            for note in notes), notes
+
+    def test_a_note_says_why_the_scan_cannot_see_it(self, control_obj):
+        notes = " ".join(evaluate_control(control_obj, [])["evidence"]["notes"])
+
+        assert "direct registry write on the domain controllers" in notes
+        assert "no trace in Group Policy" in notes
+        assert "NOT evidence that the value is unset" in notes
+
+    def test_the_check_command_names_the_key_the_control_asserts(
+            self, control_obj):
+        """Derived from ``registry_key``, so the two can never disagree."""
+        notes = " ".join(evaluate_control(control_obj, [])["evidence"]["notes"])
+
+        assert control_obj.absence_check_command in notes
+        assert control_obj.registry_value_name in control_obj.absence_check_command
+
+    def test_the_finding_is_still_scored_and_carries_its_remediation(
+            self, control_obj):
+        """An unknown is a gap in the audit, not a control quietly dropped."""
+        finding = evaluate_control(control_obj, [])
+
+        assert finding["scored"] is True
+        assert finding["unscored_reason"] is None
+        assert finding["remediation"]
+
+    # --- the field changes only the absent case ---------------------------
+
+    @pytest.mark.parametrize("value,expected", [
+        (3, RESULT_PASS), (2, RESULT_PASS), (0, RESULT_FAIL)])
+    def test_a_gpo_delivered_value_is_scored_exactly_as_before(
+            self, control_obj, value, expected):
+        finding = evaluate_control(control_obj, [diag_gpo(value)])
+
+        assert finding["result"] == expected
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+        assert finding["rollout_state"] is not None
+
+    def test_the_verified_kdc_preference_still_passes(self):
+        """Acceptance 4: DEVORE-04 is GPO-delivered at 0x38 and must stay pass.
+
+        The live domain delivers this value with a Registry preference item, so
+        the control *is* found in a GPO and the new field must not touch it. If
+        ``gpo_deliverable`` ever started suppressing found values, this is the
+        test that fails.
+        """
+        control_obj = load_catalog().by_id(KDC_CONTROL_ID)
+        gpo = preference_gpo(
+            GUID_SIGNING, "DefaultDomainSupportedEncTypes",
+            properties(KDC_PREFERENCE_KEY, "DefaultDomainSupportedEncTypes",
+                       "00000038"))
+
+        finding = evaluate_control(control_obj, [gpo])
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == STATE_ENFORCED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
+        assert finding["evidence"]["found"][0]["value"] == 56
+
+    # --- narrowness -------------------------------------------------------
+
+    def test_an_ordinary_control_still_fails_when_its_key_is_unset(self):
+        """The narrowness that keeps the tool useful.
+
+        For a control a GPO does deliver, absence from every GPO is strong
+        evidence, and it must keep producing the control's ``missing_result``.
+        Making every unset key ``unknown`` would gut the tool.
+        """
+        finding = evaluate_control(pol_control(), [])
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["rollout_state"] == STATE_NOT_STARTED
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
+
+    def test_a_synthetic_control_opts_in_through_the_catalog_only(self):
+        """The behaviour is driven by the field, not by the control's identity."""
+        opted_in = pol_control(id="TEST-DIRECT-WRITE", gpo_deliverable=False)
+
+        assert evaluate_control(opted_in, [])["result"] == RESULT_UNKNOWN
+        assert evaluate_control(pol_control(), [])["result"] == RESULT_FAIL
+
+    # --- interaction with the other "we cannot be sure" branches ----------
+
+    def test_an_unreadable_gpo_is_still_disclosed_on_an_unknown_finding(
+            self, control_obj):
+        gpos = [GpoSnapshot(dn=gpo_dn(GUID_ENFORCED), display_name="Broken",
+                            read_error="SYSVOL read failed")]
+
+        finding = evaluate_control(control_obj, gpos)
+
+        assert finding["result"] == RESULT_UNKNOWN
+        assert any("could not be read" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_it_takes_precedence_over_an_os_default(self):
+        """A documented default cannot be assumed effective here either.
+
+        The os-default branch concludes that the Windows default *is* the value
+        in force, which needs "nothing sets this key" to be established. A
+        documented direct-write remediation is precisely the case where absence
+        from GPO does not establish it — the same reasoning that makes an
+        unreadable GPO refuse the default.
+        """
+        both = pol_control(
+            id="TEST-BOTH", operator="gte", final_expected=2, os_default=1,
+            gpo_deliverable=False,
+            value_source="Test doc: the compliant value is 2.",
+            os_default_source="Test doc: the effective default is 1.")
+
+        finding = evaluate_control(both, [])
+
+        assert finding["result"] == RESULT_UNKNOWN
+        assert finding["evidence"]["source"] == EVIDENCE_SOURCE_UNKNOWN
+        assert finding["evidence"]["os_default"] is None
+
+
+class TestUnknownFindingsInTheCounts:
+    """Acceptance 7 (evaluator half): counted, never hidden, never a pass."""
+
+    def controls(self):
+        catalog = load_catalog()
+        return [catalog.by_id(DIAG_CONTROL_ID), catalog.by_id(KDC_CONTROL_ID)]
+
+    def test_unknown_has_its_own_count(self):
+        _findings, counts = evaluate_controls(self.controls(), [])
+
+        assert counts[RESULT_UNKNOWN] == 2
+        assert counts[RESULT_FAIL] == 0
+        assert counts[RESULT_PASS] == 0
+        assert counts[RESULT_ERROR] == 0
+
+    def test_an_unknown_finding_is_never_hidden(self):
+        findings, counts = evaluate_controls(self.controls(), [],
+                                             include_not_applicable=False)
+
+        assert len(findings) == 2
+        assert counts["hidden"] == 0
+        assert counts["rendered"] == 2
+
+    def test_every_result_is_a_known_result_value(self):
+        catalog = load_catalog()
+        findings, counts = evaluate_controls(catalog.controls, [],
+                                            include_not_applicable=True)
+
+        assert all(f["result"] in RESULTS for f in findings)
+        assert sum(counts[result] for result in RESULTS) == counts["total"]
+
+    def test_the_shipped_catalog_on_an_empty_domain_reports_two_unknowns(self):
+        """Pins the blast radius of the change against a real catalog."""
+        catalog = load_catalog()
+
+        _findings, counts = evaluate_controls(catalog.controls, [],
+                                             include_not_applicable=True)
+
+        assert counts[RESULT_UNKNOWN] == 2
+        assert counts[RESULT_ERROR] == 0
+        assert counts["total"] == len(catalog.controls)

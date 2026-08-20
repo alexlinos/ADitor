@@ -37,6 +37,7 @@ from ..hardening.catalog import Catalog, CatalogError, load_catalog
 from ..hardening.evaluator import (
     DELIVERIES,
     EVIDENCE_SOURCES,
+    RESULTS,
     GpoLink,
     GpoSnapshot,
     evaluate_controls,
@@ -413,7 +414,7 @@ class HardeningTools(BaseTool):
             "report_format_version": REPORT_FORMAT_VERSION,
             "check_types": ["gpo-security-template", "gpo-registry-pol"],
             "deliveries": list(DELIVERIES),
-            "results": ["pass", "fail", "not_applicable", "error"],
+            "results": list(RESULTS),
             "rollout_states": ["not_started", "audit", "enforced"],
             "evidence_sources": list(EVIDENCE_SOURCES),
             "notes": [
@@ -455,12 +456,24 @@ class HardeningTools(BaseTool):
                 "Every count describes what was evaluated, not what was rendered. "
                 "counts.rendered and counts.hidden reconcile the totals with the "
                 "length of the findings list when include_not_applicable is false.",
-                "'unknown' means the scan did not establish the setting's state — "
-                "either the control is not evaluated at all, or GPOs could not be "
-                "read. Where any GPO is unreadable, a control with a documented OS "
-                "default reports 'error' instead of judging the key unset: an "
-                "unread GPO could set it, so the default cannot be assumed "
-                "effective.",
+                "evidence.source 'unknown' means the scan did not establish the "
+                "setting's state — the control is not evaluated at all, GPOs could "
+                "not be read, or the setting is one a GPO scan cannot see. Where "
+                "any GPO is unreadable, a control with a documented OS default "
+                "reports 'error' instead of judging the key unset: an unread GPO "
+                "could set it, so the default cannot be assumed effective.",
+                "result 'unknown' is a verdict-less verdict, distinct from "
+                "'error': nothing went wrong, but the control's documented "
+                "remediation writes the registry directly on the domain "
+                "controllers (catalog field gpo_deliverable: false), so its key "
+                "appearing in no GPO is not evidence that it is unset. Such a "
+                "finding carries rollout_state null, evidence.source 'unknown' and "
+                "a note with the exact 'reg query' command that reads the live "
+                "value. It is never a pass and is never hidden. The field is "
+                "narrow by design — for every other control a GPO is the normal "
+                "delivery mechanism, so absence from GPO is strong evidence — and "
+                "it changes only the absent case: such a control found in a GPO is "
+                "scored on its value like any other.",
                 "write_hardening_report renders this same scan as one "
                 "self-contained HTML file (inline CSS, no external assets, no "
                 "scripts) ordered by actionability: read failures and unknown "

@@ -43,10 +43,13 @@ renderer and its native dependencies into the packaging.
 Ordering is by **actionability, not catalog order**, because the report's job is
 to drive action rather than to be admired. See :data:`SECTIONS`:
 
-1. Read failures and ``error`` findings — first, and before any verdict section.
-   Per the evaluator, one unreadable GPO turns an unset key into an ``error``, so
-   the affected verdicts are *unknown, not clean*, and a reader who misses that
-   misreads the whole report.
+1. Read failures, ``error`` findings and ``unknown`` findings — first, and before
+   any verdict section. Per the evaluator, one unreadable GPO turns an unset key
+   into an ``error``, and a control whose remediation writes the registry
+   directly on the DCs returns ``unknown`` because a GPO scan cannot see it at
+   all. Both mean *unknown, not clean*, and a reader who misses that misreads the
+   whole report — so an ``unknown`` card states its reason and the command that
+   settles it in the open, not folded into the collapsed notes.
 2. ``fail`` findings, with expected versus every found value, its source GPO, the
    catalog's remediation, and the phasing caveat.
 3. Conflicts — cross-referenced rather than owned, because a conflict on a
@@ -106,11 +109,14 @@ SECTION_NOT_APPLICABLE = "not-applicable"
 # id, heading, lede. The order here is the order in the document.
 SECTIONS: Tuple[Tuple[str, str, str], ...] = (
     (SECTION_UNKNOWN, "Unknown — the scan could not decide",
-     "These controls were not judged because the scan could not read what it "
-     "needed. <strong>They are unknown, not clean.</strong> An unreadable GPO "
-     "could set any of these keys to anything, including a value below the "
-     "Windows default, so no verdict is issued. Fix the read failures above and "
-     "re-scan before treating any of this as evidence."),
+     "These controls were not judged, for one of two reasons. Either the scan "
+     "could not read what it needed — an unreadable GPO could set any of these "
+     "keys to anything, including a value below the Windows default — or the "
+     "control's documented remediation writes the registry directly on the "
+     "domain controllers, which leaves no trace in Group Policy, so its absence "
+     "from every GPO is not evidence that it is unset. <strong>Either way they "
+     "are unknown, not clean, and not passes.</strong> Each card below says "
+     "which case it is and what to run to settle it."),
     (SECTION_FAIL, "Failures — act on these",
      "Each failure below shows what the baseline expects, every value actually "
      "found and which GPO set it, and the catalog's remediation. "
@@ -153,6 +159,10 @@ _SECTION_TITLES = {section_id: title for section_id, title, _lede in SECTIONS}
 _RESULT_LABELS = {
     "pass": "Pass",
     "fail": "Fail",
+    # Two distinct ways of not knowing, both rendered as "Unknown" because the
+    # reader's takeaway is identical: no verdict was issued. Which one it was is
+    # spelled out on the card, where there is room to say it properly.
+    "unknown": "Unknown",
     "error": "Unknown",
     "not_applicable": "Not applicable",
 }
@@ -322,9 +332,15 @@ def _section_for(finding: Dict[str, Any]) -> str:
     An os-default finding that *failed* stays in the failures section — a
     documented default below the baseline floor is a real finding to act on, and
     its card still carries the "nothing enforces a default" framing.
+
+    ``unknown`` shares the section with ``error``. They arise differently — a
+    read failure versus a control a GPO scan structurally cannot see — but they
+    make the same claim, which is that no verdict was issued, and a reader who
+    needs "what did this scan fail to establish?" wants one place to look. The
+    card says which case it is.
     """
     result = finding.get("result")
-    if result == "error":
+    if result in ("error", "unknown"):
         return SECTION_UNKNOWN
     if result == "fail":
         return SECTION_FAIL
@@ -466,9 +482,19 @@ def _render_provenance(scan: Dict[str, Any], counts: Dict[str, Any]) -> str:
 
 
 def _render_counts(counts: Dict[str, Any]) -> str:
-    """The headline numbers, in actionability order."""
+    """The headline numbers, in actionability order.
+
+    The "Unknown" tile sums the two results that issued no verdict —
+    ``error`` (the scan could not read what it needed) and ``unknown`` (a
+    control whose key a GPO scan cannot see) — because a reader skimming the
+    tiles is asking "how much of this report is not evidence?", and splitting
+    that number across two tiles invites reading each half as small. The
+    reconciliation line below breaks it back down.
+    """
+    unread = _as_int(counts.get("error"))
+    unseen = _as_int(counts.get("unknown"))
     tiles = [
-        ("Unknown", counts.get("error"), "unknown"),
+        ("Unknown", unread + unseen, "unknown"),
         ("Failures", counts.get("fail"), "fail"),
         ("Conflicts", counts.get("conflicts"), "conflict"),
         ("At OS default", counts.get("os_default"), "osdefault"),
@@ -481,7 +507,13 @@ def _render_counts(counts: Dict[str, Any]) -> str:
         f'<span class="tile-l">{_esc(label)}</span></li>'
         for label, value, kind in tiles)
 
+    unknown_split = (
+        f'Of the {unread + unseen} unknown, {unread} could not be read by this '
+        f'scan and {unseen} name a setting Group Policy does not deliver, so a '
+        f'GPO scan cannot see them at all. Neither is a pass. '
+    )
     reconcile = (
+        unknown_split +
         f'{_esc(counts.get("rendered"), "0")} of '
         f'{_esc(counts.get("total"), "0")} findings rendered; '
         f'{_esc(counts.get("hidden"), "0")} hidden by the not-applicable filter. '
@@ -875,6 +907,27 @@ def _render_not_judged(finding: Dict[str, Any]) -> str:
     )
 
 
+def _render_unknown_reason(finding: Dict[str, Any]) -> str:
+    """Why an ``unknown`` finding was not judged — always visible, never folded.
+
+    The reason and the command that settles it are the entire value of this
+    finding, so they are rendered open on the card rather than left inside the
+    collapsed scan-notes block. A reader who has to click to discover that a row
+    is not a pass will read it as one.
+    """
+    notes = (finding.get("evidence") or {}).get("notes")
+    return (
+        '<div class="block err-block">'
+        '<h4>Why this is unknown &mdash; this is not a pass</h4>'
+        '<p><strong>No verdict was issued for this control.</strong> This scan '
+        'reads Group Policy, and what Group Policy shows does not settle this '
+        'setting\'s state, so it is reported as neither compliant nor '
+        'non-compliant. Run the check named below to turn it into a fact.</p>'
+        + _notes_list(notes, "notes")
+        + '</div>'
+    )
+
+
 def _card_badges(finding: Dict[str, Any], section_id: str) -> str:
     result = str(finding.get("result") or "")
     evidence = finding.get("evidence") or {}
@@ -919,6 +972,10 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
     ])
 
     body: List[str] = [identity]
+    # True when the evidence notes are already rendered open somewhere in the
+    # card, so the collapsed copy at the bottom is suppressed rather than
+    # repeating them.
+    notes_shown = False
 
     if section_id == SECTION_NOT_JUDGED:
         body.append(_render_not_judged(finding))
@@ -933,12 +990,15 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
             body.append('<div class="block err-block"><h4>Why this is '
                         'unknown</h4><p>'
                         + _esc(finding.get("error")) + '</p></div>')
+        elif finding.get("result") == "unknown":
+            body.append(_render_unknown_reason(finding))
+            notes_shown = True
         body.append(_render_conflict(finding))
         if section_id in (SECTION_FAIL, SECTION_UNKNOWN, SECTION_OPPORTUNITIES):
             body.append(_render_remediation(finding))
             body.append(_render_phasing(finding))
 
-    notes = _notes_list(evidence.get("notes"), "notes")
+    notes = "" if notes_shown else _notes_list(evidence.get("notes"), "notes")
     if notes:
         body.append('<details class="block scan-notes"><summary>Scan notes '
                     f'({len((evidence.get("notes") or []))})</summary>{notes}'
@@ -1185,7 +1245,8 @@ color:var(--muted)}
 text-transform:uppercase;letter-spacing:.04em;border-radius:3px;
 padding:.12rem .4rem;margin:0 .3rem .3rem 0;border:1px solid var(--line);
 background:var(--panel);color:var(--muted)}
-.badge-result-fail,.badge-result-error,.badge-sev-critical,.badge-sev-high{
+.badge-result-fail,.badge-result-error,.badge-result-unknown,
+.badge-sev-critical,.badge-sev-high{
 background:var(--bad-bg);border-color:var(--bad);color:var(--bad)}
 .badge-result-pass{background:var(--ok-bg);border-color:var(--ok);
 color:var(--ok)}
@@ -1437,6 +1498,7 @@ def headline_counts(scan_result: Dict[str, Any]) -> Dict[str, int]:
         scan_result.get("scan"), dict) else {}
     return {
         "error": _as_int(counts.get("error")),
+        "unknown": _as_int(counts.get("unknown")),
         "fail": _as_int(counts.get("fail")),
         "conflicts": _as_int(counts.get("conflicts")),
         "os_default": _as_int(counts.get("os_default")),

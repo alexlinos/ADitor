@@ -25,6 +25,17 @@ When settings disagree, the verdict follows the **least compliant** of them.
 A "pass" that some other GPO silently overrides is a lie, and refusing to issue
 one is what makes the no-RSoP approach defensible rather than merely simpler.
 
+**An unset key is not always readable evidence.** A control flagged
+``gpo_deliverable: false`` documents a remediation that writes the registry
+directly on the domain controllers, so its key is not expected to appear in a GPO
+even where the setting *is* applied. For those controls an empty match list
+proves nothing, and the finding is ``result: "unknown"`` with ``rollout_state``
+``None``, ``evidence.source: "unknown"``, and a note giving the ``reg query``
+that reads the live value. ``DEVORE-03-LDAP-DIAG-LOGGING`` reported a confident
+``fail`` on a domain where the value was correctly set to 3 on the DC; that is
+the false negative this closes. It changes only the absent case — such a control
+found in a GPO is judged on its value like any other.
+
 **An unset key is not automatically a failure.** Where Microsoft documents an OS
 default for a setting, the control carries ``os_default`` and a domain that sets
 nothing is judged against that default rather than reported as ``fail`` /
@@ -90,11 +101,21 @@ from .catalog import (
     Control,
 )
 
-# Results a finding can carry.
+# Results a finding can carry. ``unknown`` is the verdict-less verdict: the scan
+# established neither compliance nor non-compliance, and says so instead of
+# guessing. It is distinct from ``error`` — nothing went wrong, the evidence a
+# GPO scan can reach simply does not settle the question (see
+# :func:`_no_gpo_trace_finding`).
 RESULT_PASS = "pass"
 RESULT_FAIL = "fail"
+RESULT_UNKNOWN = "unknown"
 RESULT_NOT_APPLICABLE = "not_applicable"
 RESULT_ERROR = "error"
+
+# Every value ``result`` can take. Advertised by the tool layer, so it lives
+# next to the constants rather than being retyped there.
+RESULTS = (RESULT_PASS, RESULT_FAIL, RESULT_UNKNOWN, RESULT_NOT_APPLICABLE,
+           RESULT_ERROR)
 
 # Rollout states, ordered least to most compliant.
 STATE_NOT_STARTED = "not_started"
@@ -206,6 +227,22 @@ _MIXED_DELIVERY_DETAIL = (
     "time: the preference value tattoos and survives its GPO being unlinked, "
     "while the policy value reverts. Confirm the effective value on a "
     "representative machine before trusting either."
+)
+_NO_GPO_TRACE_NOTE = (
+    "Reported as 'unknown', not as a failure. This control's documented "
+    "remediation is a direct registry write on the domain controllers, which "
+    "leaves no trace in Group Policy at all, so the key appearing in no GPO is "
+    "NOT evidence that the value is unset. This scan reads Group Policy and not "
+    "the machines, so it cannot see the live value either way and issues no "
+    "verdict. Check it on each domain controller with: {command}"
+)
+_NO_GPO_TRACE_NOTE_NO_COMMAND = (
+    "Reported as 'unknown', not as a failure. This control's documented "
+    "remediation is a direct registry write on the domain controllers, which "
+    "leaves no trace in Group Policy at all, so the key appearing in no GPO is "
+    "NOT evidence that the value is unset. This scan reads Group Policy and not "
+    "the machines, so it cannot see the live value either way and issues no "
+    "verdict. Read the value directly on each domain controller to settle it."
 )
 _UNREADABLE_OS_DEFAULT_NOTE = (
     "No GPO that could be read sets this key, but {unreadable} of {total} GPO(s) "
@@ -515,9 +552,9 @@ def evaluate_control(control: Control,
                      gpos: Iterable[GpoSnapshot]) -> Dict[str, Any]:
     """Evaluate one control against every GPO, returning one finding.
 
-    The finding carries ``result`` (``pass``/``fail``/``not_applicable``/
-    ``error``), ``rollout_state``, ``evidence`` (expected versus found, with the
-    source GPO DN and link path) and ``conflict``.
+    The finding carries ``result`` (``pass``/``fail``/``unknown``/
+    ``not_applicable``/``error``), ``rollout_state``, ``evidence`` (expected
+    versus found, with the source GPO DN and link path) and ``conflict``.
 
     Controls flagged ``needs_baseline_value`` are not evaluated at all: they come
     back ``not_applicable`` with ``scored: False`` and the catalog's
@@ -618,7 +655,8 @@ def evaluate_controls(controls: Iterable[Control],
         ``pass`` to get "passes a GPO configures".
     """
     gpos = list(gpos)
-    counts = {RESULT_PASS: 0, RESULT_FAIL: 0, RESULT_NOT_APPLICABLE: 0,
+    counts = {RESULT_PASS: 0, RESULT_FAIL: 0, RESULT_UNKNOWN: 0,
+              RESULT_NOT_APPLICABLE: 0,
               RESULT_ERROR: 0, "needs_baseline_value": 0, "conflicts": 0,
               "os_default": 0, "os_default_pass": 0, "scored": 0,
               "rendered": 0, "hidden": 0, "total": 0}
@@ -897,8 +935,23 @@ def _missing_finding(control: Control, gpos: Sequence[GpoSnapshot],
     those into errors as well would change every verdict on any domain with one
     unreadable GPO, which is a far larger change than the unsound-pass this fix
     exists to close.
+
+    **And unless a GPO was never the delivery mechanism.** A control flagged
+    ``gpo_deliverable: false`` documents a remediation that writes the registry
+    directly on the domain controllers, so its key is not expected to appear in a
+    GPO even on a domain that has applied it. For those controls an empty match
+    list is not evidence of anything, and the finding is ``unknown`` (see
+    :func:`_no_gpo_trace_finding`).
+
+    That branch is checked **first**, before the os-default branch, for the same
+    reason the unreadable-GPO branch exists: the os-default branch concludes that
+    the Windows default is the effective value, which needs "nothing sets this
+    key" to be established, and a documented direct-write remediation is exactly
+    the case where absence from GPO does not establish it.
     """
     note = control.missing_note or "No GPO in the domain sets this key."
+    if not control.gpo_deliverable:
+        return _no_gpo_trace_finding(control, gpos, note, extra_notes)
     if control.os_default is not None:
         unreadable = _unreadable_gpos(gpos)
         if unreadable:
@@ -908,6 +961,46 @@ def _missing_finding(control: Control, gpos: Sequence[GpoSnapshot],
     return _finding(control, control.missing_result or RESULT_FAIL,
                     STATE_NOT_STARTED, [], gpos,
                     notes=[note] + list(extra_notes))
+
+
+def _no_gpo_trace_finding(control: Control, gpos: Sequence[GpoSnapshot],
+                          missing_note: str,
+                          extra_notes: Sequence[str] = ()) -> Dict[str, Any]:
+    """The key is in no GPO, and for this control that proves nothing.
+
+    ``DEVORE-03-LDAP-DIAG-LOGGING`` was the case that exposed this: Devore's own
+    instruction for it is ``reg add`` on the domain controllers, not a GPO, so a
+    domain with the value correctly set to 3 *directly on the DC* reported
+    ``fail`` / ``not-configured``. That is a false negative asserted with full
+    confidence — the scanner claiming a fact ("this is not configured") that the
+    evidence it holds cannot support — and it cost real remediation time.
+
+    So the verdict is ``unknown`` with ``rollout_state`` ``None``: no rollout step
+    was reached because no value was read, and inventing ``not_started`` would
+    imply a value below the interim step. ``evidence.source`` is ``unknown``,
+    never ``not-configured``: "we cannot see it" is a different claim from
+    "nothing sets it", which is the whole point of the fix.
+
+    This is **more** actionable than a bare ``fail``, not less. The notes say
+    exactly what the scan can and cannot see, and hand the reader the one
+    ``reg query`` that closes the gap — derived from the control's own
+    ``registry_key``, so it always names the key actually asserted.
+
+    ``result`` is not ``error``: nothing went wrong, and an error means the scan
+    broke. It is not ``not_applicable`` either — the control applies perfectly
+    well, and ``not_applicable`` findings are hidden by default, which would bury
+    precisely the thing the reader needs. ``unknown`` is never hidden.
+
+    The field only affects the *absent* case. A ``gpo_deliverable: false`` control
+    whose key **is** found in a GPO never reaches here: it is judged on the value
+    exactly like any other control.
+    """
+    command = control.absence_check_command
+    reason = (_NO_GPO_TRACE_NOTE.format(command=command) if command
+              else _NO_GPO_TRACE_NOTE_NO_COMMAND)
+    return _finding(control, RESULT_UNKNOWN, None, [], gpos,
+                    notes=[missing_note, reason] + list(extra_notes),
+                    evidence_source=EVIDENCE_SOURCE_UNKNOWN)
 
 
 def _incomplete_scan_finding(control: Control, gpos: Sequence[GpoSnapshot],
