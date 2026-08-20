@@ -141,8 +141,42 @@ a scan that hid part of the catalog is indistinguishable from one whose catalog
 was smaller. Like the report, the file contains the domain's GPO display names,
 registry values and DNs.
 
+`write_hardening_snapshot` — runs the scan **once** and writes both artifacts
+into one dated folder, so a scan is a single thing you can keep, hand over and
+diff later:
+
+```
+<output_dir>/2026-08-20T162647Z-b288e925/
+    scan.json      <- the payload (source of truth)
+    report.html    <- the rendered document
+```
+
+Use this rather than calling the two tools above in turn. They each run their
+*own* scan, so calling both would put a report and a payload from two different
+scans in one folder — different `scan_id`, different timestamps, and on a domain
+that changed in between, different findings. The JSON is the evidence of record;
+a report that disagrees with it destroys the provenance the pair exists to
+provide. Here the scan runs once and both writers are handed that one payload, so
+the two files carry the same `scan_id`, the same timestamp and the same findings
+by construction.
+
+The folder name comes from the scan's *own* timestamp rather than a separate
+clock reading, so a directory listing and the provenance inside the files tell
+the same story; it contains no colon, which is illegal in a Windows filename; and
+it ends in a short `scan_id` prefix so two scans in the same second cannot
+collide. An existing snapshot folder is refused by name, never overwritten or
+merged into, and a refusal after the folder was created leaves no folder behind —
+a snapshot is both files or neither. `output_dir` is required: there is
+deliberately no default, because both files hold real directory content and where
+they land is the operator's choice. Both files carry the same caveat as the
+standalone report and scan — they embed the domain's GPO display names, registry
+values and DNs.
+
 `diff_hardening_scans` — compares two stored scans to answer "did my fix land,
-and did anything regress?". Touches no directory: two files in, one diff out.
+and did anything regress?". Touches no directory: two scans in, one diff out.
+Each input is either a `.json` scan file or a snapshot folder, whose `scan.json`
+is then read, so `diff <folder-a> <folder-b>` works without reaching inside
+either folder.
 
 Its first job is to distinguish **the domain changing** from **the tool
 changing**, and the payload's opening key is `attribution` for that reason.
