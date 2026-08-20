@@ -32,11 +32,12 @@ failure and converted it into a permanent silent compromise, with the
 operator's own click as the authorisation. So:
 
 * **Nothing here writes to a trust store.** There is no code path in this
-  module, or in the API that calls it, that adds a certificate to any store on
-  any platform. :func:`export_ca_certificate` writes a ``.crt`` file to a
-  directory the operator picked, and :func:`install_commands` returns the text
-  of a command for the operator to run themselves. The elevation prompt they
-  get is a feature: it is the point at which a human decides.
+  module, in :mod:`aditor.app.trust`, or in the API that calls them, that adds a
+  certificate to any store on any platform.
+  :func:`aditor.app.trust.export_ca_certificate` writes a ``.crt`` file, and
+  :func:`aditor.app.trust.install_commands` returns the *text* of a command for
+  the operator to run themselves. The elevation prompt they get is a feature: it
+  is the point at which a human decides.
 * **Every certificate carries its SHA-256 fingerprint**, and the renderer emits
   the fingerprint and the instruction to confirm it out-of-band as one
   inseparable block (see :mod:`aditor.app.render`). The fingerprint is the only
