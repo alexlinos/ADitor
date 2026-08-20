@@ -132,9 +132,9 @@ def test_password_policy_violations_exposes_include_disabled():
 
 def test_expected_tool_count(server):
     # 9 user + 8 group + 9 computer + 7 OU + 7 security + 4 GPO
-    # + 2 hardening + 3 system = 49
-    assert len(TOOLS) == 49
-    assert len(server._tools) == 49
+    # + 4 hardening + 3 system = 51
+    assert len(TOOLS) == 51
+    assert len(server._tools) == 51
 
 
 def test_scan_hardening_is_registered(server):
@@ -155,6 +155,47 @@ def test_write_hardening_report_is_registered(server):
     # carries the domain's GPO names and registry values.
     assert "self-contained" in spec.description
     assert "only side effect" in spec.description
+
+
+def test_write_hardening_scan_is_registered(server):
+    """P2-WP7's persistence tool. Adding a tool needs a Claude Code restart."""
+    assert "write_hardening_scan" in {spec.name for spec in TOOLS}
+    assert "write_hardening_scan" in set(server._tool_handlers)
+
+    spec = next(s for s in TOOLS if s.name == "write_hardening_scan")
+    assert spec.input_schema["required"] == ["output_path"]
+    assert "control_ids" in spec.input_schema["properties"]
+    # The same caveat the report tool carries: a saved scan embeds the domain's
+    # GPO names, registry values and DNs.
+    assert "GPO\ndisplay names, registry values and DNs" in spec.description
+    assert "DIRECTORY CONTENT" in spec.description
+    assert "only side effect" in spec.description
+
+
+def test_diff_hardening_scans_is_registered(server):
+    """P2-WP7's diff tool. Adding a tool needs a Claude Code restart."""
+    assert "diff_hardening_scans" in {spec.name for spec in TOOLS}
+    assert "diff_hardening_scans" in set(server._tool_handlers)
+
+    spec = next(s for s in TOOLS if s.name == "diff_hardening_scans")
+    assert spec.input_schema["required"] == ["before_path", "after_path"]
+
+
+def test_diff_hardening_scans_description_leads_with_attribution():
+    """The domain-versus-tool distinction is the whole feature, so it must be
+    the first thing a caller reads — a model that skips it will report a
+    cross-version difference as a fix that landed."""
+    description = next(s for s in TOOLS
+                       if s.name == "diff_hardening_scans").description
+
+    assert "READ 'attribution' FIRST" in description
+    assert "may be the TOOL rather" in description
+    assert "Group Policy Preferences" in description
+    assert "the domain never changed" in description
+    # The three classification rules a caller must not get wrong.
+    assert "regressions, FIRST" in description
+    assert "even when result stays 'pass'" in description
+    assert "NEVER counted as improvements or regressions" in description
 
 
 def test_audit_admin_accounts_description_states_the_risk_model():

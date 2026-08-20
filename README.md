@@ -134,6 +134,39 @@ contains the domain's GPO display names, registry values and DNs. See
 [`examples/hardening-report-sample.html`](examples/hardening-report-sample.html)
 for the layout, rendered from synthetic data.
 
+`write_hardening_scan` — the report tool's sibling: the same read-only scan,
+written as the **JSON** payload rather than a rendered document, so two runs can
+be compared later. Always covers the whole catalog and filters nothing, because
+a scan that hid part of the catalog is indistinguishable from one whose catalog
+was smaller. Like the report, the file contains the domain's GPO display names,
+registry values and DNs.
+
+`diff_hardening_scans` — compares two stored scans to answer "did my fix land,
+and did anything regress?". Touches no directory: two files in, one diff out.
+
+Its first job is to distinguish **the domain changing** from **the tool
+changing**, and the payload's opening key is `attribution` for that reason.
+`domain` means both scans ran the same catalog *and* engine version, so a
+difference is the domain's. `ambiguous` means they did not, so every difference
+may be the scanner or the baseline instead — and the diff refuses to present any
+of it as domain progress, naming both version pairs and stamping the verdict on
+every entry. This is not hypothetical: one control here went `fail` → `pass`
+between two real scans purely because the scanner learned to read Group Policy
+Preferences. The value had been set correctly the whole time and the domain never
+changed; a naive diff would have announced a remediation that never happened.
+
+Regressions are listed before improvements, because a regression matters more. A
+rollout moving backwards (`enforced` → `audit` → `not_started`) counts as one
+even when `result` stays `pass`. A control added to or removed from the catalog
+goes to `catalog_changes` and is never counted as an improvement or a regression
+— there is no before-and-after verdict for it — and the diff says whether an
+absence really means the catalog changed or just that one scan did not evaluate
+it. A control whose verdict held but whose *evidence* moved — a different value,
+a different GPO delivering it, policy replaced by a preference (which tattoos, so
+it is a weaker statement), a changed evidence source, or a conflict appearing or
+clearing — is surfaced under `evidence_changes`. Diffing two scans of different
+domains, or a file that is not a scan payload, fails with a clear error.
+
 **Directory management**
 - Users: `list_users`, `get_user`, `get_user_groups`, `create_user`, `modify_user`,
   `delete_user`, `enable_user`, `disable_user`, `reset_user_password`
