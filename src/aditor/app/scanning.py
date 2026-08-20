@@ -19,7 +19,7 @@ into a JSON round trip whose failure modes are a superset of the direct call's.
 **Progress.** A domain with dozens of GPOs spends seconds in SYSVOL reads over SMB, and
 a window that shows nothing for eight seconds reads as a hang — the operator
 kills it and files a bug. There is no callback in the scan path, so
-:class:`ScanRun` installs two *observers* around the seams it does have:
+:func:`run_scan` installs two *observers* around the seams it does have:
 
 * the LDAP search that enumerates ``groupPolicyContainer`` objects, which is
   where the **total** number of GPOs first becomes known;
@@ -68,8 +68,10 @@ _STAGE_LABELS = {
     STAGE_FAILED: "Failed",
 }
 
-# Where each stage starts on a 0-100 bar. The read stage spans 20..85 because
-# that is genuinely most of the wall clock on a real domain.
+# Where each stage starts on a 0-100 bar. The read stage owns 20..88 -- most of
+# the bar -- because that is genuinely most of the wall clock on a real domain,
+# and a bar that sat at 90% for eight seconds would be a lie about which part is
+# slow.
 _STAGE_FLOOR = {
     STAGE_CONNECT: 2,
     STAGE_ENUMERATE: 10,
@@ -111,7 +113,7 @@ class ScanProgress:
         with self._lock:
             self.gpos_total = max(0, int(total))
 
-    def count_read(self, name: str = "") -> None:
+    def count_read(self) -> None:
         with self._lock:
             self.gpos_read += 1
             total = self.gpos_total
