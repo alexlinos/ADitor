@@ -134,6 +134,355 @@ def render_connection_result(result: "ConnectionTestResult") -> str:
 
 
 # --------------------------------------------------------------------------- #
+# 1b. The certificate chain — fingerprint first, and nothing that trusts it
+# --------------------------------------------------------------------------- #
+#
+# Read :mod:`aditor.app.certificates` before editing anything below. The short
+# version: this panel exists because the Connection screen says "install the
+# issuing CA" without saying how, and it must close that gap **without**
+# offering a button that does the installing. Every certificate on it arrived
+# over the connection that is failing, so the panel's job is to hand the
+# operator a file, a command and a fingerprint to check — not a verdict.
+#
+# Three properties here are pinned by tests in
+# ``tests/test_app_certificate_panel.py`` and are not stylistic:
+#
+#   * no rendered button installs or trusts anything;
+#   * the out-of-band instruction cannot be rendered without the fingerprint
+#     next to it, because the instruction is meaningless alone and the
+#     fingerprint is unexplained alone. They are emitted by one function and
+#     that function is the only reference to the constant;
+#   * "could not check" never renders like "checked and fine".
+
+#: The sentence the safety of this whole panel rests on. Rendered beside every
+#: single certificate, never once at the top: an operator scrolling to the
+#: anchor and copying its fingerprint must meet the instruction there, not have
+#: passed it four cards ago.
+OUT_OF_BAND_INSTRUCTION = (
+    "Confirm this SHA-256 fingerprint out of band before trusting this "
+    "certificate. Read it off the certification authority itself — "
+    "'certutil -store Root' on the CA server, the Certification Authority "
+    "console, or Keychain Access on a machine that already trusts it — and "
+    "compare every group. ADitor read this certificate over the same "
+    "connection that is failing to verify, so it corroborates nothing on its "
+    "own: if anything is intercepting that connection, this is the "
+    "interceptor's certificate and it will look exactly this legitimate.")
+
+# Where each certificate sits in the chain. The anchor is called out because it
+# is the one a trust store would need, and the leaf is called out because
+# installing *it* as a root is a common and useless mistake.
+def _position_label(index: int, total: int) -> str:
+    if total <= 1:
+        return "The only certificate the server sent"
+    if index == 0:
+        return "Server certificate — the domain controller's own"
+    if index == total - 1:
+        return "Chain anchor — the certificate a trust store would need"
+    return "Intermediate certification authority"
+
+
+def _fingerprint_block(facts: Any) -> str:
+    """The fingerprint and the out-of-band instruction, together or not at all.
+
+    One function, and the **only** reference to
+    :data:`OUT_OF_BAND_INSTRUCTION` in this module — asserted over the AST by
+    ``tests/test_app_certificate_panel.py``. That is the mechanism, not a
+    convention: the instruction without a fingerprint beside it is advice the
+    operator cannot act on, and a fingerprint without the instruction is a hex
+    string that reads like a receipt. Rendering either alone is the failure
+    mode, so neither has a code path of its own.
+    """
+    return (f'<div class="fingerprint">'
+            f'<p class="fp-label">SHA-256 fingerprint</p>'
+            f'<p class="fp-value"><code>{esc(facts.fingerprint)}</code></p>'
+            f'<p class="fp-verify">{esc(OUT_OF_BAND_INSTRUCTION)}</p>'
+            f"</div>")
+
+
+def _certificate_card(facts: Any, position: str = "",
+                      exportable: bool = False) -> str:
+    """One certificate: what it claims, then the fingerprint block.
+
+    ``subject`` and ``issuer`` are directory- and attacker-influenceable text
+    arriving from a socket ADitor does not trust, which is the whole reason this
+    renderer is in Python — see the module docstring. Everything goes through
+    :func:`esc`.
+    """
+    flags = []
+    if facts.self_issued:
+        flags.append("self-issued")
+    if facts.is_ca:
+        flags.append("certification authority")
+    flag_line = (f'<p class="cert-flags">{esc(", ".join(flags))}</p>'
+                 if flags else "")
+    export = (
+        f'<button type="button" class="secondary" '
+        f'data-export-ca="{esc(facts.fingerprint_hex, "")}">'
+        f"Export CA certificate</button>" if exportable else "")
+    return (
+        f'<article class="cert-card">'
+        f'<header><p class="cert-position">{esc(position)}</p>'
+        f'<p class="cert-name">{esc(facts.label)}</p>'
+        f"{flag_line}"
+        f"</header>"
+        + _rows([
+            ("Subject", f'<code>{esc(facts.subject)}</code>'),
+            ("Issuer", f'<code>{esc(facts.issuer)}</code>'),
+            ("Valid from", esc(_stamp(facts.not_before))),
+            ("Valid to", esc(_stamp(facts.not_after))),
+            ("Serial", f'<code>{esc(facts.serial)}</code>'),
+            ("Source", esc(facts.source_label)),
+        ])
+        + _fingerprint_block(facts)
+        + (f'<div class="actions actions-left">{export}</div>' if export else "")
+        + "</article>")
+
+
+def _stamp(value: Any) -> str:
+    try:
+        return value.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:                       # pragma: no cover - defensive
+        return str(value)
+
+
+def _expiry_alerts(certificates: Sequence[Any]) -> str:
+    """The expiry banners — deliberately not shaped like the trust banners.
+
+    An expired domain controller certificate produces a *different* LDAPS
+    failure from an untrusted one, and an operator who reads it as a trust
+    problem will spend an hour installing a CA that was never the issue. So
+    these carry their own wrapper class, their own headline, and the sentence
+    that says installing a CA will not fix it.
+    """
+    parts: List[str] = []
+    for facts in certificates:
+        if not facts.needs_expiry_attention():
+            continue
+        days = facts.days_until_expiry()
+        if facts.is_expired():
+            title = (f"Expired {abs(days)} day(s) ago: "
+                     f"{facts.label}")
+            body = (
+                "<p>This certificate's validity period has ended. That is a "
+                "different failure from an untrusted issuer, and installing a "
+                "CA certificate will not fix it — the certificate has to be "
+                "reissued on the server that presented it.</p>")
+            kind = "bad"
+        elif facts.is_not_yet_valid():
+            title = f"Not valid yet: {facts.label}"
+            body = (
+                "<p>This certificate's validity period has not started. "
+                "Either it was just issued and this machine's clock is behind "
+                "the server's, or the clocks genuinely disagree. Fix the time "
+                "first; installing a CA certificate will not help.</p>")
+            kind = "bad"
+        else:
+            title = f"Expires in {days} day(s): {facts.label}"
+            body = (
+                "<p>Inside the 30-day window. When it lapses, LDAPS will fail "
+                "with an expiry error rather than a trust error, and the fix "
+                "will be a reissue on the server — not anything to do with "
+                "this machine's trust store. Get it renewed now.</p>")
+            kind = "warn"
+        parts.append(
+            '<div class="expiry-alert">'
+            + _banner(kind, title,
+                      body + _rows([
+                          ("Valid to", esc(_stamp(facts.not_after))),
+                          ("Certificate", f'<code>{esc(facts.subject)}</code>'),
+                      ]))
+            + "</div>")
+    return "".join(parts)
+
+
+#: Rendered classes per corroboration outcome. Three entries, because there are
+#: three outcomes; ``unavailable`` has its own so it can never be styled, read
+#: or grepped as agreement.
+_CORROBORATION_KIND = {
+    "agree": "ok",
+    "disagree": "bad",
+    "unavailable": "warn",
+}
+
+_CORROBORATION_TITLE_PREFIX = {
+    "agree": "Corroborated by Active Directory",
+    "disagree": "Warning — Active Directory disagrees",
+    "unavailable": "Not corroborated — could not check",
+}
+
+
+def _corroboration_panel(corroboration: Any) -> str:
+    """Agree / disagree / could-not-check, kept visibly distinct.
+
+    The three outcomes get three CSS classes, three title prefixes and three
+    banner kinds. "Unavailable" reads as an open question, because that is what
+    it is: an attacker who can make the directory read fail would otherwise get
+    a clean-looking panel for free.
+    """
+    outcome = str(getattr(corroboration, "outcome", "") or "unavailable")
+    kind = _CORROBORATION_KIND.get(outcome, "warn")
+    prefix = _CORROBORATION_TITLE_PREFIX.get(outcome,
+                                             "Not corroborated — could not "
+                                             "check")
+    body = [f"<p>{esc(corroboration.headline)}</p>",
+            f"<p>{esc(corroboration.detail)}</p>"]
+    if getattr(corroboration, "reason", ""):
+        body.append('<p class="label">Why it could not be checked</p>'
+                    f"<p>{esc(corroboration.reason)}</p>")
+    if outcome == "agree" and not getattr(corroboration, "independent", False):
+        body.append(
+            '<p class="fix">Both sources came down the same unauthenticated '
+            "connection, so this agreement is weaker than it looks. Confirm "
+            "the fingerprint out of band anyway.</p>")
+    return (f'<div class="corroboration corroboration-{esc(outcome, "")}">'
+            + _banner(kind, prefix, "".join(body)) + "</div>")
+
+
+def _directory_panel(directory: Any) -> str:
+    """What the directory published, per container, including what failed."""
+    rows = "".join(
+        f"<tr><th>{esc(item.label)}</th>"
+        f'<td>{esc(item.count, "0") if item.ok else "not read"}</td>'
+        f'<td class="muted">{esc(item.error or item.dn)}</td></tr>'
+        for item in getattr(directory, "containers", ()) or ())
+    table = (f'<table class="facts"><thead><tr><th>Container</th>'
+             f"<th>Certificates</th><th>Detail</th></tr></thead>"
+             f"<tbody>{rows}</tbody></table>" if rows else "")
+    if not getattr(directory, "ok", False):
+        return _banner(
+            "warn", "Active Directory's own CA list could not be read.",
+            f"<p>{esc(directory.error)}</p>"
+            "<p>Without it the chain above is corroborated by nothing except "
+            "itself. If certificate validation is on and this failed for the "
+            "same certificate reason the connection did, that is expected — "
+            "the corroboration is only available once either the root is "
+            "trusted or you knowingly clear 'Validate certificate' for one "
+            "diagnostic pass.</p>" + table)
+    certificates = getattr(directory, "certificates", ()) or ()
+    if not certificates:
+        return _banner(
+            "warn", "Active Directory publishes no CA certificates.",
+            "<p>The configuration naming context was read and held none. That "
+            "is normal in a domain with no enterprise certification "
+            "authority — and it means there is nothing here to check the "
+            "chain against.</p>" + table)
+    cards = "".join(_certificate_card(facts,
+                                      "Published in Active Directory",
+                                      exportable=True)
+                    for facts in certificates)
+    return (_banner("info",
+                    f"Active Directory publishes {len(certificates)} CA "
+                    f"certificate(s).",
+                    "<p>These came from the forest's configuration naming "
+                    "context over the LDAP connection, not from the TLS "
+                    "handshake.</p>" + table)
+            + cards)
+
+
+def _guidance_panel(machine: Any, steps: Sequence[Any]) -> str:
+    """The platform-specific steps, in order, each with a copyable command."""
+    body = [f"<p>{esc(machine.headline)}</p>",
+            f'<p class="muted">How ADitor worked that out: '
+            f"{esc(machine.evidence)}.</p>"]
+    items: List[str] = []
+    for index, step in enumerate(steps or (), start=1):
+        command = ""
+        if step.command:
+            command = (
+                _code_block(step.command, "Command")
+                + f'<button type="button" class="ghost" '
+                  f'data-copy-text="{esc(step.command, "")}">Copy '
+                  f"command</button>")
+        note = f"<p>{esc(step.note)}</p>" if step.note else ""
+        items.append(
+            f'<li class="step">'
+            f'<p class="step-label"><span class="step-n">{index}</span> '
+            f"{esc(step.label)}</p>"
+            f"{note}"
+            f"{command}</li>")
+    return (_banner("info" if machine.manual_import_is_the_fix else "warn",
+                    f"On this machine ({machine.system})",
+                    "".join(body))
+            + (f'<ol class="trust-steps">{"".join(items)}</ol>'
+               if items else ""))
+
+
+def render_certificate_panel(report: Any) -> str:
+    """The whole Certificate panel: chain, corroboration, guidance, export.
+
+    Ordered by what the operator has to do first. Expiry alerts lead, because
+    an expired certificate makes the rest of the panel a distraction. Then the
+    chain with its fingerprints, then the corroboration, then the
+    machine-specific steps, then the export.
+
+    There is no button here that installs or trusts a certificate, and
+    ``tests/test_app_certificate_panel.py`` asserts that over the rendered
+    markup rather than trusting this paragraph.
+    """
+    chain = report.chain
+    parts: List[str] = []
+
+    if not chain.ok:
+        parts.append(_banner(
+            "bad", "The certificate chain could not be read.",
+            '<p class="label">What happened</p>' + _code_block(chain.error)
+            + f"<p>Nothing was reached on "
+              f"<code>{esc(chain.host)}:{esc(chain.port)}</code>. That is a "
+              f"connectivity or port problem rather than a trust one — port "
+              f"636 speaks TLS from the first byte, port 389 does not.</p>"))
+        parts.append(_corroboration_panel(report.corroboration))
+        parts.append(_directory_panel(report.directory))
+        return "".join(parts)
+
+    parts.append(_expiry_alerts(
+        tuple(chain.certificates)
+        + tuple(getattr(report.directory, "certificates", ()) or ())))
+
+    exportable = {facts.fingerprint_hex for facts in report.exportable}
+    total = len(chain.certificates)
+    parts.append(
+        f'<h3 class="section">What '
+        f"<code>{esc(chain.host)}:{esc(chain.port)}</code> presented "
+        f'<span class="count">{total}</span></h3>')
+    parts.append(_banner(
+        "warn", "Read with certificate validation off — this proves nothing.",
+        "<p>Every value below is what the server said about itself, over a "
+        "connection this machine has not authenticated. It is here to be "
+        "checked against the certification authority, not believed.</p>"))
+    if chain.leaf_only:
+        parts.append(_banner(
+            "warn", "The server sent only its own certificate.",
+            "<p>No CA certificates came with it, so the chain has no visible "
+            "anchor. Get the CA certificate from the CA server itself.</p>"))
+    parts.extend(
+        _certificate_card(facts, _position_label(index, total),
+                          exportable=facts.fingerprint_hex in exportable)
+        for index, facts in enumerate(chain.certificates))
+
+    parts.append('<h3 class="section">Does Active Directory agree?</h3>')
+    parts.append(_corroboration_panel(report.corroboration))
+    parts.append(_directory_panel(report.directory))
+
+    parts.append('<h3 class="section">What to do on this machine</h3>')
+    parts.append(_guidance_panel(report.machine, report.steps))
+
+    if report.export_path:
+        parts.append(_banner(
+            "ok", "Certificate exported.",
+            f"<p>Written to <code>{esc(report.export_path)}</code>. ADitor has "
+            f"not installed it and will not: the commands above are yours to "
+            f"run, and the elevation prompt is where you decide.</p>"))
+    else:
+        parts.append(_banner(
+            "info", "Export a CA certificate to fill the path into the "
+                    "commands above.",
+            "<p>Use <strong>Export CA certificate</strong> on the certificate "
+            "you have verified. ADitor writes a <code>.crt</code> file and "
+            "nothing else — it does not add it to any trust store.</p>"))
+    return "".join(parts)
+
+
+# --------------------------------------------------------------------------- #
 # 2. Scan
 # --------------------------------------------------------------------------- #
 
@@ -590,7 +939,9 @@ def render_notice(title: Any, message: Any = "", kind: str = "info") -> str:
 
 
 __all__ = [
+    "OUT_OF_BAND_INSTRUCTION",
     "esc",
+    "render_certificate_panel",
     "render_connection_result",
     "render_counts",
     "render_credential_store",

@@ -16,6 +16,7 @@ import pytest
 from aditor.app.connection import (
     KIND_ACCOUNT_DISABLED,
     KIND_ACCOUNT_LOCKED,
+    KIND_CERTIFICATE_EXPIRED,
     KIND_CERTIFICATE_HOSTNAME,
     KIND_DNS,
     KIND_INVALID_CREDENTIALS,
@@ -105,7 +106,13 @@ class TestClassification:
         ("socket ssl wrapping error: [SSL: CERTIFICATE_VERIFY_FAILED] "
          "certificate verify failed: unable to get local issuer certificate "
          "(_ssl.c:1006)", KIND_UNTRUSTED_CERTIFICATE),
-        ("certificate has expired", KIND_UNTRUSTED_CERTIFICATE),
+        # Expired is *not* untrusted. OpenSSL wraps both in one message and
+        # the specific needle wins, because installing a CA certificate does
+        # nothing for a certificate that is out of date.
+        ("certificate has expired", KIND_CERTIFICATE_EXPIRED),
+        ("socket ssl wrapping error: [SSL: CERTIFICATE_VERIFY_FAILED] "
+         "certificate verify failed: certificate has expired (_ssl.c:1006)",
+         KIND_CERTIFICATE_EXPIRED),
         ("hostname mismatch, certificate is not valid for 'dc01'",
          KIND_CERTIFICATE_HOSTNAME),
         ("socket ssl wrapping error: [SSL: WRONG_VERSION_NUMBER] wrong "
@@ -147,6 +154,27 @@ class TestClassification:
         # Trusting the CA is the fix; turning validation off is the diagnostic
         # step, and must not be presented as the answer.
         assert fix.index("Trusted Root") < fix.index("Validate certificate")
+
+    def test_the_untrusted_fix_points_at_the_panel_that_does_the_work(self):
+        _, _, fix = classify_error("unable to get local issuer certificate")
+        # The screen told the operator *what* for one work package before it
+        # told them *how*. This is the sentence that joins the two.
+        assert "Certificate and trust panel" in fix
+        assert "SHA-256" in fix
+        # And it still refuses to be the thing that installs it.
+        assert "will not install it for you" in fix
+
+    def test_an_expired_certificate_is_not_sent_to_the_trust_store(self):
+        kind, headline, fix = classify_error(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+            "certificate has expired")
+        assert kind == KIND_CERTIFICATE_EXPIRED
+        assert "validity period" in headline
+        # The whole point of splitting this out: the remedy is a reissue on the
+        # controller, not anything to do with this machine's trust store.
+        assert "Trusted Root" not in fix
+        assert "reissued on the domain controller" in fix
+        assert "clock" in fix
 
 
 # --------------------------------------------------------------------------- #

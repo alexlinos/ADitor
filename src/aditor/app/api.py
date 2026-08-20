@@ -32,6 +32,7 @@ distinctive password and asserts it appears in none of those places.
 from __future__ import annotations
 
 import webbrowser
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -65,6 +66,16 @@ from .settings import (
     persist_connection,
     settings_dir,
 )
+from .trust import (
+    EXPORT_DIRNAME,
+    TrustExportError,
+    build_trust_report,
+    install_commands,
+)
+
+# Aliased on import: the method below is called ``export_ca_certificate`` too,
+# and the page calls the method.
+from .trust import export_ca_certificate as write_ca_certificate
 
 
 def _ok(**extra: Any) -> Dict[str, Any]:
@@ -92,7 +103,9 @@ class AditorApi:
 
     def __init__(self, directory: Optional[Path] = None,
                  endpoint: Optional[Endpoint] = None,
-                 store: Any = None) -> None:
+                 store: Any = None,
+                 chain_fetch: Any = None,
+                 ldap_factory: Any = None) -> None:
         install_redaction()
         self._dir = Path(directory) if directory else settings_dir()
         self._store = store or get_store()
@@ -102,6 +115,12 @@ class AditorApi:
                                      config_path=config_path(self._dir))
         self._scan = ScanJob()
         self._password: str = ""
+        # Injected for the certificate tests, which run with no domain
+        # controller and no network. Production passes neither.
+        self._chain_fetch = chain_fetch
+        self._ldap_factory = ldap_factory
+        self._trust_report: Any = None
+        self._export_path: str = ""
         self._load_saved_password()
 
     # -- helpers ----------------------------------------------------------- #
@@ -235,6 +254,85 @@ class AditorApi:
             "Password cleared from this session.",
             "Enter it again to test the connection or run a scan.",
             kind="info"), state=self.state())
+
+    # -- 1b. the certificate chain ----------------------------------------- #
+    #
+    # Two methods, and the names matter as much as the bodies: there is no
+    # ``trust_certificate``, no ``install_certificate`` and no
+    # ``add_to_trust_store`` on this class, and ``tests/test_app_surface.py``
+    # asserts the whole method list. The page cannot ask for an installation
+    # because there is nothing to ask.
+
+    def certificate_screen(self, form: Dict[str, Any]) -> Dict[str, Any]:
+        """Inspect the controller's chain, compare it with the directory, and
+        say what to do on this machine.
+
+        Reads only. It writes no file, changes no trust store, and **does not
+        touch** ``validate_certificate``: the settings object built from the
+        form is a local that is never assigned to ``self._settings``, so the
+        operator's saved choice is the same before and after — asserted by
+        ``tests/test_app_certificate_panel.py``. The on-screen value *is* used
+        for the directory read, because using anything else would mean the app
+        had quietly overridden the operator's choice in either direction.
+        """
+        candidate = self._settings_from_form(form)
+        password = str((form or {}).get("password") or "") or self._password
+        if password:
+            register_secret(password)
+        report = build_trust_report(candidate, password,
+                                    factory=self._ldap_factory,
+                                    fetch=self._chain_fetch,
+                                    export_path=self._export_path)
+        self._trust_report = report
+        return _ok(
+            corroboration=report.corroboration.outcome,
+            chain_read=report.chain.ok,
+            # A scalar for the toast. The panel says it properly.
+            expiry_warning=report.chain.needs_expiry_attention()
+            or any(item.needs_expiry_attention()
+                   for item in report.directory.certificates),
+            html=render.render_certificate_panel(report))
+
+    def export_ca_certificate(self, fingerprint: str) -> Dict[str, Any]:
+        """Write one of the certificates on screen to a ``.crt`` file.
+
+        Writing a file is the entire extent of it. The install command is
+        rendered for the operator to run; ADitor does not run it, and adding
+        one that did would be the trust-on-first-use button this work package
+        exists to not build.
+
+        Keyed by fingerprint, and only against the chain currently on screen:
+        the page is the least trustworthy input in the app, and this way it can
+        only ask for a certificate the operator is looking at.
+        """
+        report = self._trust_report
+        if report is None:
+            return _fail("Inspect the certificate chain first — there is "
+                         "nothing on screen to export.")
+        wanted = str(fingerprint or "").strip().lower().replace(":", "")
+        available = {item.fingerprint_hex: item
+                     for item in tuple(report.exportable)
+                     + tuple(report.directory.certificates)}
+        facts = available.get(wanted)
+        if facts is None:
+            return _fail("That is not one of the certificates on screen. "
+                         "Inspect the chain again and use the button next to "
+                         "the certificate you want.")
+        try:
+            path = write_ca_certificate(facts, self._dir / EXPORT_DIRNAME)
+        except TrustExportError as exc:
+            return _fail(exc)
+
+        self._export_path = str(path)
+        # Re-render from the chain already in hand rather than inspecting
+        # again: a second handshake could return a different certificate, and
+        # the fingerprints on screen would then no longer be the ones the
+        # operator was told to verify.
+        report = replace(report, export_path=self._export_path,
+                         steps=install_commands(report.machine, path))
+        self._trust_report = report
+        return _ok(path=self._export_path,
+                   html=render.render_certificate_panel(report))
 
     # -- 2. scan ----------------------------------------------------------- #
 
