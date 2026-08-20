@@ -132,9 +132,9 @@ def test_password_policy_violations_exposes_include_disabled():
 
 def test_expected_tool_count(server):
     # 9 user + 8 group + 9 computer + 7 OU + 7 security + 4 GPO
-    # + 4 hardening + 3 system = 51
-    assert len(TOOLS) == 51
-    assert len(server._tools) == 51
+    # + 5 hardening + 3 system = 52
+    assert len(TOOLS) == 52
+    assert len(server._tools) == 52
 
 
 def test_scan_hardening_is_registered(server):
@@ -172,6 +172,39 @@ def test_write_hardening_scan_is_registered(server):
     assert "only side effect" in spec.description
 
 
+def test_write_hardening_snapshot_is_registered(server):
+    """P2-WP8's tool. Adding a tool needs a Claude Code restart."""
+    assert "write_hardening_snapshot" in {spec.name for spec in TOOLS}
+    assert "write_hardening_snapshot" in set(server._tool_handlers)
+
+    spec = next(s for s in TOOLS if s.name == "write_hardening_snapshot")
+    assert spec.input_schema["required"] == ["output_dir"]
+    # No control_ids: a snapshot is a complete record of one moment.
+    assert list(spec.input_schema["properties"]) == ["output_dir"]
+    # The same caveat both sibling tools carry, for both files this time.
+    assert "GPO\ndisplay names, registry values and DNs" in spec.description
+    assert "DIRECTORY CONTENT" in spec.description
+    assert "only side effect" in spec.description
+
+
+def test_write_hardening_snapshot_description_warns_off_composing_by_hand():
+    """The correctness trap is the reason the tool exists, so a caller has to
+    meet it: running the two sibling writers in turn produces a folder holding
+    two different scans, and nothing in the folder would say so."""
+    description = next(s for s in TOOLS
+                       if s.name == "write_hardening_snapshot").description
+
+    assert "USE THIS RATHER THAN CALLING THE OTHER TWO WRITE TOOLS IN TURN" \
+        in description
+    assert "each run their OWN scan" in description
+    assert "exactly once" in description
+    # The two naming constraints a reviewer will check.
+    assert "no colon" in description
+    assert "scan's OWN timestamp" in description
+    # And the refusal, so nobody expects a re-run to update a folder in place.
+    assert "never overwritten" in description
+
+
 def test_diff_hardening_scans_is_registered(server):
     """P2-WP7's diff tool. Adding a tool needs a Claude Code restart."""
     assert "diff_hardening_scans" in {spec.name for spec in TOOLS}
@@ -179,6 +212,19 @@ def test_diff_hardening_scans_is_registered(server):
 
     spec = next(s for s in TOOLS if s.name == "diff_hardening_scans")
     assert spec.input_schema["required"] == ["before_path", "after_path"]
+
+
+def test_diff_hardening_scans_advertises_snapshot_folders_as_input():
+    """P2-WP8: a caller holding two snapshot folders must not have to guess
+    that reaching inside for scan.json is unnecessary."""
+    spec = next(s for s in TOOLS if s.name == "diff_hardening_scans")
+
+    assert "snapshot folder" in spec.description
+    assert "diff <folder-a> <folder-b>" in spec.description
+    for side in ("before_path", "after_path"):
+        assert "snapshot folder" in spec.input_schema["properties"][side][
+            "description"] or "same two" in spec.input_schema["properties"][
+            side]["description"]
 
 
 def test_diff_hardening_scans_description_leads_with_attribution():

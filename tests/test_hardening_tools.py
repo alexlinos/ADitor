@@ -14,6 +14,8 @@ GUID below is synthesized (``DC=test,DC=local``, placeholder GUIDs).
 import json
 import re
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -1061,6 +1063,500 @@ class TestWriteHardeningScan:
         assert first["scan"]["scan_id"] != second["scan"]["scan_id"]
 
 
+class TestWriteHardeningSnapshot:
+    """One scan, one dated folder, both artifacts — P2-WP8.
+
+    The folder layout and its guards are covered in
+    ``test_hardening_snapshot.py``. What matters here is the thing only the tool
+    layer can be wrong about: the scan must run **exactly once** and feed both
+    writers. Still no network: the LDAP manager is a Mock and the SYSVOL read is
+    patched.
+    """
+
+    # One scan makes two LDAP searches (the gPLink sweep, then the policies
+    # container) and one SYSVOL read per GPO. Asserted rather than assumed in
+    # ``test_the_scan_runs_exactly_once``, which derives both numbers from a
+    # single scan_hardening call instead of hard-coding them.
+    def snapshot(self, tools, contents_by_guid, output_dir):
+        """Call write_hardening_snapshot with SMB stubbed out; parse the JSON."""
+        with patch.dict(sys.modules, {"smbclient": Mock()}), \
+             patch.object(GPOTools, "_read_gpo_sysvol",
+                          side_effect=self._reader(contents_by_guid)):
+            result = tools.write_hardening_snapshot(str(output_dir))
+        return json.loads(result[0].text)
+
+    @staticmethod
+    def _reader(contents_by_guid):
+        def read_sysvol(sysvol_path, include_registry=True,
+                        max_value_chars=6000):
+            for guid, contents in contents_by_guid.items():
+                if guid in sysvol_path:
+                    if isinstance(contents, Exception):
+                        raise contents
+                    return contents
+            return sysvol_contents()
+        return read_sysvol
+
+    def test_writes_one_folder_holding_both_artifacts(self, tools,
+                                                     mock_ldap_manager,
+                                                     tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+
+        response = self.snapshot(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)},
+                                 tmp_path)
+
+        assert response["success"] is True
+        folder = Path(response["snapshot_dir"])
+        assert folder.parent == tmp_path
+        assert sorted(p.name for p in folder.iterdir()) == ["report.html",
+                                                            "scan.json"]
+        assert response["snapshot_name"] == folder.name
+
+    def test_returns_both_paths_sizes_the_scan_id_and_the_headline(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+
+        response = self.snapshot(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)},
+                                 tmp_path)
+
+        scan_file = Path(response["files"]["scan"]["path"])
+        report_file = Path(response["files"]["report"]["path"])
+        assert response["files"]["scan"]["bytes_written"] == \
+            scan_file.stat().st_size
+        assert response["files"]["report"]["bytes_written"] == \
+            report_file.stat().st_size
+        assert response["bytes_written"] == (
+            response["files"]["scan"]["bytes_written"]
+            + response["files"]["report"]["bytes_written"])
+        assert response["scan_id"] == response["scan"]["scan_id"]
+        assert response["headline"]["gpos_scanned"] == 1
+        assert response["headline"]["total"] == response["counts"]["total"]
+        assert response["files"]["report"]["self_contained"] is True
+
+    # --- acceptance 2: the correctness trap -------------------------------- #
+
+    def test_the_scan_runs_exactly_once(self, tools, mock_ldap_manager,
+                                        tmp_path):
+        """Acceptance 2, the headline.
+
+        Matching scan_ids in the two files would also be consistent with a
+        cached payload being reused, so the ids are not the proof — the LDAP
+        mock's call count is. The baseline comes from one ``scan_hardening``
+        call rather than a hard-coded number, so the assertion survives the
+        scanner learning to make a different number of queries.
+        """
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing"),
+                                      gpo_entry(GUID_OVERRIDE, "Overrides")],
+                  [link_entry(BASE_DN, GUID_SIGNING, GUID_OVERRIDE)])
+        contents = {GUID_SIGNING: sysvol_contents(*LDAP_LINES)}
+
+        mock_ldap_manager.reset_mock()
+        with patch.dict(sys.modules, {"smbclient": Mock()}), \
+             patch.object(GPOTools, "_read_gpo_sysvol",
+                          side_effect=self._reader(contents)) as one_scan_reads:
+            tools.scan_hardening(include_not_applicable=True)
+        searches_for_one_scan = mock_ldap_manager.search.call_count
+        sysvol_reads_for_one_scan = one_scan_reads.call_count
+        assert searches_for_one_scan > 0 and sysvol_reads_for_one_scan > 0
+
+        mock_ldap_manager.reset_mock()
+        with patch.dict(sys.modules, {"smbclient": Mock()}), \
+             patch.object(GPOTools, "_read_gpo_sysvol",
+                          side_effect=self._reader(contents)) as snapshot_reads:
+            response = json.loads(
+                tools.write_hardening_snapshot(str(tmp_path))[0].text)
+
+        assert response["success"] is True
+        assert mock_ldap_manager.search.call_count == searches_for_one_scan, \
+            "the snapshot queried LDAP more than a single scan does"
+        assert snapshot_reads.call_count == sysvol_reads_for_one_scan, \
+            "the snapshot read SYSVOL more than a single scan does"
+        assert response["scans_run"] == 1
+
+    def test_the_json_and_the_html_carry_the_same_scan_id(self, tools,
+                                                          mock_ldap_manager,
+                                                          tmp_path):
+        """Acceptance 2's other half: the two files must agree, not just exist."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+
+        response = self.snapshot(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)},
+                                 tmp_path)
+
+        stored = read_scan(response["files"]["scan"]["path"])
+        document = Path(response["files"]["report"]["path"]).read_text(
+            encoding="utf-8")
+        scan_id = stored["scan"]["scan_id"]
+
+        assert re.search(r"\b[0-9a-f]{32}\b", document), "no scan id rendered"
+        assert scan_id in document
+        assert response["scan_id"] == scan_id
+        # And the provenance either side of the pair is one scan's provenance.
+        assert stored["scan"]["timestamp"] in document
+        assert stored["counts"] == response["counts"]
+
+    def test_composing_the_two_sibling_writers_by_hand_gives_two_scans(
+            self, tools, mock_ldap_manager, tmp_path):
+        """The trap, demonstrated — this is what the new tool must not do.
+
+        Kept as a test because it is the justification for the tool existing: if
+        this ever stops being true the tool can go away, and if it silently
+        became true of the snapshot tool the folder would be wrong in a way
+        nothing else here would catch.
+        """
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        folder = tmp_path / "by-hand"
+        folder.mkdir()
+
+        mock_ldap_manager.reset_mock()
+        with patch.dict(sys.modules, {"smbclient": Mock()}), \
+             patch.object(GPOTools, "_read_gpo_sysvol",
+                          side_effect=self._reader({})):
+            scan_response = json.loads(tools.write_hardening_scan(
+                str(folder / "scan.json"))[0].text)
+            report_response = json.loads(tools.write_hardening_report(
+                str(folder / "report.html"))[0].text)
+        by_hand_searches = mock_ldap_manager.search.call_count
+
+        mock_ldap_manager.reset_mock()
+        self.snapshot(tools, {}, tmp_path / "by-tool")
+        by_tool_searches = mock_ldap_manager.search.call_count
+
+        # Two scans by hand, one by tool: the ids differ where they must not.
+        assert scan_response["scan"]["scan_id"] != \
+            report_response["scan"]["scan_id"]
+        assert by_hand_searches == by_tool_searches * 2
+
+    # --- acceptance 3: the folder name ------------------------------------- #
+
+    def test_the_folder_name_has_no_colon_and_comes_from_the_scans_timestamp(
+            self, tools, mock_ldap_manager, tmp_path):
+        """Acceptance 3. Colons are illegal in Windows filenames, and the name
+        must agree with the provenance inside the files rather than with a
+        separately-read clock."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        frozen = datetime(2026, 8, 20, 16, 26, 47, 123456, tzinfo=timezone.utc)
+
+        with patch("aditor.tools.hardening.datetime") as clock:
+            clock.now.return_value = frozen
+            response = self.snapshot(tools, {}, tmp_path)
+
+        name = response["snapshot_name"]
+        assert ":" not in name
+        assert re.fullmatch(r"2026-08-20T162647Z-[0-9a-f]{8}", name), name
+        # Derived from the scan's own timestamp, which is the frozen one.
+        assert response["scan"]["timestamp"] == frozen.isoformat()
+        assert name.startswith("2026-08-20T162647Z-")
+        assert name.endswith(response["scan"]["scan_id"][:8])
+
+    # --- acceptance 4: two snapshots in the same second -------------------- #
+
+    def test_two_snapshots_in_the_same_second_do_not_collide(
+            self, tools, mock_ldap_manager, tmp_path):
+        """Acceptance 4. The timestamp has one-second resolution, so it cannot
+        be the whole name."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        frozen = datetime(2026, 8, 20, 16, 26, 47, tzinfo=timezone.utc)
+
+        with patch("aditor.tools.hardening.datetime") as clock:
+            clock.now.return_value = frozen
+            first = self.snapshot(tools, {}, tmp_path)
+            second = self.snapshot(tools, {}, tmp_path)
+
+        assert first["success"] is True and second["success"] is True
+        assert first["snapshot_dir"] != second["snapshot_dir"]
+        assert first["snapshot_name"].startswith("2026-08-20T162647Z-")
+        assert second["snapshot_name"].startswith("2026-08-20T162647Z-")
+        assert len(list(tmp_path.iterdir())) == 2
+        for response in (first, second):
+            assert Path(response["files"]["scan"]["path"]).is_file()
+            assert Path(response["files"]["report"]["path"]).is_file()
+
+    # --- acceptance 5: never overwrite ------------------------------------- #
+
+    def test_an_existing_snapshot_folder_is_refused_not_overwritten(
+            self, tools, mock_ldap_manager, tmp_path):
+        """Acceptance 5. Freeze both the clock and the id so the second run
+        derives the same folder name as the first — the only way to reach the
+        collision without hand-building a folder."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        frozen = datetime(2026, 8, 20, 16, 26, 47, tzinfo=timezone.utc)
+        fixed_id = Mock(hex="b288e925" + "0" * 24)
+
+        with patch("aditor.tools.hardening.datetime") as clock, \
+             patch("aditor.tools.hardening.uuid4", return_value=fixed_id):
+            clock.now.return_value = frozen
+            first = self.snapshot(tools, {}, tmp_path)
+            before = Path(first["files"]["scan"]["path"]).read_bytes()
+            second = self.snapshot(tools, {}, tmp_path)
+
+        assert first["success"] is True
+        assert second["success"] is False
+        assert "already exists" in second["error"]
+        assert first["snapshot_dir"] in second["error"]
+        assert second["scan_succeeded"] is True
+        # Nothing merged, nothing clobbered.
+        assert Path(first["files"]["scan"]["path"]).read_bytes() == before
+        assert len(list(tmp_path.iterdir())) == 1
+
+    # --- acceptance 7: the report is still self-contained ------------------ #
+
+    def test_the_report_written_this_way_is_still_self_contained(
+            self, tools, mock_ldap_manager, tmp_path):
+        """Acceptance 7: the existing guarantee must survive the new path."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+
+        response = self.snapshot(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)},
+                                 tmp_path)
+        document = Path(response["files"]["report"]["path"]).read_text(
+            encoding="utf-8")
+
+        assert document.startswith("<!DOCTYPE html>")
+        assert '<meta charset="utf-8">' in document
+        assert document.rstrip().endswith("</html>")
+        # The same forbidden set ``TestSelfContained`` in
+        # test_hardening_report.py pins: nothing that fetches a resource and
+        # nothing that executes. Citation hyperlinks are navigation, not
+        # loading, and are the one external mention the document may carry.
+        for token in ("<script", "src=", "<link ", "@import", "url(",
+                      "<iframe", "<object", "<embed", "onerror=", "onload=",
+                      "onclick=", "javascript:"):
+            assert token not in document, token
+        assert document.count("<style>") == 1
+        assert "Provenance" in document
+        assert SCAN_ENGINE_VERSION in document
+        assert BASE_DN in document
+
+    # --- the rest of the wiring -------------------------------------------- #
+
+    def test_the_stored_scan_covers_the_whole_catalog_and_hides_nothing(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+
+        response = self.snapshot(tools, {}, tmp_path)
+        stored = read_scan(response["files"]["scan"]["path"])
+
+        assert stored["scan"]["include_not_applicable"] is True
+        assert stored["counts"]["hidden"] == 0
+        assert stored["counts"]["total"] == stored["scan"]["control_count"]
+
+    def test_missing_parent_directories_are_created(self, tools,
+                                                    mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+
+        response = self.snapshot(tools, {}, tmp_path / "audits" / "2026")
+
+        assert response["success"] is True
+        assert Path(response["snapshot_dir"]).parent == \
+            tmp_path / "audits" / "2026"
+
+    def test_the_notes_warn_that_both_files_hold_directory_content(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+
+        response = self.snapshot(tools, {}, tmp_path)
+
+        notes = " ".join(response["notes"])
+        assert "GPO display names, registry values and DNs" in notes
+        assert "BOTH FILES CONTAIN DIRECTORY CONTENT" in notes
+        assert "ran ONCE" in notes
+        assert "diff_hardening_scans" in notes
+
+    def test_an_output_dir_that_is_a_file_is_refused_and_nothing_is_written(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+        target = tmp_path / "notes.txt"
+        target.write_text("keep me", encoding="utf-8")
+
+        response = self.snapshot(tools, {}, target)
+
+        assert response["success"] is False
+        assert "is not a directory" in response["error"]
+        assert response["scan_succeeded"] is True
+        assert target.read_text(encoding="utf-8") == "keep me"
+        assert list(tmp_path.iterdir()) == [target]
+
+    def test_a_broken_catalog_writes_nothing(self, tools, mock_ldap_manager,
+                                             tmp_path):
+        from aditor.hardening.catalog import CatalogError
+
+        with patch("aditor.tools.hardening.load_catalog",
+                   side_effect=CatalogError("duplicate control id 'X'")):
+            result = tools.write_hardening_snapshot(str(tmp_path))
+        response = json.loads(result[0].text)
+
+        assert response["success"] is False
+        assert "catalog failed to load" in response["error"]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_ldap_failure_writes_nothing(self, tools, mock_ldap_manager,
+                                            tmp_path):
+        mock_ldap_manager.search.side_effect = RuntimeError("LDAP server down")
+
+        with patch.dict(sys.modules, {"smbclient": Mock()}):
+            result = tools.write_hardening_snapshot(str(tmp_path))
+        response = json.loads(result[0].text)
+
+        assert response["success"] is False
+        assert "LDAP server down" in response["error"]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_missing_smbprotocol_names_this_tool_not_another(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) \
+            else __builtins__.__import__
+
+        def no_smbclient(name, *args, **kwargs):
+            if name == "smbclient":
+                raise ImportError("No module named 'smbclient'")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=no_smbclient):
+            result = tools.write_hardening_snapshot(str(tmp_path))
+        response = json.loads(result[0].text)
+
+        assert response["success"] is False
+        assert response["error"].startswith("write_hardening_snapshot reads GPO")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_scan_stays_read_only(self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "A Policy")], [])
+
+        self.snapshot(tools, {}, tmp_path)
+
+        assert mock_ldap_manager.add.called is False
+        assert mock_ldap_manager.modify.called is False
+        assert mock_ldap_manager.delete.called is False
+
+    def test_unreadable_gpos_reach_both_files(self, tools, mock_ldap_manager,
+                                              tmp_path):
+        """The pair has to agree about incomplete coverage too."""
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Readable"),
+                   gpo_entry(GUID_OVERRIDE, "Unreadable")],
+                  [link_entry(BASE_DN, GUID_SIGNING, GUID_OVERRIDE)])
+
+        response = self.snapshot(tools, {
+            GUID_SIGNING: sysvol_contents(*LDAP_LINES),
+            GUID_OVERRIDE: PermissionError("access denied reading SYSVOL"),
+        }, tmp_path)
+
+        assert response["headline"]["gpos_unreadable"] == 1
+        stored = read_scan(response["files"]["scan"]["path"])
+        document = Path(response["files"]["report"]["path"]).read_text(
+            encoding="utf-8")
+        assert stored["scan"]["gpos_unreadable"] == 1
+        assert "GPO read failures" in document
+
+    def test_schema_info_advertises_the_snapshot_tool(self, tools):
+        info = tools.get_schema_info()
+
+        assert info["operations"] == ["scan_hardening",
+                                      "write_hardening_report",
+                                      "write_hardening_scan",
+                                      "write_hardening_snapshot",
+                                      "diff_hardening_scans"]
+        assert "write_hardening_snapshot" in info["writes_files"]
+        assert info["snapshot_files"] == ["scan.json", "report.html"]
+        assert info["snapshot_format_version"]
+        notes = " ".join(info["notes"])
+        assert "runs the scan ONCE" in notes
+        assert "no colon" in notes
+
+
+class TestDiffingSnapshotFoldersThroughTheTool:
+    """Acceptance 6 through the tool: two folders in, one diff out."""
+
+    def snapshot(self, tools, output_dir, contents_by_guid=None):
+        def read_sysvol(sysvol_path, include_registry=True,
+                        max_value_chars=6000):
+            for guid, contents in (contents_by_guid or {}).items():
+                if guid in sysvol_path:
+                    return contents
+            return sysvol_contents()
+
+        with patch.dict(sys.modules, {"smbclient": Mock()}), \
+             patch.object(GPOTools, "_read_gpo_sysvol",
+                          side_effect=read_sysvol):
+            return json.loads(
+                tools.write_hardening_snapshot(str(output_dir))[0].text)
+
+    def diff(self, tools, before, after):
+        return json.loads(tools.diff_hardening_scans(str(before),
+                                                     str(after))[0].text)
+
+    def test_two_snapshot_folders_diff_without_naming_scan_json(
+            self, tools, mock_ldap_manager, tmp_path):
+        """The workflow this WP is for: remediate, snapshot, diff the folders."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        before = self.snapshot(tools, tmp_path,
+                               {GUID_SIGNING: sysvol_contents()})
+        after = self.snapshot(tools, tmp_path,
+                              {GUID_SIGNING: sysvol_contents(*LDAP_LINES)})
+
+        response = self.diff(tools, before["snapshot_dir"],
+                             after["snapshot_dir"])
+
+        assert response["success"] is True
+        assert response["attribution"]["verdict"] == "domain"
+        improved = {e["control_id"] for e in response["improvements"]}
+        assert "DEVORE-03-LDAP-SERVER-SIGNING" in improved
+        assert response["regressions"] == []
+
+    def test_folders_give_the_same_result_as_the_two_scan_json_paths(
+            self, tools, mock_ldap_manager, tmp_path):
+        """Acceptance 6's equality, asserted rather than assumed."""
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")],
+                  [link_entry(BASE_DN, GUID_SIGNING)])
+        before = self.snapshot(tools, tmp_path,
+                               {GUID_SIGNING: sysvol_contents()})
+        after = self.snapshot(tools, tmp_path,
+                              {GUID_SIGNING: sysvol_contents(*LDAP_LINES)})
+
+        from_folders = self.diff(tools, before["snapshot_dir"],
+                                 after["snapshot_dir"])
+        from_files = self.diff(tools, before["files"]["scan"]["path"],
+                               after["files"]["scan"]["path"])
+
+        assert from_folders == from_files
+
+    def test_a_directory_with_no_scan_json_is_refused_clearly(
+            self, tools, mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        before = self.snapshot(tools, tmp_path)
+        not_a_snapshot = tmp_path / "downloads"
+        not_a_snapshot.mkdir()
+
+        response = self.diff(tools, before["snapshot_dir"], not_a_snapshot)
+
+        assert response["success"] is False
+        assert str(not_a_snapshot) in response["error"]
+        assert "holds no scan.json" in response["error"]
+        assert "write_hardening_snapshot" in response["error"]
+        assert response["operation"] == "diff_hardening_scans"
+
+    def test_diffing_folders_touches_no_directory(self, tools,
+                                                  mock_ldap_manager, tmp_path):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
+        before = self.snapshot(tools, tmp_path)
+        after = self.snapshot(tools, tmp_path)
+        mock_ldap_manager.reset_mock()
+
+        with patch.object(GPOTools, "_read_gpo_sysvol",
+                          side_effect=AssertionError("SYSVOL must not be read")):
+            response = self.diff(tools, before["snapshot_dir"],
+                                 after["snapshot_dir"])
+
+        assert response["success"] is True
+        assert mock_ldap_manager.search.called is False
+
+
 class TestDiffHardeningScans:
     """The diff tool's wiring. It reads two files and touches no directory.
 
@@ -1240,10 +1736,12 @@ class TestSchemaInfo:
         assert info["operations"] == ["scan_hardening",
                                       "write_hardening_report",
                                       "write_hardening_scan",
+                                      "write_hardening_snapshot",
                                       "diff_hardening_scans"]
         assert info["read_only"] is True
         assert info["writes_files"] == ["write_hardening_report",
-                                        "write_hardening_scan"]
+                                        "write_hardening_scan",
+                                        "write_hardening_snapshot"]
         assert info["catalog_version"]
         assert "DEVORE-03-LDAP-SERVER-SIGNING" in info["control_ids"]
         assert info["unscored_control_ids"]
