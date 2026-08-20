@@ -75,17 +75,31 @@ careful about which it claims:
 
 from __future__ import annotations
 
+import base64
 import socket
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import NameOID
 
 from .credentials import redact
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .settings import ConnectionSettings
 
 # --------------------------------------------------------------------------- #
 # Where a certificate came from. Never merged: the whole comparison below is
@@ -517,16 +531,439 @@ def inspect_ldaps_chain(host: str, port: int = DEFAULT_LDAPS_PORT, *,
                            leaf_only=len(certificates) == 1)
 
 
+# --------------------------------------------------------------------------- #
+# The second source: what the directory itself publishes
+# --------------------------------------------------------------------------- #
+#
+# An enterprise CA writes its own certificates into the configuration naming
+# context, and every domain member reads them from there. Three containers
+# matter, and they are listed separately rather than swept up in one subtree
+# search because they mean different things and an operator reading the panel
+# needs to know which one a certificate came from:
+#
+#   CN=Certification Authorities   the trusted *roots* the forest publishes.
+#                                  This is the container whose contents a
+#                                  domain member ends up with in Trusted Root.
+#   CN=NTAuthCertificates          the CAs permitted to issue certificates that
+#                                  authenticate to AD. A CA here but not in the
+#                                  container above is a different mistake.
+#   CN=Enrollment Services         one entry per issuing CA that is actually
+#                                  online and enrolling -- which is where a
+#                                  domain controller's own certificate comes
+#                                  from, so this is normally where the
+#                                  intermediate in the presented chain appears.
+
+PKI_SERVICES_RDN = "CN=Public Key Services,CN=Services"
+
+CONTAINER_ROOTS = "Certification Authorities"
+CONTAINER_NTAUTH = "NTAuthCertificates"
+CONTAINER_ENROLLMENT = "Enrollment Services"
+
+#: The attribute holding the DER certificate on every one of those objects.
+CA_CERTIFICATE_ATTRIBUTE = "cACertificate"
+
+#: Only entries that actually carry a certificate. A CA object with no
+#: ``cACertificate`` is not evidence of anything and would render as an empty
+#: row.
+_CA_FILTER = f"({CA_CERTIFICATE_ATTRIBUTE}=*)"
+
+_SEARCH_ATTRIBUTES = ("cn", CA_CERTIFICATE_ATTRIBUTE, "objectClass")
+
+
+def configuration_dn(base_dn: str) -> str:
+    """``DC=example,DC=com`` → ``CN=Configuration,DC=example,DC=com``.
+
+    Derived rather than asked for. The configuration naming context is always
+    ``CN=Configuration`` under the forest root, and a Connection screen that
+    made an operator type a fourth DN to look at a certificate would be asking
+    for input with one correct answer.
+    """
+    base = str(base_dn or "").strip()
+    return f"CN=Configuration,{base}" if base else ""
+
+
+def pki_container_dns(base_dn: str) -> Tuple[Tuple[str, str], ...]:
+    """``((label, dn), …)`` for the three containers, in reading order."""
+    configuration = configuration_dn(base_dn)
+    if not configuration:
+        return ()
+    services = f"{PKI_SERVICES_RDN},{configuration}"
+    return tuple(
+        (label, f"CN={label},{services}")
+        for label in (CONTAINER_ROOTS, CONTAINER_NTAUTH, CONTAINER_ENROLLMENT))
+
+
+def _der_candidates(value: Any) -> List[bytes]:
+    """Every plausible DER body inside one ``cACertificate`` attribute value.
+
+    ldap3 hands binary attributes back as ``bytes`` most of the time, as a
+    ``list`` of them when the attribute is multi-valued — ``NTAuthCertificates``
+    routinely holds several — and occasionally as text, because
+    :meth:`LDAPManager.search` stringifies anything without a ``.value``. All
+    three shapes appear against real directories, so all three are handled and
+    the caller decides what parses.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return [bytes(value)]
+    if isinstance(value, (list, tuple, set)):
+        out: List[bytes] = []
+        for item in value:
+            out.extend(_der_candidates(item))
+        return out
+    text = str(value).strip()
+    if not text:
+        return []
+    if "-----BEGIN CERTIFICATE-----" in text:
+        try:
+            return [x509.load_pem_x509_certificate(
+                text.encode("ascii")).public_bytes(serialization.Encoding.DER)]
+        except Exception:
+            return []
+    candidates: List[bytes] = []
+    try:
+        candidates.append(base64.b64decode(text, validate=True))
+    except Exception:
+        pass
+    try:
+        candidates.append(text.encode("latin-1"))
+    except Exception:
+        pass
+    return candidates
+
+
+@dataclass(frozen=True)
+class ContainerResult:
+    """One PKI container: what it held, or why it could not be read.
+
+    Per container rather than one aggregate, so a permissions problem on
+    ``NTAuthCertificates`` does not silently discard the roots that were read
+    fine — and so the panel can say which container each certificate came from.
+    """
+
+    label: str
+    dn: str
+    ok: bool = False
+    count: int = 0
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class DirectoryCertificates:
+    """The CA certificates the directory publishes, or why there are none.
+
+    ``ok`` means *the directory was read*. ``ok`` with an empty
+    :attr:`certificates` is a real and different state — an AD deployment with
+    no enterprise CA at all — and the comparison treats it as "could not check",
+    never as agreement.
+    """
+
+    ok: bool = False
+    certificates: Tuple[CertificateFacts, ...] = ()
+    error: str = ""
+    containers: Tuple[ContainerResult, ...] = ()
+    #: Whether the LDAP connection that carried this read validated the
+    #: controller's certificate. When False, the directory content and the
+    #: presented chain arrived over the *same* unauthenticated channel, and an
+    #: agreement between them is worth much less. Read from the operator's
+    #: setting; never set by this module.
+    validated: bool = False
+    base_dn: str = ""
+
+    @property
+    def fingerprints(self) -> Dict[str, CertificateFacts]:
+        return {item.fingerprint_hex: item for item in self.certificates}
+
+
+def ca_certificates_from_directory(settings: "ConnectionSettings",
+                                   password: str,
+                                   factory: Optional[Any] = None
+                                   ) -> DirectoryCertificates:
+    """Read the CA certificates Active Directory publishes for this forest.
+
+    Uses the ordinary read-only LDAP connection the rest of the app uses —
+    :func:`aditor.app.connection.build_manager`, with the operator's settings
+    **exactly as configured**. In particular this function does not turn
+    certificate validation off to get its answer, and does not turn it on:
+    whichever the operator chose is what is used, and the choice is reported
+    back in :attr:`DirectoryCertificates.validated` so the comparison can say
+    how independent the two sources really were.
+
+    That has a consequence worth being clear about. In the common case —
+    validation on, root missing — this read fails for the same certificate
+    reason the connection test failed, and the comparison comes back
+    "unavailable". That is the honest answer. The operator can knowingly clear
+    'Validate certificate' for one diagnostic pass to get a corroboration that
+    is weaker but not worthless, and the panel says exactly that; what the app
+    will not do is quietly clear it for them.
+
+    Args:
+        settings: The connection as it stands on screen.
+        password: The bind password, held for this call only.
+        factory: Injected manager builder, for tests. Production passes nothing.
+
+    Returns:
+        A :class:`DirectoryCertificates`. Never raises for a directory problem —
+        a failed read is a rendered outcome, not an exception.
+    """
+    base_dn = str(getattr(settings, "base_dn", "") or "").strip()
+    containers = pki_container_dns(base_dn)
+    if not containers:
+        return DirectoryCertificates(
+            ok=False, base_dn=base_dn,
+            validated=bool(getattr(settings, "validate_certificate", False)),
+            error="No Base DN, so there is no configuration naming context to "
+                  "read. Fill in the Base DN on the Connection screen.")
+
+    from .connection import build_manager
+
+    validated = bool(getattr(settings, "validate_certificate", False))
+    try:
+        manager = build_manager(settings, password, factory)
+    except Exception as exc:
+        return DirectoryCertificates(
+            ok=False, base_dn=base_dn, validated=validated,
+            error=redact(str(exc)))
+
+    results: List[ContainerResult] = []
+    certificates: List[CertificateFacts] = []
+    seen: Set[str] = set()
+    failures: List[str] = []
+
+    try:
+        for label, dn in containers:
+            try:
+                entries = manager.search(
+                    search_base=dn,
+                    search_filter=_CA_FILTER,
+                    attributes=list(_SEARCH_ATTRIBUTES)) or []
+            except Exception as exc:
+                message = redact(str(exc))
+                failures.append(f"{label}: {message}")
+                results.append(ContainerResult(label=label, dn=dn, ok=False,
+                                               error=message))
+                continue
+            found = 0
+            for entry in entries:
+                entry = entry if isinstance(entry, dict) else {}
+                attributes = entry.get("attributes")
+                attributes = attributes if isinstance(attributes, dict) else {}
+                entry_dn = str(entry.get("dn") or dn)
+                raw = attributes.get(CA_CERTIFICATE_ATTRIBUTE)
+                for candidate in _der_candidates(raw):
+                    try:
+                        facts = certificate_facts(candidate, SOURCE_DIRECTORY,
+                                                  entry_dn)
+                    except ValueError:
+                        continue
+                    found += 1
+                    if facts.fingerprint_hex in seen:
+                        # The same root legitimately appears in more than one
+                        # container. Counted per container, listed once.
+                        break
+                    seen.add(facts.fingerprint_hex)
+                    certificates.append(facts)
+                    break
+            results.append(ContainerResult(label=label, dn=dn, ok=True,
+                                           count=found))
+    finally:
+        try:
+            manager.disconnect()
+        except Exception:
+            pass
+
+    any_read = any(item.ok for item in results)
+    return DirectoryCertificates(
+        ok=any_read,
+        certificates=tuple(certificates),
+        error="; ".join(failures),
+        containers=tuple(results),
+        validated=validated,
+        base_dn=base_dn)
+
+
+# --------------------------------------------------------------------------- #
+# The comparison — three outcomes, and "unavailable" is one of them
+# --------------------------------------------------------------------------- #
+
+CORROBORATION_AGREE = "agree"
+CORROBORATION_DISAGREE = "disagree"
+CORROBORATION_UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class Corroboration:
+    """Whether the presented chain terminates in a CA the directory publishes.
+
+    Three outcomes, and the third is not a shade of the first.
+    ``unavailable`` means *nobody checked* — no chain, no directory read, or a
+    chain whose anchor never arrived. Collapsing it into ``agree`` would turn
+    the one part of this feature that is better than trust-on-first-use into
+    decoration, so the outcome is a string with three values rather than a
+    boolean with a default.
+    """
+
+    outcome: str
+    headline: str
+    detail: str
+    #: The directory-published certificate the presented anchor matched.
+    match: Optional[CertificateFacts] = None
+    #: Certificates that matched somewhere *other* than the anchor. A chain
+    #: whose intermediate is published but whose anchor is not is a specific and
+    #: alarming shape, and it is not an agreement.
+    partial: Tuple[CertificateFacts, ...] = ()
+    #: True when the directory read was itself certificate-validated, so the
+    #: two sources were genuinely independent.
+    independent: bool = False
+    #: Why, when the outcome is ``unavailable``. Never rendered as reassurance.
+    reason: str = ""
+
+    @property
+    def agrees(self) -> bool:
+        return self.outcome == CORROBORATION_AGREE
+
+    @property
+    def disagrees(self) -> bool:
+        return self.outcome == CORROBORATION_DISAGREE
+
+    @property
+    def unavailable(self) -> bool:
+        return self.outcome == CORROBORATION_UNAVAILABLE
+
+
+_UNAVAILABLE_HEADLINE = (
+    "Not checked against Active Directory — this is not a pass.")
+
+
+def _unavailable(reason: str, detail: str) -> Corroboration:
+    return Corroboration(outcome=CORROBORATION_UNAVAILABLE,
+                         headline=_UNAVAILABLE_HEADLINE,
+                         detail=detail, reason=reason)
+
+
+def compare_chain_with_directory(chain: ChainInspection,
+                                 directory: DirectoryCertificates
+                                 ) -> Corroboration:
+    """Compare the presented chain's anchor with the directory's CA list.
+
+    The question is deliberately narrow: **does the chain terminate in a CA
+    that Active Directory publishes?** A match there is meaningful because an
+    interceptor would have needed to control the TLS handshake *and* the LDAP
+    responses carrying the configuration container. A match anywhere else is
+    not the same claim and is reported as :attr:`Corroboration.partial` under a
+    ``disagree``.
+    """
+    if not chain.ok or not chain.certificates:
+        return _unavailable(
+            "no chain was read",
+            "No certificate chain could be read from the server, so there is "
+            "nothing to compare. The connection error above is the thing to "
+            "fix first.")
+    anchor = chain.anchor
+    if chain.leaf_only and anchor is not None and not anchor.self_issued:
+        return _unavailable(
+            "the server sent only its own certificate",
+            "Only the server's own certificate arrived, not the CA "
+            "certificates above it, so the chain has no visible anchor to "
+            "compare. A domain controller normally sends the whole chain; if "
+            "it does not, get the CA certificate from the CA server itself.")
+    if not directory.ok:
+        return _unavailable(
+            "the directory could not be read",
+            "Active Directory could not be read for its published CA "
+            f"certificates{': ' + directory.error if directory.error else ''}. "
+            "Until that read succeeds, the chain above is corroborated by "
+            "nothing except itself.")
+    if not directory.certificates:
+        return _unavailable(
+            "the directory publishes no CA certificates",
+            "The configuration naming context was read but published no CA "
+            "certificates, so there is nothing to compare against. That is "
+            "normal in a domain with no enterprise CA — and it means this "
+            "chain cannot be corroborated from the directory at all.")
+
+    published = directory.fingerprints
+    match = published.get(anchor.fingerprint_hex) if anchor else None
+    partial = tuple(published[item.fingerprint_hex]
+                    for item in chain.certificates
+                    if item.fingerprint_hex in published
+                    and (anchor is None
+                         or item.fingerprint_hex != anchor.fingerprint_hex))
+
+    if match is not None:
+        detail = (
+            "The certificate the chain terminates in is byte-for-byte one of "
+            "the CA certificates published in this forest's configuration "
+            f"naming context ({match.directory_dn or directory.base_dn}). "
+            "Two sources agree.")
+        if not directory.validated:
+            detail += (
+                " Note that certificate validation is currently off for this "
+                "connection, so the directory was read over the same "
+                "unauthenticated channel as the chain itself. Anything able to "
+                "rewrite one could have rewritten both. This raises the bar; "
+                "it is not proof.")
+        else:
+            detail += (
+                " The directory read was itself certificate-validated, so the "
+                "two sources are independent: an interceptor would have had to "
+                "control the TLS handshake and the directory content.")
+        return Corroboration(
+            outcome=CORROBORATION_AGREE,
+            headline="The presented chain terminates in a CA that Active "
+                     "Directory also publishes.",
+            detail=detail, match=match, partial=partial,
+            independent=directory.validated)
+
+    detail = (
+        "The certificate this chain terminates in "
+        f"({anchor.label if anchor else 'unknown'}) is not any of the "
+        f"{len(directory.certificates)} CA certificate(s) published in this "
+        "forest's configuration naming context. In a domain with an enterprise "
+        "CA that is what an intercepted connection looks like. Do not trust "
+        "this certificate on the strength of anything on this screen: confirm "
+        "the fingerprint on the CA server itself, and if it does not match, "
+        "treat the connection as compromised and stop using it.")
+    if partial:
+        detail += (
+            " One certificate in the chain *is* published in the directory, "
+            "but it is not the one the chain ends at — a chain that swaps its "
+            "anchor while keeping a genuine intermediate is a deliberate shape, "
+            "not a misconfiguration.")
+    return Corroboration(
+        outcome=CORROBORATION_DISAGREE,
+        headline="The presented chain does not terminate in any CA that Active "
+                 "Directory publishes.",
+        detail=detail, match=None, partial=partial,
+        independent=directory.validated)
+
+
 __all__ = [
+    "CA_CERTIFICATE_ATTRIBUTE",
+    "CONTAINER_ENROLLMENT",
+    "CONTAINER_NTAUTH",
+    "CONTAINER_ROOTS",
+    "CORROBORATION_AGREE",
+    "CORROBORATION_DISAGREE",
+    "CORROBORATION_UNAVAILABLE",
     "DEFAULT_LDAPS_PORT",
     "EXPIRY_WARNING_DAYS",
+    "PKI_SERVICES_RDN",
     "SOURCE_DIRECTORY",
     "SOURCE_LABELS",
     "SOURCE_PRESENTED",
     "CertificateFacts",
     "ChainInspection",
+    "ContainerResult",
+    "Corroboration",
+    "DirectoryCertificates",
+    "ca_certificates_from_directory",
     "certificate_facts",
+    "compare_chain_with_directory",
+    "configuration_dn",
     "format_fingerprint",
     "inspect_ldaps_chain",
     "parse_ldap_url",
+    "pki_container_dns",
 ]
