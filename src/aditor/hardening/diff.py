@@ -6,6 +6,11 @@ lookup — :func:`diff_scans` takes two dicts and returns one dict, and
 diff out; there is deliberately no scan store, no history directory and no
 trend analysis across N scans.
 
+Either input may also be a snapshot folder from ``write_hardening_snapshot``, in
+which case the ``scan.json`` inside it is read. That is a path-resolution
+convenience and nothing more: it happens before any comparison, so diffing two
+folders is the same call as diffing the two payloads they hold.
+
 The whole correctness of this module
 ------------------------------------
 
@@ -66,6 +71,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .catalog import SEVERITY_RANK
 from .scanfile import ScanFileError, read_scan, validate_scan_payload
+from .snapshot import resolve_scan_path
 
 # Version of the *diff payload's* shape, so a stored or quoted diff can say
 # which comparator produced it.
@@ -1037,18 +1043,27 @@ def diff_scan_files(before_path: Any, after_path: Any) -> Dict[str, Any]:
     """Read two stored scans and diff them.
 
     The only file I/O in this module, and the only thing separating it from
-    :func:`diff_scans`. Each side's path is carried into the payload's
-    ``scans.<side>.source`` so a diff says which files produced it.
+    :func:`diff_scans`.
+
+    Either side may be a ``.json`` scan file **or** a snapshot folder written by
+    ``write_hardening_snapshot``, in which case its ``scan.json`` is read — see
+    :func:`aditor.hardening.snapshot.resolve_scan_path`. Resolution happens
+    before anything else, so ``scans.<side>.source`` always names the file that
+    was actually read and diffing two folders gives exactly the result diffing
+    the two ``scan.json`` paths gives.
 
     Raises:
-        ScanFileError: a path is unusable, or a file is not a scan payload.
+        ScanFileError: a path is unusable, a directory holds no ``scan.json``,
+            or a file is not a scan payload.
         ScanDiffError: the two scans describe different domains.
     """
-    before = read_scan(before_path)
-    after = read_scan(after_path)
-    before = dict(before, source_path=str(before_path))
-    after = dict(after, source_path=str(after_path))
-    return diff_scans(before, after, str(before_path), str(after_path))
+    before_file = resolve_scan_path(before_path)
+    after_file = resolve_scan_path(after_path)
+    before = read_scan(before_file)
+    after = read_scan(after_file)
+    before = dict(before, source_path=str(before_file))
+    after = dict(after, source_path=str(after_file))
+    return diff_scans(before, after, str(before_file), str(after_file))
 
 
 __all__ = [

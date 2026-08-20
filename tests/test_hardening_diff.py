@@ -56,6 +56,7 @@ from aditor.hardening.diff import (
     rollout_direction,
 )
 from aditor.hardening.scanfile import write_scan
+from aditor.hardening.snapshot import write_snapshot
 
 BASE_DN = "DC=test,DC=local"
 OTHER_BASE_DN = "DC=other,DC=local"
@@ -1262,6 +1263,91 @@ class TestDiffScanFiles:
         assert diff["unchanged"] == 1
         assert any("one scan compared with itself" in caveat
                    for caveat in diff["attribution"]["caveats"])
+
+
+class TestDiffingSnapshotFolders:
+    """Acceptance 6: a snapshot folder stands in for the scan.json inside it.
+
+    Once a scan is a folder, ``diff <folder-a> <folder-b>`` is the natural thing
+    to type, and a caller should not have to reach inside for the payload.
+    """
+
+    def improved_pair(self):
+        """A before/after pair where the signing control was remediated."""
+        before = scan([finding(SIGNING_CONTROL, result="fail",
+                               rollout_state="not_started",
+                               source="not-configured", found=[])])
+        after = later(before)
+        after["findings"][0].update(result="pass", rollout_state="enforced")
+        after["findings"][0]["evidence"] = {"source": "gpo",
+                                            "found": [match(2)],
+                                            "expected": {}}
+        after["counts"] = counts_for(after["findings"])
+        return before, after
+
+    def test_two_snapshot_folders_diff_without_naming_scan_json(self, tmp_path):
+        before, after = self.improved_pair()
+        first = write_snapshot(before, str(tmp_path))
+        second = write_snapshot(after, str(tmp_path))
+
+        diff = diff_scan_files(str(first.folder), str(second.folder))
+
+        assert diff["attribution"]["verdict"] == ATTRIBUTION_DOMAIN
+        assert entry_for(diff["improvements"], SIGNING_CONTROL) is not None
+
+    def test_folders_give_exactly_what_the_two_scan_json_paths_give(self,
+                                                                   tmp_path):
+        """The headline of acceptance 6: same result, either way in."""
+        before, after = self.improved_pair()
+        first = write_snapshot(before, str(tmp_path))
+        second = write_snapshot(after, str(tmp_path))
+
+        from_folders = diff_scan_files(str(first.folder), str(second.folder))
+        from_files = diff_scan_files(str(first.scan_path),
+                                     str(second.scan_path))
+
+        assert from_folders == from_files
+
+    def test_the_diff_names_the_scan_file_it_actually_read(self, tmp_path):
+        """``source`` has to name the file, not the folder: a reader asking
+        "which payload produced this?" needs the payload's path."""
+        before, after = self.improved_pair()
+        first = write_snapshot(before, str(tmp_path))
+        second = write_snapshot(after, str(tmp_path))
+
+        scans = diff_scan_files(str(first.folder), str(second.folder))["scans"]
+
+        assert scans["before"]["source"] == str(first.scan_path)
+        assert scans["after"]["source"] == str(second.scan_path)
+
+    def test_a_folder_and_a_file_can_be_mixed(self, tmp_path):
+        """The existing tool takes files; adding folders must not force a choice."""
+        before, after = self.improved_pair()
+        snapshot = write_snapshot(before, str(tmp_path))
+        after_path = tmp_path / "after.json"
+        write_scan(after, str(after_path))
+
+        diff = diff_scan_files(str(snapshot.folder), str(after_path))
+
+        assert entry_for(diff["improvements"], SIGNING_CONTROL) is not None
+
+    def test_a_directory_with_no_scan_json_is_refused_clearly(self, tmp_path):
+        before, _ = self.improved_pair()
+        snapshot = write_snapshot(before, str(tmp_path))
+        not_a_snapshot = tmp_path / "downloads"
+        not_a_snapshot.mkdir()
+
+        with pytest.raises(ScanFileError) as raised:
+            diff_scan_files(str(snapshot.folder), str(not_a_snapshot))
+
+        assert str(not_a_snapshot) in str(raised.value)
+        assert "holds no scan.json" in str(raised.value)
+
+    def test_a_plain_file_path_is_unaffected_by_the_folder_support(self,
+                                                                  tmp_path):
+        """The pre-existing error messages must still name what was asked for."""
+        with pytest.raises(ScanFileError, match="does not exist"):
+            diff_scan_files(str(tmp_path / "a.json"), str(tmp_path / "b.json"))
 
 
 # --------------------------------------------------------------------------- #
