@@ -401,7 +401,7 @@ version, catalog version, timestamp, domain and base DN) and the headline counts
 Pass control_ids to scan a subset, though a scan meant for diffing should
 normally cover the whole catalog."""
 
-DIFF_HARDENING_SCANS_DESC = """Compare two hardening scans: did my fix land, and did anything regress?
+DIFF_HARDENING_SCANS_DESC = """Compare two hardening scans: did my fix land, did anything regress?
 
 Reads two .json files written by write_hardening_scan and returns a structured
 diff, keyed on control_id. This tool touches no directory at all — no LDAP, no

@@ -990,8 +990,14 @@ def _counts_delta(before: Dict[str, Any],
 
 def _scan_metadata(before: Dict[str, Any],
                    after: Dict[str, Any]) -> Dict[str, Any]:
-    """Which two scans this is, so a diff quoted in a ticket identifies itself."""
-    before_scan, after_scan = _scan_block(before), _scan_block(after)
+    """Which two scans this is, so a diff quoted in a ticket identifies itself.
+
+    ``base_dn`` and ``domain`` come from the *before* scan alone because
+    :func:`diff_scans` has already established the base DNs match; where the
+    ``domain`` strings differ under one base DN, each side's own value is in its
+    own block and ``attribution.caveats`` says so.
+    """
+    before_scan = _scan_block(before)
     return {
         "base_dn": before_scan.get("base_dn"),
         "domain": before_scan.get("domain"),
