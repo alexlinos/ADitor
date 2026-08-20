@@ -35,7 +35,7 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 | DEVORE-02-SMBV1-REMOVAL | 2 | directory-state | ⚠️ feature state, no reg |
 | DEVORE-03-LDAP-SERVER-SIGNING | 3 | gpo-security-template | ✅ 1/2 quoted |
 | DEVORE-03-LDAP-CLIENT-SIGNING | 3 | gpo-security-template | ✅ 0/1/2 quoted; os_default 1 |
-| DEVORE-03-LDAP-DIAG-LOGGING | 3 | gpo-registry-pol | ✅ =2 (audit helper) |
+| DEVORE-03-LDAP-DIAG-LOGGING | 3 | gpo-registry-pol | ✅ floor >=2 (audit helper; levels 0–5 per MS) |
 | DEVORE-04-KERB-CONFIGURE-ENCTYPES | 4 | gpo-security-template | ❌ reg path not stated |
 | DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES | 4 | gpo-registry-pol | ✅ 0x38 quoted |
 | DEVORE-04-MSDS-SUPPORTEDENCTYPES | 4 | directory-state | ⚠️ per-account attribute |
@@ -297,10 +297,15 @@ pragmatic route. Until then, a browser printing the HTML covers the rare case �
   assert:
     registry_path: 'HKLM\SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics\16 LDAP Interface Events'
     type: REG_DWORD
-    expected: 2
-    operator: equals
+    final_expected: 2        # a FLOOR, not an exact value
+    operator: gte            # levels run 0-5 with increasing verbosity (MS, "AD and
+                             # LDS diagnostic event logging"; default 0), so a DC at 3
+                             # logs strictly more than one at 2 and still emits 2889
   severity: informational
-  caveats: ["Generates 2889 (client IP + account + Binding Type). 2887=daily unsigned volume; 2888=rejected after enforcement."]
+  caveats:
+    - "Generates 2889 (client IP + account + Binding Type). 2887=daily unsigned volume; 2888=rejected after enforcement."
+    - "Leaving it raised permanently is noisy; normally raised for the audit window only."
+    - "`equals 2` was a false negative (fixed P2-WP5): a DC at 3 is MORE compliant and scored fail."
 
 # PART 4 — Enforcing AES for Kerberos (GPO + explicit DC reg + directory-state)
 - id: DEVORE-04-KERB-CONFIGURE-ENCTYPES
