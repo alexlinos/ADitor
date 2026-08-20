@@ -119,6 +119,17 @@ def test_expected_security_tools_are_registered(server):
     assert expected <= set(server._tool_handlers)
 
 
+def test_password_policy_violations_exposes_include_disabled():
+    """P2-WP6: the disabled-account opt-in has to reach the MCP schema."""
+    spec = next(s for s in TOOLS if s.name == "get_password_policy_violations")
+    parameter = spec.input_schema["properties"]["include_disabled"]
+    assert parameter["type"] == "boolean"
+    assert parameter["default"] is False
+    assert "required" not in spec.input_schema
+    # The description has to state the scope, or a caller cannot read the count.
+    assert "include_disabled" in spec.description
+
+
 def test_expected_tool_count(server):
     # 9 user + 8 group + 9 computer + 7 OU + 7 security + 4 GPO
     # + 2 hardening + 3 system = 49

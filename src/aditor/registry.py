@@ -253,10 +253,15 @@ GET_INACTIVE_USERS_DESC = """Get users who have not logged in for a number of da
 
 Identifies inactive user accounts, optionally including disabled accounts."""
 
-GET_PASSWORD_POLICY_VIOLATIONS_DESC = """Get users with password policy violations.
+GET_PASSWORD_POLICY_VIOLATIONS_DESC = """Get user accounts with password policy violations.
 
 Identifies accounts with expired passwords, never-expiring passwords, and other
-policy non-compliance."""
+policy non-compliance. Covers user accounts only - machine accounts rotate their
+own passwords and are excluded - and by default only enabled accounts;
+include_disabled=true adds the disabled ones. An account carrying
+DONT_EXPIRE_PASSWORD is exempt from maxPwdAge, so it is never reported as
+expired. Whatever was left out is counted in excluded_counts, so a short list
+can be told apart from a clean domain."""
 
 AUDIT_ADMIN_ACCOUNTS_DESC = """Audit administrative accounts for security compliance.
 
@@ -895,8 +900,13 @@ TOOLS: List[ToolSpec] = [
     ToolSpec(
         "get_password_policy_violations",
         GET_PASSWORD_POLICY_VIOLATIONS_DESC,
-        {"type": "object", "properties": {}},
-        lambda t, a: t.security.get_password_policy_violations(),
+        {
+            "type": "object",
+            "properties": {
+                "include_disabled": {"type": "boolean", "description": "Include disabled accounts in results", "default": False},
+            },
+        },
+        lambda t, a: t.security.get_password_policy_violations(a.get("include_disabled", False)),
     ),
     ToolSpec(
         "audit_admin_accounts",
