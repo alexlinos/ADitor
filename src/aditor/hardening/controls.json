@@ -1,5 +1,5 @@
 {
-  "catalog_version": "2026.08.2",
+  "catalog_version": "2026.08.3",
   "spec": "docs/HARDENING_CATALOG.md",
   "baseline": {
     "primary_source": "Jerry Devore, \"Active Directory Hardening Series\", Microsoft Core Infrastructure and Security Blog (series verified Aug 2026).",

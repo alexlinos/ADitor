@@ -74,7 +74,7 @@ from . import SCAN_ENGINE_VERSION
 # Version of the *report layout*. Bumped when the rendered structure changes, so
 # a stored report can say which renderer produced it alongside which engine and
 # which catalog scored it.
-REPORT_FORMAT_VERSION = "1.2.0"
+REPORT_FORMAT_VERSION = "1.3.0"
 
 # The string that identifies a file as one of our reports. ``write_report``
 # refuses to overwrite an existing file that does not carry it, so a mistyped
