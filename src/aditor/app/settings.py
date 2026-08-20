@@ -107,8 +107,17 @@ class ConnectionSettings:
         return replace(self, **changes)
 
     @property
-    def credential_ref(self) -> CredentialRef:
-        """Which credential-store item holds this connection's password."""
+    def credential_ref(self) -> Optional[CredentialRef]:
+        """Which credential-store item holds this password, if there is one.
+
+        ``None`` rather than a raise when the bind account is still blank. A
+        fresh install has an empty form, and a *property* that raises in that
+        state is a trap: anything that walks this object's attributes — a
+        debugger, a serialiser, or pywebview's JS-API generator, which is how
+        this was actually found — blows up on an ordinary empty connection.
+        """
+        if not str(self.bind_dn or "").strip():
+            return None
         return CredentialRef(account=self.bind_dn,
                              service=self.credential_service)
 
@@ -317,9 +326,12 @@ def persist_connection(settings: ConnectionSettings, password: str,
             "it — enter it and save again.")
 
     credential_store = store or get_store()
+    ref = settings.credential_ref
+    if ref is None:  # pragma: no cover - missing_fields() already caught this
+        raise PersistRefused(
+            "cannot save this connection without a bind account.")
     try:
-        credential_store.require().set_password(settings.credential_ref,
-                                                password)
+        credential_store.require().set_password(ref, password)
     except CredentialStoreUnavailable as exc:
         raise PersistRefused(
             f"{exc} Nothing has been saved.") from exc
@@ -364,12 +376,13 @@ def load_password(settings: ConnectionSettings,
     there but unreadable, which the caller must not treat as "no password
     saved" — see :meth:`CredentialStore.get_password`.
     """
-    if not str(settings.bind_dn or "").strip():
+    ref = settings.credential_ref
+    if ref is None:
         return None
     credential_store = store or get_store()
     if not credential_store.available():
         return None
-    return credential_store.get_password(settings.credential_ref)
+    return credential_store.get_password(ref)
 
 
 __all__ = [

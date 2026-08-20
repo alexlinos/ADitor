@@ -52,6 +52,16 @@ dev = [
 smb = [
     "smbprotocol>=1.10.0,<2.0.0",
 ]
+# Optional: the desktop app (``python -m aditor.app``). Deliberately an extra,
+# not a runtime dependency -- the headless MCP server must keep installing and
+# running on a host with no GUI toolkit at all. Nothing on the server's import
+# path reaches ``aditor.app.shell``, which is the only module that imports
+# pywebview, and it imports it lazily. pywebview drives the OS's own web view
+# (WebView2 on Windows, WebKit on macOS): one dependency instead of a bundled
+# browser, and the shape the PyInstaller packaging work is planned around.
+gui = [
+    "pywebview>=5.0,<6.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/alexlinos/ADitor"
@@ -66,7 +76,15 @@ aditor = "aditor.server:main"
 # The hardening control catalog is data the engine loads at runtime, so it has
 # to travel inside the wheel (and, later, the PyInstaller bundle) — not just sit
 # in the source tree.
-aditor = ["hardening/*.json"]
+aditor = [
+    "hardening/*.json",
+    # The desktop app's window: local HTML/CSS/JS, no CDN and no bundler, so
+    # the files ship as-is and have to travel inside the wheel (and, later, the
+    # PyInstaller bundle) exactly like the control catalog.
+    "app/web/*.html",
+    "app/web/*.css",
+    "app/web/*.js",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"

@@ -37,11 +37,14 @@ Log redaction
 
 No call site in this package passes a password to the logging module, and a
 test asserts that. :class:`SecretRedactingFilter` is the belt to that braces:
-:func:`register_secret` hands a live secret to a filter installed on the
-``aditor`` logger, so even a future edit that logs the wrong variable emits
-``***REDACTED***``. This mirrors the discipline in
-:mod:`aditor.hardening.report`, where every value goes through one escaper so
-no later edit can open a hole.
+:func:`register_secret` hands a live secret to a filter that
+:func:`install_redaction` wires into the log-record factory, so even a future
+edit that logs the wrong variable emits ``***REDACTED***`` — on any logger, at
+any depth. This mirrors the discipline in :mod:`aditor.hardening.report`, where
+every value goes through one escaper so no later edit can open a hole.
+
+Only the desktop app installs it. The headless MCP server does not import this
+module, so its logging behaviour is unchanged.
 """
 
 from __future__ import annotations
@@ -53,7 +56,7 @@ import subprocess
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 # The environment variable the config loader expands, and the placeholder that
 # stands in for the password inside a config file. Both are fixed by
@@ -593,18 +596,41 @@ class SecretRedactingFilter(logging.Filter):
 #: The one filter instance, so ``register_secret`` and the handler agree.
 _FILTER = SecretRedactingFilter()
 
-#: Logger names the filter is attached to. ``aditor`` covers every module in
-#: this package; ``ldap3`` is here because it is the library actually handed the
-#: password, and its debug logging is the one place outside our code that could
-#: emit it.
+#: Logger names the filter is attached to directly. ``aditor`` covers every
+#: module in this package; ``ldap3`` is here because it is the library actually
+#: handed the password, and its debug logging is the one place outside our code
+#: that could emit it.
 _REDACTED_LOGGERS = ("aditor", "ldap3", "smbprotocol")
+
+#: The log-record factory in place before :func:`install_redaction` wrapped it.
+_ORIGINAL_RECORD_FACTORY: Any = None
 
 
 def install_redaction() -> SecretRedactingFilter:
-    """Attach the redaction filter to the loggers that could see a secret.
+    """Scrub registered secrets out of every log record, wherever it is made.
 
-    Idempotent — calling it twice does not double-filter.
+    Redaction is installed at **record creation** rather than only as a filter
+    on a few named loggers, because a ``logging.Filter`` on a logger is *not*
+    applied to records that propagate up from its children — only handler-level
+    filters are. So attaching the filter to ``aditor`` would miss
+    ``aditor.anything.new``, which is exactly the future edit this backstop is
+    for. Wrapping ``logging.getLogRecordFactory`` catches every record in the
+    process regardless of logger and handler topology.
+
+    The filters on the named loggers are kept as a second layer for anything
+    that constructs a :class:`logging.LogRecord` directly rather than through
+    the factory.
+
+    This mutates process-global logging state, so it is called **only from the
+    desktop app** (:class:`aditor.app.api.AditorApi` and
+    :func:`register_secret`). The headless MCP server never reaches this module
+    and its logging is untouched. With no secret registered the scrub is a
+    single empty-set check per record.
+
+    Idempotent — calling it twice does not double-wrap or double-filter.
     """
+    global _ORIGINAL_RECORD_FACTORY
+
     for name in _REDACTED_LOGGERS:
         logger = logging.getLogger(name)
         if _FILTER not in logger.filters:
@@ -612,6 +638,17 @@ def install_redaction() -> SecretRedactingFilter:
         for handler in logger.handlers:
             if _FILTER not in handler.filters:
                 handler.addFilter(_FILTER)
+
+    if _ORIGINAL_RECORD_FACTORY is None:
+        _ORIGINAL_RECORD_FACTORY = logging.getLogRecordFactory()
+
+        def redacting_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+            record = _ORIGINAL_RECORD_FACTORY(*args, **kwargs)
+            _FILTER.filter(record)
+            return record
+
+        logging.setLogRecordFactory(redacting_factory)
+
     return _FILTER
 
 

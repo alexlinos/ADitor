@@ -11,3 +11,7 @@ uvicorn>=0.23.1
 
 # Cryptography for secure connections
 cryptography>=41.0.0,<42.0.0
+
+# The desktop app's dependency (pywebview) is deliberately NOT here: it is the
+# optional `gui` extra in pyproject.toml, so this headless runtime set installs
+# and runs on a host with no GUI toolkit at all.
