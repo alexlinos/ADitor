@@ -17,17 +17,30 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
 from aditor.app.certificates import (
+    CA_CERTIFICATE_ATTRIBUTE,
+    CONTAINER_ENROLLMENT,
+    CONTAINER_NTAUTH,
+    CONTAINER_ROOTS,
+    CORROBORATION_AGREE,
+    CORROBORATION_DISAGREE,
+    CORROBORATION_UNAVAILABLE,
     DEFAULT_LDAPS_PORT,
     EXPIRY_WARNING_DAYS,
     SOURCE_DIRECTORY,
     SOURCE_PRESENTED,
     ChainInspection,
+    DirectoryCertificates,
     _der_from_chain_entry,
+    ca_certificates_from_directory,
     certificate_facts,
+    compare_chain_with_directory,
+    configuration_dn,
     format_fingerprint,
     inspect_ldaps_chain,
     parse_ldap_url,
+    pki_container_dns,
 )
+from aditor.app.settings import ConnectionSettings
 
 from .synthetic_certificates import chain, der, issue
 
@@ -349,3 +362,315 @@ class TestDerNormalisation:
     def test_anything_else_is_none_rather_than_an_exception(self):
         assert _der_from_chain_entry(object()) is None
         assert _der_from_chain_entry(None) is None
+
+
+# --------------------------------------------------------------------------- #
+# The second source of truth: what the directory publishes
+# --------------------------------------------------------------------------- #
+
+BASE_DN = "DC=test,DC=local"
+
+
+def a_connection(**overrides):
+    values = {
+        "server": "ldaps://dc01.test.local:636",
+        "domain": "test.local",
+        "base_dn": BASE_DN,
+        "bind_dn": f"CN=svc-aditor,OU=Service Accounts,{BASE_DN}",
+        "validate_certificate": True,
+    }
+    values.update(overrides)
+    return ConnectionSettings(**values)
+
+
+class StubDirectory:
+    """Stands in for LDAPManager: answers searches from a per-container map."""
+
+    def __init__(self, entries=None, errors=None):
+        self._entries = entries or {}
+        self._errors = errors or {}
+        self.searched = []
+        self.disconnected = False
+
+    def search(self, search_base, search_filter, attributes=None, **kwargs):
+        self.searched.append((search_base, search_filter))
+        for needle, error in self._errors.items():
+            if needle in search_base:
+                raise error
+        for needle, rows in self._entries.items():
+            if needle in search_base:
+                return rows
+        return []
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+def factory_for(manager):
+    def factory(active, security, performance):
+        manager.ad_config = active
+        manager.security_config = security
+        manager.performance_config = performance
+        return manager
+    return factory
+
+
+def ca_entry(certificate, cn="test-CA-Root", container=CONTAINER_ROOTS,
+             attribute=None):
+    return {
+        "dn": f"CN={cn},CN={container},CN=Public Key Services,CN=Services,"
+              f"CN=Configuration,{BASE_DN}",
+        "attributes": {
+            "cn": cn,
+            CA_CERTIFICATE_ATTRIBUTE: (der(certificate) if attribute is None
+                                       else attribute),
+        },
+    }
+
+
+class TestContainerDns:
+    def test_the_configuration_naming_context_is_derived_from_the_base_dn(self):
+        assert configuration_dn(BASE_DN) == f"CN=Configuration,{BASE_DN}"
+        assert configuration_dn("  ") == ""
+
+    def test_the_three_containers_are_the_documented_ones(self):
+        labels = [label for label, _ in pki_container_dns(BASE_DN)]
+        assert labels == [CONTAINER_ROOTS, CONTAINER_NTAUTH,
+                          CONTAINER_ENROLLMENT]
+        first = dict(pki_container_dns(BASE_DN))[CONTAINER_ROOTS]
+        assert first == ("CN=Certification Authorities,CN=Public Key Services,"
+                         f"CN=Services,CN=Configuration,{BASE_DN}")
+
+    def test_no_base_dn_means_no_containers(self):
+        assert pki_container_dns("") == ()
+
+
+class TestDirectoryRead:
+    def test_a_published_root_comes_back_tagged_as_from_the_directory(self):
+        manager = StubDirectory(
+            {CONTAINER_ROOTS: [ca_entry(chain().root)]})
+        result = ca_certificates_from_directory(
+            a_connection(), "pw", factory_for(manager))
+        assert result.ok is True
+        assert len(result.certificates) == 1
+        found = result.certificates[0]
+        assert found.source == SOURCE_DIRECTORY
+        assert found.fingerprint_hex == certificate_facts(
+            der(chain().root)).fingerprint_hex
+        assert "CN=Certification Authorities" in found.directory_dn
+        assert manager.disconnected is True
+
+    def test_all_three_containers_are_searched(self):
+        manager = StubDirectory()
+        ca_certificates_from_directory(a_connection(), "pw",
+                                       factory_for(manager))
+        bases = [base for base, _ in manager.searched]
+        assert len(bases) == 3
+        assert any("CN=Certification Authorities" in base for base in bases)
+        assert any("CN=NTAuthCertificates" in base for base in bases)
+        assert any("CN=Enrollment Services" in base for base in bases)
+        # Only entries that actually carry a certificate.
+        assert all(filt == f"({CA_CERTIFICATE_ATTRIBUTE}=*)"
+                   for _, filt in manager.searched)
+
+    def test_the_same_root_in_two_containers_is_listed_once(self):
+        manager = StubDirectory({
+            CONTAINER_ROOTS: [ca_entry(chain().root)],
+            CONTAINER_NTAUTH: [ca_entry(chain().root,
+                                        container=CONTAINER_NTAUTH)],
+        })
+        result = ca_certificates_from_directory(a_connection(), "pw",
+                                                factory_for(manager))
+        assert len(result.certificates) == 1
+        # But both containers still report having held one.
+        counts = {item.label: item.count for item in result.containers}
+        assert counts[CONTAINER_ROOTS] == 1
+        assert counts[CONTAINER_NTAUTH] == 1
+
+    def test_one_unreadable_container_does_not_discard_the_others(self):
+        manager = StubDirectory(
+            {CONTAINER_ROOTS: [ca_entry(chain().root)]},
+            {CONTAINER_NTAUTH: RuntimeError("insufficientAccessRights")})
+        result = ca_certificates_from_directory(a_connection(), "pw",
+                                                factory_for(manager))
+        assert result.ok is True
+        assert len(result.certificates) == 1
+        failed = [item for item in result.containers if not item.ok]
+        assert [item.label for item in failed] == [CONTAINER_NTAUTH]
+        assert "insufficientAccessRights" in result.error
+
+    def test_every_container_failing_is_not_ok(self):
+        manager = StubDirectory(errors={"CN=": RuntimeError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer "
+            "certificate")})
+        result = ca_certificates_from_directory(a_connection(), "pw",
+                                                factory_for(manager))
+        assert result.ok is False
+        assert "CERTIFICATE_VERIFY_FAILED" in result.error
+
+    def test_no_base_dn_reads_nothing_and_says_why(self):
+        def refuse(*args):
+            raise AssertionError("must not build a manager without a base DN")
+
+        result = ca_certificates_from_directory(a_connection(base_dn=""), "pw",
+                                                refuse)
+        assert result.ok is False
+        assert "Base DN" in result.error
+
+    def test_the_operators_validation_setting_is_reported_not_changed(self):
+        for validate in (True, False):
+            settings = a_connection(validate_certificate=validate)
+            manager = StubDirectory({CONTAINER_ROOTS: [ca_entry(chain().root)]})
+            result = ca_certificates_from_directory(settings, "pw",
+                                                    factory_for(manager))
+            assert result.validated is validate
+            # And the connection it built used exactly that, unaltered.
+            assert manager.security_config.validate_certificate is validate
+            assert settings.validate_certificate is validate
+
+    @pytest.mark.parametrize("shape", ["bytes", "list", "base64", "pem"])
+    def test_the_attribute_shapes_ldap3_actually_returns(self, shape):
+        import base64 as b64
+
+        body = der(chain().root)
+        value = {
+            "bytes": body,
+            "list": [body],
+            "base64": b64.b64encode(body).decode("ascii"),
+            "pem": x509.load_der_x509_certificate(body).public_bytes(
+                serialization.Encoding.PEM).decode("ascii"),
+        }[shape]
+        manager = StubDirectory(
+            {CONTAINER_ROOTS: [ca_entry(chain().root, attribute=value)]})
+        result = ca_certificates_from_directory(a_connection(), "pw",
+                                                factory_for(manager))
+        assert [item.fingerprint_hex for item in result.certificates] == [
+            certificate_facts(body).fingerprint_hex]
+
+    def test_an_entry_holding_rubbish_is_skipped_not_fatal(self):
+        manager = StubDirectory({CONTAINER_ROOTS: [
+            ca_entry(chain().root, cn="junk", attribute=b"not a certificate"),
+            ca_entry(chain().root)]})
+        result = ca_certificates_from_directory(a_connection(), "pw",
+                                                factory_for(manager))
+        assert result.ok is True
+        assert len(result.certificates) == 1
+
+
+# --------------------------------------------------------------------------- #
+# The comparison — three outcomes, and the third is not a shade of the first
+# --------------------------------------------------------------------------- #
+
+def a_directory(certificates=(), ok=True, error="", validated=True):
+    return DirectoryCertificates(
+        ok=ok,
+        certificates=tuple(certificate_facts(der(item), SOURCE_DIRECTORY,
+                                             f"CN={index},{BASE_DN}")
+                           for index, item in enumerate(certificates)),
+        error=error, validated=validated, base_dn=BASE_DN)
+
+
+def an_inspection(ders):
+    return inspect_ldaps_chain("dc01.test.local", fetch=fetcher(ders))
+
+
+class TestComparison:
+    def test_the_three_outcomes_are_three_distinct_values(self):
+        assert len({CORROBORATION_AGREE, CORROBORATION_DISAGREE,
+                    CORROBORATION_UNAVAILABLE}) == 3
+
+    def test_a_chain_terminating_in_a_published_ca_agrees(self):
+        result = compare_chain_with_directory(
+            an_inspection(chain().chain_der()),
+            a_directory([chain().root]))
+        assert result.outcome == CORROBORATION_AGREE
+        assert result.agrees is True
+        assert result.disagrees is False
+        assert result.unavailable is False
+        assert result.match is not None
+        assert result.independent is True
+
+    def test_agreement_over_an_unvalidated_read_is_flagged_as_weaker(self):
+        result = compare_chain_with_directory(
+            an_inspection(chain().chain_der()),
+            a_directory([chain().root], validated=False))
+        assert result.outcome == CORROBORATION_AGREE
+        assert result.independent is False
+        assert "same" in result.detail and "unauthenticated" in result.detail
+        assert "not proof" in result.detail
+
+    def test_an_interceptors_chain_disagrees(self):
+        result = compare_chain_with_directory(
+            an_inspection(chain().rogue_chain_der()),
+            a_directory([chain().root]))
+        assert result.outcome == CORROBORATION_DISAGREE
+        assert result.match is None
+        assert "compromised" in result.detail
+
+    def test_a_genuine_intermediate_under_a_rogue_anchor_is_not_agreement(self):
+        # The alarming shape: the chain carries a real published CA but ends
+        # somewhere else.
+        rogue_first = [der(chain().rogue_leaf), der(chain().issuing),
+                       der(chain().rogue_root)]
+        result = compare_chain_with_directory(
+            an_inspection(rogue_first), a_directory([chain().issuing]))
+        assert result.outcome == CORROBORATION_DISAGREE
+        assert result.partial and result.match is None
+
+    def test_an_unreadable_directory_is_unavailable_not_agreement(self):
+        result = compare_chain_with_directory(
+            an_inspection(chain().chain_der()),
+            a_directory(ok=False, error="insufficientAccessRights"))
+        assert result.outcome == CORROBORATION_UNAVAILABLE
+        assert result.agrees is False
+        assert result.reason
+        assert "insufficientAccessRights" in result.detail
+
+    def test_a_directory_with_no_published_ca_is_unavailable(self):
+        result = compare_chain_with_directory(
+            an_inspection(chain().chain_der()), a_directory([]))
+        assert result.outcome == CORROBORATION_UNAVAILABLE
+        assert "nothing to compare" in result.detail
+
+    def test_no_chain_at_all_is_unavailable(self):
+        result = compare_chain_with_directory(
+            inspect_ldaps_chain("dc01.test.local",
+                                fetch=raising(TimeoutError("timed out"))),
+            a_directory([chain().root]))
+        assert result.outcome == CORROBORATION_UNAVAILABLE
+
+    def test_a_leaf_only_chain_cannot_be_corroborated(self):
+        result = compare_chain_with_directory(
+            an_inspection([der(chain().leaf)]), a_directory([chain().root]))
+        assert result.outcome == CORROBORATION_UNAVAILABLE
+        assert result.reason == "the server sent only its own certificate"
+
+    def test_a_self_signed_dc_certificate_is_still_compared(self):
+        # A DC presenting a single self-issued certificate has an anchor: the
+        # certificate itself. That is comparable, and often the real answer.
+        self_signed, _ = issue("dc03.test.local", not_before=NOW - timedelta(
+            days=10), not_after=NOW + timedelta(days=300), is_ca=True)
+        result = compare_chain_with_directory(
+            an_inspection([der(self_signed)]), a_directory([self_signed]))
+        assert result.outcome == CORROBORATION_AGREE
+
+    def test_every_unavailable_case_carries_a_reason_and_no_match(self):
+        cases = [
+            compare_chain_with_directory(
+                an_inspection(chain().chain_der()), a_directory(ok=False)),
+            compare_chain_with_directory(
+                an_inspection(chain().chain_der()), a_directory([])),
+            compare_chain_with_directory(
+                an_inspection([der(chain().leaf)]),
+                a_directory([chain().root])),
+            compare_chain_with_directory(
+                inspect_ldaps_chain("h", fetch=fetcher([])),
+                a_directory([chain().root])),
+        ]
+        for case in cases:
+            assert case.outcome == CORROBORATION_UNAVAILABLE
+            assert case.reason
+            assert case.match is None
+            assert case.agrees is False
+            # The headline itself has to refuse to read as a pass.
+            assert "not a pass" in case.headline
