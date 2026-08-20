@@ -12,13 +12,16 @@ Six pieces, deliberately layered so the logic is testable offline:
   nothing to it; the JSON stays the source of truth.
 * :mod:`aditor.hardening.scanfile` — storing that same JSON payload on disk and
   reading it back, with the report tool's path guards.
+* :mod:`aditor.hardening.snapshot` — putting one scan's ``scan.json`` and
+  ``report.html`` in one dated folder, from a single payload so the two cannot
+  disagree.
 * :mod:`aditor.hardening.diff` — comparing two stored scans. Its first job is to
   say whether a difference is the *domain's* or the *tool's*; see that module's
   docstring for why that distinction is the whole feature.
 * :mod:`aditor.tools.hardening` — the orchestration behind the
-  ``scan_hardening``, ``write_hardening_report``, ``write_hardening_scan`` and
-  ``diff_hardening_scans`` MCP tools: read GPOs, hand them to the evaluator, add
-  the provenance header.
+  ``scan_hardening``, ``write_hardening_report``, ``write_hardening_scan``,
+  ``write_hardening_snapshot`` and ``diff_hardening_scans`` MCP tools: read
+  GPOs, hand them to the evaluator, add the provenance header.
 
 ``SCAN_ENGINE_VERSION`` is the version of the *scan logic* and
 ``REPORT_FORMAT_VERSION`` the version of the rendered layout. Both are reported
@@ -58,6 +61,16 @@ from .scanfile import (  # noqa: E402
     read_scan,
     write_scan,
 )
+from .snapshot import (  # noqa: E402
+    SNAPSHOT_FORMAT_VERSION,
+    SNAPSHOT_REPORT_FILENAME,
+    SNAPSHOT_SCAN_FILENAME,
+    Snapshot,
+    SnapshotError,
+    resolve_scan_path,
+    snapshot_folder_name,
+    write_snapshot,
+)
 from .diff import (  # noqa: E402
     DIFF_FORMAT_VERSION,
     ScanDiffError,
@@ -70,6 +83,9 @@ __all__ = [
     "REPORT_FORMAT_VERSION",
     "SCAN_FILE_FORMAT_VERSION",
     "SCAN_FILE_MARKER",
+    "SNAPSHOT_FORMAT_VERSION",
+    "SNAPSHOT_REPORT_FILENAME",
+    "SNAPSHOT_SCAN_FILENAME",
     "DIFF_FORMAT_VERSION",
     "Catalog",
     "CatalogError",
@@ -79,6 +95,8 @@ __all__ = [
     "ReportPathError",
     "ScanDiffError",
     "ScanFileError",
+    "Snapshot",
+    "SnapshotError",
     "build_catalog",
     "load_catalog",
     "evaluate_control",
@@ -89,6 +107,9 @@ __all__ = [
     "headline_counts",
     "read_scan",
     "render_report",
+    "resolve_scan_path",
+    "snapshot_folder_name",
     "write_report",
     "write_scan",
+    "write_snapshot",
 ]
