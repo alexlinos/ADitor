@@ -90,7 +90,13 @@ PRESENCE_OPERATORS = frozenset({"present", "absent"})
 VALUE_OPERATORS = frozenset({"equals", "gte", "in"})
 
 SCOPES = frozenset({"all", "domain-controllers", "domain-root"})
-SEVERITIES = frozenset({"critical", "high", "medium", "low", "informational"})
+
+# Severities, worst first. The rank lives here rather than in a consumer because
+# it is intrinsic to the vocabulary: the report and the scan diff both order
+# their output by it and must agree on what "worst first" means.
+SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3,
+                 "informational": 4}
+SEVERITIES = frozenset(SEVERITY_RANK)
 
 STATUS_ACTIVE = "active"
 STATUS_NEEDS_BASELINE_VALUE = "needs_baseline_value"
