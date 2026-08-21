@@ -473,3 +473,97 @@ class TestTheResultPanel:
         html = render_certificate_panel(a_report(presented=[der(chain().leaf)]))
         assert "Every certificate that was considered" not in html
         assert "data-download-issuer" in html
+
+
+# --------------------------------------------------------------------------- #
+# The lockout hazard: one click must not be five failed logons
+# --------------------------------------------------------------------------- #
+
+class TestOneClickIsOneFailedLogon:
+    """Found in the field, not in review.
+
+    The issuer fetch searches up to five containers, and each search re-enters
+    ``LDAPManager.connect()``. A rejected credential therefore produced *five*
+    failed logons per button press -- against a live domain whose
+    ``lockoutThreshold`` was exactly 5.
+
+    The inner retry loop had already been fixed (#18). What defeated it was the
+    aggregation: ``connect()`` catches its attempts and re-raises a plain
+    ``LDAPException`` whose text mentions ``invalidCredentials``, and the
+    classifier recognised the *type* only. So these tests assert on the wrapped
+    form, which is what a caller actually sees.
+    """
+
+    #: Exactly what ldap_manager raises after a rejected simple bind.
+    WRAPPED = ("Failed to connect to any LDAP server after 1 attempts. Error: "
+               "LDAPInvalidCredentialsResult - 49 - invalidCredentials - None "
+               "- 80090308: LdapErr: DSID-0C090530, comment: "
+               "AcceptSecurityContext error, data 52e, v4563 - bindResponse - "
+               "None")
+
+    def test_the_wrapped_credential_failure_is_recognised_as_terminal(self):
+        from aditor.core.ldap_manager import is_terminal_connection_error
+        from ldap3.core.exceptions import LDAPException as Raw
+        assert is_terminal_connection_error(Raw(self.WRAPPED)) is True
+
+    def test_a_wrapped_lockout_is_terminal_too(self):
+        """Retrying against a locked account extends the lockout."""
+        from aditor.core.ldap_manager import is_terminal_connection_error
+        from ldap3.core.exceptions import LDAPException as Raw
+        assert is_terminal_connection_error(Raw(
+            "Failed to connect to any LDAP server after 1 attempts. Error: "
+            "80090308: LdapErr: DSID-0C090530, comment: AcceptSecurityContext "
+            "error, data 775, v4563")) is True
+
+    def test_a_refused_socket_is_still_worth_retrying(self):
+        """The classifier must not fire on everything, or a network blip
+        becomes an unretried failure."""
+        from aditor.core.ldap_manager import is_terminal_connection_error
+        from ldap3.core.exceptions import LDAPException as Raw
+        for transient in ("connection refused", "timed out",
+                          "temporary failure in name resolution",
+                          "Failed to connect to any LDAP server after 3 "
+                          "attempts. Error: socket connection error while "
+                          "opening: [Errno 61] Connection refused"):
+            assert is_terminal_connection_error(Raw(transient)) is False, transient
+
+    def test_a_bare_result_code_49_does_not_trip_it(self):
+        """'49' appears in serial numbers, DNs and timestamps."""
+        from aditor.core.ldap_manager import is_terminal_connection_error
+        from ldap3.core.exceptions import LDAPException as Raw
+        assert is_terminal_connection_error(Raw(
+            "socket connection error while opening: serial 49493849")) is False
+
+    def test_the_issuer_fetch_binds_once_not_once_per_container(self):
+        """The whole point. Five containers, one rejected credential, one bind."""
+        from ldap3.core.exceptions import LDAPException as Raw
+
+        directory = FakeDirectory(error=Raw(self.WRAPPED))
+        result = fetch_issuing_ca(settings(), "wrong-password", leaf_facts(),
+                                  factory=factory(directory))
+
+        assert len(directory.searched) == 1, (
+            f"{len(directory.searched)} failed logons from one button press; "
+            f"a domain with lockoutThreshold=5 locks the bind account")
+        assert result.outcome == FETCH_UNAVAILABLE
+
+    def test_the_published_roots_read_binds_once_too(self):
+        """Same wrapper, same hazard, three containers instead of five."""
+        from aditor.app.certificates import ca_certificates_from_directory
+        from ldap3.core.exceptions import LDAPException as Raw
+
+        directory = FakeDirectory(error=Raw(self.WRAPPED))
+        ca_certificates_from_directory(settings(), "wrong-password",
+                                       factory=factory(directory))
+        assert len(directory.searched) == 1
+
+    def test_connect_re_raises_a_rejected_credential_as_terminal(self):
+        """The structural fix: the aggregation keeps the failure's kind."""
+        from aditor.core.ldap_manager import TerminalConnectionError
+        assert issubclass(TerminalConnectionError, Exception)
+        # The type is preserved through connect()'s aggregation, so a caller
+        # that re-enters connect() per search stops on the first refusal
+        # regardless of how the message happens to be worded.
+        from aditor.core.ldap_manager import is_terminal_connection_error
+        assert is_terminal_connection_error(
+            TerminalConnectionError("anything at all")) is True

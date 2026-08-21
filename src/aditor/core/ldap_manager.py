@@ -26,6 +26,32 @@ _TLS_FAILURE_MARKERS = (
     "ssl:",
 )
 
+#: Text that means "the directory rejected these credentials". Needed because a
+#: bind failure does not always arrive as an ``LDAPBindError``: ``connect()``
+#: aggregates its attempts and re-raises, and a caller that loops over several
+#: searches sees the aggregate. Recognising the type alone let five bind
+#: attempts through one button press against a domain whose lockout threshold
+#: was five.
+#:
+#: Deliberately distinctive strings. The bare LDAP result code ``49`` is not on
+#: this list -- it would match a serial number, a timestamp or a DN, and a
+#: classifier that fires on the wrong error is how a transient network blip
+#: becomes an unretried failure.
+_CREDENTIAL_FAILURE_MARKERS = (
+    "invalidcredentials",
+    "ldapinvalidcredentialsresult",
+    "acceptsecuritycontext error",
+    "data 525",   # no such user
+    "data 52e",   # wrong password
+    "data 530",   # not permitted at this time
+    "data 531",   # not permitted at this workstation
+    "data 532",   # password expired
+    "data 533",   # account disabled
+    "data 701",   # account expired
+    "data 773",   # must change password
+    "data 775",   # account locked out -- retrying extends the lockout
+)
+
 
 class TerminalConnectionError(LDAPException):
     """A connection failure that retrying cannot fix, and may make worse.
@@ -54,10 +80,11 @@ def is_terminal_connection_error(error: Exception) -> bool:
     A socket that could not be opened for any other reason (refused, unreachable,
     timed out) is genuinely transient and is worth retrying.
     """
-    if isinstance(error, LDAPBindError):
+    if isinstance(error, (LDAPBindError, TerminalConnectionError)):
         return True
     text = str(error).lower()
-    return any(marker in text for marker in _TLS_FAILURE_MARKERS)
+    return any(marker in text
+               for marker in _TLS_FAILURE_MARKERS + _CREDENTIAL_FAILURE_MARKERS)
 
 
 
@@ -212,6 +239,14 @@ class LDAPManager:
                 error_msg += f". Error: {reported}"
             
             logger.error(error_msg)
+            # Preserve *which kind* of failure this was through the aggregation.
+            # A caller looping over several searches re-enters connect() for each
+            # one, so flattening a rejected credential into a plain
+            # LDAPException turns one wrong password into one failed logon per
+            # search -- five of them, on a domain whose lockout threshold is
+            # five. The text check above is the backstop; this is the fix.
+            if reported is not None and is_terminal_connection_error(reported):
+                raise TerminalConnectionError(error_msg) from reported
             raise LDAPException(error_msg)
     
     def disconnect(self) -> None:
