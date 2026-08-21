@@ -567,3 +567,99 @@ class TestOneClickIsOneFailedLogon:
         from aditor.core.ldap_manager import is_terminal_connection_error
         assert is_terminal_connection_error(
             TerminalConnectionError("anything at all")) is True
+
+
+# --------------------------------------------------------------------------- #
+# The two steps at the end, and the field that makes one of them work
+# --------------------------------------------------------------------------- #
+
+class TestTheSequenceEndsWhereItShould:
+    """The instructions used to stop after "trust it system-wide".
+
+    Two things were missing, and between them they account for an operator doing
+    everything the panel said and the app still refusing the connection:
+    ADitor verifies through Python's OpenSSL, which does not read the macOS
+    keychain, and nothing takes effect in a process that is already running.
+    """
+
+    def test_the_last_step_is_a_restart(self):
+        for system, environ in (("darwin", {}), ("linux", {}),
+                                ("win32", {"USERDOMAIN": "WS01"}),
+                                ("win32", {"USERDNSDOMAIN": "test.local"})):
+            steps = install_commands(detect_machine(system, environ))
+            assert steps[-1].label == "Restart ADitor", (system, environ)
+            assert "from before the change" in steps[-1].note
+
+    def test_the_restart_step_names_the_check_that_confirms_it_worked(self):
+        steps = install_commands(detect_machine("darwin", {}))
+        assert "Test connection" in steps[-1].note
+
+    def test_the_step_before_it_points_aditor_at_the_file(self, tmp_path):
+        path = tmp_path / "ca.crt"
+        steps = install_commands(detect_machine("darwin", {}), path)
+        step = steps[-2]
+        assert "Point ADitor" in step.label
+        assert str(path) in step.command
+        assert "ca_cert_file" in step.command
+
+    def test_it_explains_why_the_os_trust_store_is_not_enough(self):
+        steps = install_commands(detect_machine("darwin", {}))
+        note = steps[-2].note
+        assert "does not read the macOS keychain" in note
+        assert "OpenSSL" in note
+
+    def test_the_placeholder_guards_that_step_too(self):
+        steps = install_commands(detect_machine("darwin", {}))
+        assert PATH_PLACEHOLDER in steps[-2].command
+
+
+class TestTheCaCertFileActuallyReachesTheConnection:
+    """A field the config writer hard-coded to None for the whole of WP5.
+
+    Without this the setting could be written into config.json by hand and the
+    app would ignore it, which is a worse failure than not offering it at all.
+    """
+
+    def test_the_setting_reaches_the_security_config(self):
+        from aditor.app.connection import _configs
+        _active, security, _perf = _configs(
+            settings(ca_cert_file="/etc/pki/example-ca.pem"), "pw")
+        assert security.ca_cert_file == "/etc/pki/example-ca.pem"
+
+    def test_an_empty_setting_means_the_platform_store(self):
+        from aditor.app.connection import _configs
+        _active, security, _perf = _configs(settings(), "pw")
+        assert security.ca_cert_file is None
+
+    def test_it_is_written_into_the_generated_config(self):
+        from aditor.app.settings import build_config_document
+        document = build_config_document(
+            settings(ca_cert_file="/etc/pki/example-ca.pem"))
+        assert document["security"]["ca_cert_file"] == "/etc/pki/example-ca.pem"
+
+    def test_an_empty_setting_writes_null_not_an_empty_string(self):
+        """ldap3 takes a path or nothing; "" is neither."""
+        from aditor.app.settings import build_config_document
+        assert build_config_document(settings())["security"]["ca_cert_file"] \
+            is None
+
+    def test_the_generated_config_still_holds_no_password(self):
+        """The one guarantee of that writer, re-checked after touching it."""
+        import json
+
+        from aditor.app.settings import build_config_document
+        text = json.dumps(build_config_document(
+            settings(ca_cert_file="/etc/pki/example-ca.pem")))
+        assert "${AD_MCP_PASSWORD}" in text
+
+    def test_it_survives_a_write_and_reload(self, tmp_path):
+        """Without load_settings reading it back, a value set in the file is
+        silently dropped and the app quietly reverts to the platform store."""
+        import json
+
+        from aditor.app.settings import build_config_document, load_settings
+        (tmp_path / "config.json").write_text(json.dumps(
+            build_config_document(settings(ca_cert_file="/etc/pki/example-ca.pem"))),
+            encoding="utf-8")
+        assert load_settings(tmp_path).connection.ca_cert_file == \
+            "/etc/pki/example-ca.pem"

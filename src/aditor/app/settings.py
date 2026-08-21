@@ -97,6 +97,16 @@ class ConnectionSettings:
     base_dn: str = ""
     bind_dn: str = ""
     validate_certificate: bool = True
+    #: A PEM file holding the CA certificate to verify the controller against.
+    #: Empty means "use the platform trust store", which is the right default on
+    #: Windows and a trap on macOS: ADitor verifies through Python's OpenSSL,
+    #: and OpenSSL does not read the login or System keychain. On a Mac where
+    #: ``ssl.get_default_verify_paths()`` reports no cafile at all -- which is
+    #: the ordinary case for a framework Python -- there is no amount of
+    #: keychain work that makes verification succeed, and this field is the only
+    #: route. It is a path, never certificate bytes: the file stays on disk
+    #: where the operator can inspect and replace it.
+    ca_cert_file: str = ""
     snapshot_dir: str = ""
     #: The credential-store service name. Exposed so an operator with more than
     #: one forest can keep the two secrets apart, but defaulted to the value
@@ -212,7 +222,7 @@ def build_config_document(settings: ConnectionSettings) -> Dict[str, Any]:
         "security": {
             "enable_tls": True,
             "validate_certificate": bool(settings.validate_certificate),
-            "ca_cert_file": None,
+            "ca_cert_file": str(settings.ca_cert_file or "").strip() or None,
             "require_secure_connection": True,
         },
         "logging": {
@@ -270,6 +280,10 @@ def load_settings(directory: Optional[Path] = None) -> AppSettings:
         base_dn=str(active.get("base_dn") or ""),
         bind_dn=str(active.get("bind_dn") or ""),
         validate_certificate=bool(security.get("validate_certificate", True)),
+        # Read back, or a value written into the file would be silently lost on
+        # the next load and the app would go back to the platform trust store
+        # without saying so.
+        ca_cert_file=str(security.get("ca_cert_file") or ""),
         snapshot_dir=str(app_block.get("snapshot_dir") or ""),
         credential_service=str(app_block.get("credential_service")
                                or DEFAULT_SERVICE),
