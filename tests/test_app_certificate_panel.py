@@ -30,12 +30,20 @@ import pytest
 
 from aditor.app import render
 from aditor.app.api import AditorApi
+from ldap3.core.exceptions import (
+    LDAPBindError,
+    LDAPException,
+    LDAPSocketOpenError,
+)
+
 from aditor.app.certificates import (
     CORROBORATION_AGREE,
     CORROBORATION_DISAGREE,
     CORROBORATION_UNAVAILABLE,
     CA_CERTIFICATE_ATTRIBUTE,
+    ca_certificates_from_directory,
     certificate_facts,
+    pki_container_dns,
 )
 from aditor.app.endpoint import Endpoint
 from aditor.app.render import OUT_OF_BAND_INSTRUCTION, render_certificate_panel
@@ -658,3 +666,107 @@ class TestEverythingIsEscaped:
         panel = a_panel(published=[chain().root])
         for value in re.findall(r'data-export-ca="([^"]*)"', panel):
             assert re.fullmatch(r"[0-9a-f]{64}", value), value
+
+
+class TestADeadConnectionStopsTheContainerSearch:
+    """One container's ACL is worth stepping over. A dead connection is not.
+
+    The three PKI containers are searched separately so a permission problem on
+    one does not hide the others. But after a TLS failure ldap3's ``Server`` is
+    unusable, so searches two and three report "invalid server address" — a
+    downstream symptom that reads, in the log, as a DNS or hostname problem and
+    sends the reader after the wrong fault entirely.
+    """
+
+    #: A real TLS rejection, in the shape ldap3 actually wraps it.
+    def _tls_failure(self):
+        return LDAPSocketOpenError(
+            "socket ssl wrapping error: [SSL: CERTIFICATE_VERIFY_FAILED] "
+            "certificate verify failed: unable to get local issuer "
+            "certificate (_ssl.c:1006)")
+
+    def _counting_manager(self, error):
+        searched = []
+
+        class Manager:
+            def search(self, search_base, search_filter, attributes=None,
+                       **kwargs):
+                searched.append(search_base)
+                raise error
+
+            def disconnect(self):
+                pass
+
+        return Manager(), searched
+
+    def test_a_certificate_failure_stops_after_the_first_container(self):
+        manager, searched = self._counting_manager(self._tls_failure())
+        ca_certificates_from_directory(a_connection(), "pw",
+                                       factory=factory(manager))
+
+        assert len(searched) == 1, (
+            f"searched {len(searched)} containers after the connection died; "
+            "each extra search logs a misleading downstream error")
+
+    def test_the_real_cause_is_what_gets_reported(self):
+        manager, _ = self._counting_manager(self._tls_failure())
+        result = ca_certificates_from_directory(a_connection(), "pw",
+                                               factory=factory(manager))
+
+        assert result.ok is False
+        assert "CERTIFICATE_VERIFY_FAILED" in result.error
+        assert "invalid server address" not in result.error.lower()
+
+    def test_the_unattempted_containers_say_so_rather_than_vanishing(self):
+        """An omission would read as "checked, found nothing"."""
+        manager, _ = self._counting_manager(self._tls_failure())
+        result = ca_certificates_from_directory(a_connection(), "pw",
+                                               factory=factory(manager))
+
+        assert len(result.containers) == len(pki_container_dns(BASE_DN)), (
+            "every container must still have a row")
+        not_checked = [item for item in result.containers
+                       if "Not checked" in (item.error or "")]
+        assert len(not_checked) == len(pki_container_dns(BASE_DN)) - 1
+        for item in not_checked:
+            assert item.ok is False
+            assert item.count == 0
+            # and the row must not be mistaken for the real failure
+            assert "CERTIFICATE_VERIFY_FAILED" not in (item.error or "")
+
+    def test_a_bind_failure_also_stops_the_search(self):
+        """A wrong password is terminal too — and retrying risks a lockout."""
+        manager, searched = self._counting_manager(
+            LDAPBindError("invalidCredentials"))
+        ca_certificates_from_directory(a_connection(), "pw",
+                                       factory=factory(manager))
+
+        assert len(searched) == 1
+
+    def test_a_permission_failure_on_one_container_still_tries_the_rest(self):
+        """The behaviour that must not regress: a per-container ACL problem.
+
+        Searching the containers separately is the whole point — a reader who
+        cannot see Enrollment Services can still see the published roots.
+        """
+        manager, searched = self._counting_manager(
+            LDAPException("insufficientAccessRights"))
+        result = ca_certificates_from_directory(a_connection(), "pw",
+                                               factory=factory(manager))
+
+        assert len(searched) == len(pki_container_dns(BASE_DN)), (
+            "a permission failure on one container must not stop the others")
+        assert not any("Not checked" in (item.error or "")
+                       for item in result.containers)
+
+    def test_the_panel_says_not_read_rather_than_showing_a_zero(self):
+        """A "0" in the Certificates column would read as a real count."""
+        panel = a_panel(directory_error=self._tls_failure())
+
+        # The distinctive phrase, not the bare "Not checked" -- the
+        # corroboration banner above already says "Not checked against Active
+        # Directory", so the short form matches whether or not this fix is in.
+        assert "so this search was not attempted" in panel
+        assert "not read" in panel
+        # the real cause is still the headline error, not one of three
+        assert panel.count("invalid server address") == 0

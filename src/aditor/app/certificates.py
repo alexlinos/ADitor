@@ -677,6 +677,20 @@ class DirectoryCertificates:
         return {item.fingerprint_hex: item for item in self.certificates}
 
 
+def _connection_is_dead(error: Exception) -> bool:
+    """Is this failure the connection itself, rather than one container?
+
+    A permission problem on one container is worth stepping over — that is why
+    the containers are searched separately. A dead connection is not: every
+    remaining search will fail the same way, and after a TLS failure ldap3's
+    ``Server`` reports a downstream symptom instead of the real cause.
+    """
+    from ..core.ldap_manager import TerminalConnectionError, is_terminal_connection_error
+    if isinstance(error, TerminalConnectionError):
+        return True
+    return is_terminal_connection_error(error)
+
+
 def ca_certificates_from_directory(settings: "ConnectionSettings",
                                    password: str,
                                    factory: Optional[Any] = None
@@ -733,7 +747,7 @@ def ca_certificates_from_directory(settings: "ConnectionSettings",
     failures: List[str] = []
 
     try:
-        for label, dn in containers:
+        for index, (label, dn) in enumerate(containers):
             try:
                 entries = manager.search(
                     search_base=dn,
@@ -744,6 +758,20 @@ def ca_certificates_from_directory(settings: "ConnectionSettings",
                 failures.append(f"{label}: {message}")
                 results.append(ContainerResult(label=label, dn=dn, ok=False,
                                                error=message))
+                if _connection_is_dead(exc):
+                    # The connection itself failed, not this container's ACL.
+                    # The remaining searches cannot succeed, and after a TLS
+                    # failure ldap3's Server is unusable, so they report
+                    # "invalid server address" instead of the real cause —
+                    # log noise that sends a reader after DNS. Stop, and say
+                    # the rest went unchecked rather than letting an omission
+                    # read as "checked, found nothing".
+                    for skipped_label, skipped_dn in containers[index + 1:]:
+                        results.append(ContainerResult(
+                            label=skipped_label, dn=skipped_dn, ok=False,
+                            error="Not checked: the connection had already "
+                                  "failed, so this search was not attempted."))
+                    break
                 continue
             found = 0
             for entry in entries:
