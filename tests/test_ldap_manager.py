@@ -276,3 +276,93 @@ class TestLDAPManagerRetry:
         assert connection == mock_connection_instance
         assert mock_connection_instance.bind.call_count == 3
         assert mock_sleep.call_count == 2  # Sleep called between retries
+
+
+class TestConnectionErrorsAreNotBlindlyRetried:
+    """Some connection failures must fail fast, not retry.
+
+    A credential failure retried ``max_retries`` times is ``max_retries`` failed
+    logons against the domain's lockout policy — the retry turns one wrong
+    password into a locked service account. A certificate failure is
+    deterministic, so retrying cannot help, and it loses the diagnosis: ldap3's
+    ``Server`` is unusable afterwards and later attempts report "invalid server
+    address", which sends the reader after DNS instead of the certificate.
+    """
+
+    def test_a_certificate_failure_is_terminal(self):
+        from ldap3.core.exceptions import LDAPSocketOpenError
+        from aditor.core.ldap_manager import is_terminal_connection_error
+        err = LDAPSocketOpenError(
+            "socket ssl wrapping error: [SSL: CERTIFICATE_VERIFY_FAILED] "
+            "certificate verify failed: unable to get local issuer certificate")
+        assert is_terminal_connection_error(err) is True
+
+    def test_a_bind_failure_is_terminal_because_retrying_locks_the_account(self):
+        from ldap3.core.exceptions import LDAPBindError
+        from aditor.core.ldap_manager import is_terminal_connection_error
+        assert is_terminal_connection_error(LDAPBindError("invalidCredentials")) is True
+
+    def test_an_unreachable_host_is_transient_and_still_worth_retrying(self):
+        from ldap3.core.exceptions import LDAPSocketOpenError
+        from aditor.core.ldap_manager import is_terminal_connection_error
+        for msg in ("connection refused", "timed out", "No route to host"):
+            assert is_terminal_connection_error(LDAPSocketOpenError(msg)) is False, msg
+
+    def test_the_certificate_error_survives_instead_of_invalid_server_address(self):
+        """The regression: the real cause must reach the caller."""
+        from ldap3.core.exceptions import LDAPSocketOpenError, LDAPException
+        from unittest.mock import Mock, patch
+        import aditor.core.ldap_manager as M
+
+        ad = Mock(bind_dn="T\\svc", password="x", auto_bind=True, receive_timeout=5,
+                  server="ldaps://dc.test.local:636", server_pool=None,
+                  base_dn="DC=test,DC=local", domain="test.local")
+        sec = Mock(validate_certificate=True, ca_cert_file=None, enable_tls=True)
+        perf = Mock(max_retries=3, retry_delay=0, connection_pool_size=1, page_size=100)
+
+        cert_error = LDAPSocketOpenError(
+            "socket ssl wrapping error: [SSL: CERTIFICATE_VERIFY_FAILED] "
+            "certificate verify failed: unable to get local issuer certificate")
+        attempts = []
+
+        def exploding_connection(*a, **k):
+            attempts.append(1)
+            # after the first failure ldap3 reports a downstream symptom
+            raise cert_error if len(attempts) == 1 else LDAPSocketOpenError("invalid server address")
+
+        with patch.object(M, "Connection", side_effect=exploding_connection):
+            mgr = M.LDAPManager(ad, sec, perf)
+            with pytest.raises(LDAPException) as excinfo:
+                mgr.connect()
+
+        message = str(excinfo.value)
+        assert "CERTIFICATE_VERIFY_FAILED" in message, message
+        assert "invalid server address" not in message, message
+        assert len(attempts) == 1, f"failed fast? attempts={len(attempts)}"
+
+    def test_a_bind_failure_costs_exactly_one_logon_not_max_retries(self):
+        """The lockout regression: one wrong password, one failed logon."""
+        from ldap3.core.exceptions import LDAPBindError, LDAPException
+        from unittest.mock import Mock, patch
+        import aditor.core.ldap_manager as M
+
+        ad = Mock(bind_dn="T\\svc", password="wrong", auto_bind=True, receive_timeout=5,
+                  server="ldaps://dc.test.local:636", server_pool=None,
+                  base_dn="DC=test,DC=local", domain="test.local")
+        sec = Mock(validate_certificate=False, ca_cert_file=None, enable_tls=True)
+        perf = Mock(max_retries=3, retry_delay=0, connection_pool_size=1, page_size=100)
+
+        binds = []
+
+        def failing_bind(*a, **k):
+            binds.append(1)
+            raise LDAPBindError("invalidCredentials")
+
+        with patch.object(M, "Connection", side_effect=failing_bind):
+            mgr = M.LDAPManager(ad, sec, perf)
+            with pytest.raises(LDAPException):
+                mgr.connect()
+
+        assert len(binds) == 1, (
+            f"a wrong password cost {len(binds)} failed logons; with a lockout "
+            f"threshold of 3-5 that locks the account")

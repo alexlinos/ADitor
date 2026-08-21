@@ -15,6 +15,52 @@ from ..config.models import ActiveDirectoryConfig, SecurityConfig, PerformanceCo
 logger = logging.getLogger(__name__)
 
 
+#: Markers that identify a TLS/certificate failure. ldap3 wraps these in
+#: ``LDAPSocketOpenError``, so the exception type alone cannot tell them apart
+#: from a genuinely transient socket problem.
+_TLS_FAILURE_MARKERS = (
+    "certificate_verify_failed",
+    "ssl wrapping error",
+    "certificate verify failed",
+    "sslerror",
+    "ssl:",
+)
+
+
+class TerminalConnectionError(LDAPException):
+    """A connection failure that retrying cannot fix, and may make worse.
+
+    Its own type, not a plain ``LDAPException``, so the broad ``except
+    Exception`` in the retry loop can re-raise it instead of swallowing it and
+    retrying anyway — which is exactly the bug this class exists to prevent.
+    """
+
+
+def is_terminal_connection_error(error: Exception) -> bool:
+    """Would retrying this connection error be pointless, or harmful?
+
+    Two classes of failure must not be retried:
+
+    * **Credential failures.** Every retry is another failed logon against the
+      domain's lockout policy, so retrying a wrong password is how a service
+      account gets locked out — the retry turns one mistake into ``max_retries``
+      of them per operation.
+    * **Certificate failures.** Verification is deterministic: the same chain
+      will fail the same way every time. Retrying also loses the diagnosis,
+      because ldap3's ``Server`` is unusable afterwards and later attempts report
+      ``invalid server address`` — which overwrites the certificate error with
+      one that sends the reader after DNS instead.
+
+    A socket that could not be opened for any other reason (refused, unreachable,
+    timed out) is genuinely transient and is worth retrying.
+    """
+    if isinstance(error, LDAPBindError):
+        return True
+    text = str(error).lower()
+    return any(marker in text for marker in _TLS_FAILURE_MARKERS)
+
+
+
 class LDAPManager:
     """
     LDAP connection manager for Active Directory operations.
@@ -100,6 +146,7 @@ class LDAPManager:
                 return self._connection
             
             last_error = None
+            first_error = None
             
             for attempt in range(self.performance_config.max_retries):
                 try:
@@ -129,7 +176,16 @@ class LDAPManager:
                                 
                         except (LDAPSocketOpenError, LDAPBindError) as e:
                             logger.warning(f"Connection failed to {server.host}:{server.port}: {e}")
+                            if first_error is None:
+                                first_error = e
                             last_error = e
+                            if is_terminal_connection_error(e):
+                                # Retrying cannot help and can do harm - see
+                                # is_terminal_connection_error. Surface the real
+                                # cause instead of burying it under a retry.
+                                raise TerminalConnectionError(
+                                    f"Failed to connect to {server.host}:{server.port}: {e}"
+                                ) from e
                             continue
                     
                     # If we get here, all servers failed for this attempt
@@ -137,6 +193,9 @@ class LDAPManager:
                         logger.info(f"Retry {attempt + 1}/{self.performance_config.max_retries} after {self.performance_config.retry_delay}s")
                         time.sleep(self.performance_config.retry_delay)
                     
+                except TerminalConnectionError:
+                    # Deliberately not retried: see TerminalConnectionError.
+                    raise
                 except Exception as e:
                     logger.error(f"Unexpected error during connection attempt {attempt + 1}: {e}")
                     last_error = e
@@ -146,8 +205,11 @@ class LDAPManager:
             
             # All attempts failed
             error_msg = f"Failed to connect to any LDAP server after {self.performance_config.max_retries} attempts"
-            if last_error:
-                error_msg += f". Last error: {last_error}"
+            # The first error is the informative one: once a connection attempt
+            # fails, later attempts often report a downstream symptom instead.
+            reported = first_error or last_error
+            if reported:
+                error_msg += f". Error: {reported}"
             
             logger.error(error_msg)
             raise LDAPException(error_msg)
