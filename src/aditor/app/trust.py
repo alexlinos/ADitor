@@ -363,15 +363,50 @@ def detect_machine(system: Optional[str] = None,
 PATH_PLACEHOLDER = "<path to the exported .crt>"
 
 
+def _obtain_step(context: MachineContext,
+                 path: Optional[Path]) -> InstallStep:
+    """The step that used to be missing: get the file.
+
+    Every platform's guidance below begins with a command containing
+    ``{path}``, and until something has been saved that path is
+    :data:`PATH_PLACEHOLDER` — an instruction with a hole in it. So the list now
+    opens by saying where the file comes from, and once it exists, where it is.
+
+    On a domain-joined machine the wording deliberately does not present the
+    file as the fix. There the missing root means autoenrollment is broken for
+    every member of the domain, the steps that follow say so, and the
+    certificate's value at that point is that it gives the operator a
+    fingerprint to compare against.
+    """
+    if path:
+        return InstallStep(
+            label="The CA certificate is saved on this machine",
+            note=f"ADitor wrote it to {path}. Writing that file is the whole of "
+                 f"what it did: nothing has been added to a trust store, and "
+                 f"the commands below are still yours to run. The path is "
+                 f"filled into them already.")
+    tail = ("On this machine that file is what the commands below operate on."
+            if context.manual_import_is_the_fix else
+            "On a domain-joined machine the file is not the fix — the steps "
+            "below are — but having it gives you a fingerprint to compare "
+            "against what the machine actually holds.")
+    return InstallStep(
+        label="Save the CA certificate to this machine first",
+        note="Use 'Download the issuing CA certificate' above. ADitor reads it "
+             "from Active Directory, offers it only if that certificate's key "
+             "signed the one the controller presented, and writes it to a "
+             "file. It does not install it. " + tail)
+
+
 def install_commands(context: MachineContext,
                      path: Optional[Path] = None) -> Tuple[InstallStep, ...]:
-    """``context.steps`` with ``{path}`` resolved to the exported file.
+    """The obtain-the-file step, then ``context.steps`` with ``{path}`` resolved.
 
     Returns text. It does not run anything, and there is no variant of this
     function that does.
     """
     where = str(path) if path else PATH_PLACEHOLDER
-    return tuple(
+    return (_obtain_step(context, path),) + tuple(
         InstallStep(label=step.label,
                     command=step.command.replace("{path}", where),
                     note=step.note)

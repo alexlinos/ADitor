@@ -41,6 +41,11 @@ ALLOWED_API_METHODS = {
     "certificate_screen",
     "connect_screen",
     "diff",
+    # Fetches the issuing CA and writes it to a .crt. Added deliberately: it
+    # reads a certificate and writes a file, which is the same pair of verbs
+    # export_ca_certificate already had. It does not install, trust or import,
+    # and the forbidden-verb assertion below is what holds that line.
+    "download_issuing_ca",
     "export_ca_certificate",
     "forget_password",
     "history",

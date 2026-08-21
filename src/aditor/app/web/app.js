@@ -166,10 +166,11 @@ async function forgetPassword() {
 /* --- 1b. certificate and trust -------------------------------------------
  *
  * Note what is absent: there is no function here that trusts or installs a
- * certificate, because there is no bridge method to call. exportCa() asks
- * Python to write a .crt file; copyCommand() puts text on the clipboard. The
- * operator runs the command. See aditor/app/certificates.py for why that
- * division is the whole point of this panel.
+ * certificate, because there is no bridge method to call. exportCa() and
+ * downloadIssuer() ask Python to write a .crt file; copyCommand() puts text on
+ * the clipboard. The operator runs the command. See
+ * aditor/app/certificates.py for why that division is the whole point of this
+ * panel.
  */
 
 async function inspectCertificate() {
@@ -209,6 +210,28 @@ async function exportCa(fingerprint) {
       : result.message);
   } catch (error) {
     toast(String(error.message || error));
+  }
+}
+
+/* Fetch the CA certificate that issued the controller's, and save it.
+ *
+ * Slow enough to need the busy state: it opens an LDAP connection and reads a
+ * container. The button is rendered by Python, so it is passed in rather than
+ * looked up by id.
+ */
+async function downloadIssuer(button) {
+  busy(button, true, 'Fetching…');
+  try {
+    const result = await call('download_issuing_ca');
+    if (result.html) { paint('certificate-result', result.html); }
+    if (!result.ok) { toast(result.message); return; }
+    toast('CA certificate saved. It signed the certificate the controller '
+          + 'presented — now confirm the fingerprint with whoever runs the CA '
+          + 'before you install it.');
+  } catch (error) {
+    toast(String(error.message || error));
+  } finally {
+    busy(button, false);
   }
 }
 
@@ -415,6 +438,8 @@ function wire() {
     if (copier) { copySnippet(copier.dataset.copy); return; }
     const exporter = event.target.closest('[data-export-ca]');
     if (exporter) { exportCa(exporter.dataset.exportCa); return; }
+    const fetcher = event.target.closest('[data-download-issuer]');
+    if (fetcher) { downloadIssuer(fetcher); return; }
     const commandCopier = event.target.closest('[data-copy-text]');
     if (commandCopier) { copyCommand(commandCopier.dataset.copyText); }
   });

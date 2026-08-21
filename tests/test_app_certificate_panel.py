@@ -168,7 +168,8 @@ FORBIDDEN_ON_A_BUTTON = ("trust", "install", "import", "addstore", "add store",
 
 #: The only data-* hooks the panel's buttons are allowed to carry. A new one is
 #: a deliberate act, which is the point of writing them down.
-ALLOWED_BUTTON_HOOKS = {"export-ca", "copy-text", "copy", "open-report"}
+ALLOWED_BUTTON_HOOKS = {"export-ca", "download-issuer", "copy-text", "copy",
+                        "open-report"}
 
 
 class TestNoButtonInstallsOrTrusts:
@@ -179,13 +180,21 @@ class TestNoButtonInstallsOrTrusts:
                 for verb in FORBIDDEN_ON_A_BUTTON:
                     assert verb not in text, (name, text, verb)
 
-    def test_the_only_buttons_are_export_and_copy(self):
+    def test_the_only_buttons_save_a_file_or_copy_text(self):
+        """Three labels, and every one of them names a file or the clipboard.
+
+        "Download the issuing CA certificate" is on this list because writing a
+        .crt is the one thing the app does with a certificate. What would not be
+        on it is a button that then installed the file, which is why the verb
+        list above stays as it is.
+        """
         labels = set()
         for panel in every_panel().values():
             for _, label in BUTTON.findall(panel):
                 labels.add(re.sub(r"\s+", " ",
                                   re.sub(r"<[^>]+>", "", label)).strip())
-        assert labels <= {"Export CA certificate", "Copy command"}, labels
+        assert labels <= {"Export CA certificate", "Copy command",
+                          "Download the issuing CA certificate"}, labels
 
     def test_no_button_carries_an_unexpected_hook(self):
         for name, panel in every_panel().items():
