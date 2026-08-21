@@ -1,0 +1,475 @@
+"""The download-the-issuing-CA button, and the one check that makes it safe.
+
+The button reads a certificate over a connection whose own certificate is *not*
+validated — unavoidably, because the certificate that would validate it is the
+one being fetched. So the security argument does not rest on the transport. It
+rests on :func:`aditor.app.issuer.signed_the_leaf`: a candidate is offered only
+if its key signed the certificate the controller presented.
+
+That makes the discrimination test below the most important one in this file. It
+is not hypothetical. On the domain this was built against, the AIA container
+held four CA certificates — two retired predecessors and a second issuing CA —
+and exactly one had signed the controller's certificate. Installing either of
+the others leaves the identical ``unable to get local issuer certificate``
+error behind while looking, to the operator, like a completed fix.
+"""
+
+import datetime
+
+from aditor.app.certificates import CA_CERTIFICATE_ATTRIBUTE, certificate_facts
+from aditor.app.issuer import (
+    AIA_CONTAINER_RDN,
+    FETCH_FOUND,
+    FETCH_NO_MATCH,
+    FETCH_UNAVAILABLE,
+    aia_dns_from_certificate,
+    fetch_issuing_ca,
+    search_targets,
+    signed_the_leaf,
+)
+from aditor.app.settings import ConnectionSettings
+from aditor.app.trust import PATH_PLACEHOLDER, detect_machine, install_commands
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import rsa
+from ldap3.core.exceptions import LDAPBindError, LDAPException, LDAPSocketOpenError
+
+from .synthetic_certificates import chain, der, issue, new_key
+
+BASE_DN = "DC=test,DC=local"
+CONFIG_DN = f"CN=Configuration,{BASE_DN}"
+
+
+def settings(**overrides):
+    values = {"server": "ldaps://dc01.test.local:636",
+              "domain": "test.local",
+              "base_dn": BASE_DN,
+              "bind_dn": f"CN=svc-aditor,{BASE_DN}",
+              "validate_certificate": True}
+    values.update(overrides)
+    return ConnectionSettings(**values)
+
+
+class FakeDirectory:
+    """An LDAP manager that serves ``cACertificate`` from a DN → certs map."""
+
+    def __init__(self, published=None, error=None):
+        #: {search_base: [x509.Certificate, ...]}
+        self.published = published or {}
+        self.error = error
+        self.searched = []
+        self.disconnected = False
+
+    def search(self, search_base, search_filter, attributes=None, **kwargs):
+        self.searched.append(search_base)
+        if self.error is not None:
+            raise self.error
+        certificates = None
+        for dn, value in self.published.items():
+            if dn.lower() == str(search_base).lower():
+                certificates = value
+                break
+        if certificates is None:
+            return []
+        return [{"dn": f"CN=published,{search_base}",
+                 "attributes": {CA_CERTIFICATE_ATTRIBUTE:
+                                [der(c) for c in certificates]}}]
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+def factory(manager):
+    def build(active, security, performance):
+        manager.security_config = security
+        return manager
+    return build
+
+
+def leaf_facts(certificate=None):
+    return certificate_facts(der(certificate or chain().leaf))
+
+
+def with_aia(url, *, cn="dc01.test.local"):
+    """A leaf certificate carrying one ``caIssuers`` AIA URL."""
+    key = new_key()
+    root, root_key = issue("aia-test-CA",
+                           not_before=datetime.datetime.now(datetime.timezone.utc)
+                           - datetime.timedelta(days=10),
+                           not_after=datetime.datetime.now(datetime.timezone.utc)
+                           + datetime.timedelta(days=100),
+                           is_ca=True)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    builder = (x509.CertificateBuilder()
+               .subject_name(x509.Name([x509.NameAttribute(
+                   x509.oid.NameOID.COMMON_NAME, cn)]))
+               .issuer_name(root.subject)
+               .public_key(key.public_key())
+               .serial_number(x509.random_serial_number())
+               .not_valid_before((now - datetime.timedelta(days=1))
+                                 .replace(tzinfo=None))
+               .not_valid_after((now + datetime.timedelta(days=90))
+                                .replace(tzinfo=None))
+               .add_extension(x509.AuthorityInformationAccess([
+                   x509.AccessDescription(
+                       x509.oid.AuthorityInformationAccessOID.CA_ISSUERS,
+                       x509.UniformResourceIdentifier(url))]),
+                   critical=False))
+    from cryptography.hazmat.primitives import hashes
+    return builder.sign(root_key, hashes.SHA256())
+
+
+# --------------------------------------------------------------------------- #
+# The signature check
+# --------------------------------------------------------------------------- #
+
+class TestSignedTheLeaf:
+    def test_the_real_issuer_verifies(self):
+        verified, reason = signed_the_leaf(chain().issuing, chain().leaf)
+        assert verified is True
+        assert "signed" in reason
+
+    def test_the_root_two_hops_up_does_not(self):
+        """The root signed the *issuing CA*, not the leaf. A name comparison
+        would not tell these apart; this must."""
+        verified, _ = signed_the_leaf(chain().root, chain().leaf)
+        assert verified is False
+
+    def test_an_unrelated_ca_does_not(self):
+        verified, reason = signed_the_leaf(chain().rogue_root, chain().leaf)
+        assert verified is False
+        assert "did not sign" in reason
+
+    def test_an_rsa_issuer_verifies_too(self):
+        """The live domain's CA is RSA; the synthetic fixtures are EC. Both
+        branches of the check need to work, so both are exercised."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        ca, ca_key = issue("rsa-CA", not_before=now - datetime.timedelta(days=5),
+                           not_after=now + datetime.timedelta(days=500),
+                           is_ca=True, key=key)
+        child, _ = issue("dc02.test.local",
+                         not_before=now - datetime.timedelta(days=5),
+                         not_after=now + datetime.timedelta(days=100),
+                         issuer_name=ca.subject, issuer_key=ca_key)
+        assert signed_the_leaf(ca, child)[0] is True
+        assert signed_the_leaf(chain().root, child)[0] is False
+
+
+# --------------------------------------------------------------------------- #
+# Where it looks — and where it refuses to
+# --------------------------------------------------------------------------- #
+
+class TestSearchTargets:
+    def test_an_ldap_aia_url_contributes_its_dn(self):
+        dn = f"CN=test-CA,{AIA_CONTAINER_RDN},{CONFIG_DN}"
+        certificate = with_aia(
+            f"ldap:///{dn.replace(' ', '%20')}?cACertificate?base")
+        assert aia_dns_from_certificate(certificate) == (dn,)
+        assert search_targets(certificate, BASE_DN)[0] == dn
+
+    def test_a_dn_outside_the_configuration_context_is_refused(self):
+        """The URL is chosen by whoever holds the certificate, and at this point
+        that is exactly who is in question."""
+        certificate = with_aia(
+            "ldap:///CN=Evil,DC=attacker,DC=example?cACertificate?base")
+        targets = search_targets(certificate, BASE_DN)
+        assert not any("attacker" in dn for dn in targets)
+        # ...and the well-known containers are still searched, so refusing the
+        # hostile DN does not cost the operator the answer.
+        assert any(AIA_CONTAINER_RDN.lower() in dn.lower() for dn in targets)
+
+    def test_an_aia_url_naming_a_host_is_refused(self):
+        """A host would mean binding this app's credentials somewhere the
+        certificate chose."""
+        certificate = with_aia(
+            f"ldap://elsewhere.example:389/CN=x,{CONFIG_DN}?cACertificate")
+        assert aia_dns_from_certificate(certificate) == ()
+
+    def test_an_http_aia_url_is_not_followed(self):
+        certificate = with_aia("http://pki.example/ca.crt")
+        assert aia_dns_from_certificate(certificate) == ()
+
+    def test_a_certificate_with_no_aia_still_has_targets(self):
+        targets = search_targets(chain().leaf, BASE_DN)
+        assert any(AIA_CONTAINER_RDN.lower() in dn.lower() for dn in targets)
+
+    def test_no_base_dn_means_nowhere_to_look(self):
+        assert search_targets(chain().leaf, "") == ()
+
+
+# --------------------------------------------------------------------------- #
+# The fetch — the test that matters most is the first one
+# --------------------------------------------------------------------------- #
+
+class TestFetchIssuingCa:
+    def test_it_picks_the_one_certificate_that_signed_the_leaf(self):
+        """Four candidates, one right answer, and the right one is not first.
+
+        This is the live case reproduced: a container holding the real issuer
+        alongside a root, an unrelated CA and a decoy. Taking the first, or the
+        one whose subject matches the leaf's issuer name, gets it wrong.
+        """
+        now = datetime.datetime.now(datetime.timezone.utc)
+        decoy, _ = issue("test-CA-Issuing",  # same CN as the real issuer
+                         not_before=now - datetime.timedelta(days=100),
+                         not_after=now + datetime.timedelta(days=100),
+                         is_ca=True)
+        directory = FakeDirectory({
+            f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [
+                chain().root, chain().rogue_root, decoy, chain().issuing]})
+        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                                  factory=factory(directory))
+
+        assert result.outcome == FETCH_FOUND
+        assert result.ok is True
+        expected = certificate_facts(der(chain().issuing)).fingerprint_hex
+        assert result.match.fingerprint_hex == expected
+        assert result.rejected == 3, "the three decoys must be counted, not hidden"
+        assert len(result.candidates) == 4
+
+    def test_the_decoy_with_the_issuers_name_is_still_rejected(self):
+        """Named identically to the real issuer, so only the signature separates
+        them. Offered alone, it must not be accepted."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        decoy, _ = issue("test-CA-Issuing",
+                         not_before=now - datetime.timedelta(days=100),
+                         not_after=now + datetime.timedelta(days=100),
+                         is_ca=True)
+        directory = FakeDirectory({f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [decoy]})
+        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                                  factory=factory(directory))
+
+        assert result.outcome == FETCH_NO_MATCH
+        assert result.ok is False
+        assert result.match is None
+
+    def test_no_match_says_it_could_also_be_an_interception(self):
+        directory = FakeDirectory(
+            {f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [chain().rogue_root]})
+        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                                  factory=factory(directory))
+        assert result.outcome == FETCH_NO_MATCH
+        assert "interception" in result.detail
+
+    def test_an_empty_directory_is_unavailable_not_a_denial(self):
+        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                                  factory=factory(FakeDirectory({})))
+        assert result.outcome == FETCH_UNAVAILABLE
+        assert result.match is None
+
+    def test_it_stops_searching_once_the_proof_is_in(self):
+        directory = FakeDirectory({
+            f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [chain().issuing]})
+        fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                         factory=factory(directory))
+        assert len(directory.searched) == 1
+
+    def test_a_dead_connection_stops_the_search(self):
+        """Same reasoning as the published-roots read: after a TLS failure
+        ldap3's Server reports a downstream symptom, not the cause."""
+        directory = FakeDirectory(
+            error=LDAPSocketOpenError("socket ssl wrapping error: [SSL: "
+                                      "CERTIFICATE_VERIFY_FAILED]"))
+        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                                  factory=factory(directory))
+        assert len(directory.searched) == 1
+        assert result.outcome == FETCH_UNAVAILABLE
+        assert "invalid server address" not in result.error.lower()
+
+    def test_a_bind_failure_stops_the_search(self):
+        directory = FakeDirectory(error=LDAPBindError("invalidCredentials"))
+        fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                         factory=factory(directory))
+        assert len(directory.searched) == 1
+
+    def test_a_per_container_permission_error_tries_the_others(self):
+        directory = FakeDirectory(error=LDAPException("insufficientAccessRights"))
+        fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                         factory=factory(directory))
+        assert len(directory.searched) > 1
+
+    def test_it_always_disconnects(self):
+        directory = FakeDirectory(error=LDAPException("boom"))
+        fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                         factory=factory(directory))
+        assert directory.disconnected is True
+
+    def test_a_missing_base_dn_is_reported_not_guessed(self):
+        result = fetch_issuing_ca(settings(base_dn=""), "pw", leaf_facts(),
+                                  factory=factory(FakeDirectory()))
+        assert result.outcome == FETCH_UNAVAILABLE
+        assert "Base DN" in result.headline or "Base DN" in result.detail
+
+
+class TestItDoesNotWeakenTheOperatorsSettings:
+    """Validation is turned off on a copy, for one call, and reported."""
+
+    def test_the_settings_object_is_unchanged(self):
+        original = settings(validate_certificate=True)
+        directory = FakeDirectory({
+            f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [chain().issuing]})
+        fetch_issuing_ca(original, "pw", leaf_facts(),
+                         factory=factory(directory))
+        assert original.validate_certificate is True
+
+    def test_the_connection_actually_used_had_validation_off(self):
+        """Otherwise the fetch would fail for the very reason it exists."""
+        directory = FakeDirectory({
+            f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [chain().issuing]})
+        fetch_issuing_ca(settings(validate_certificate=True), "pw",
+                         leaf_facts(), factory=factory(directory))
+        security = directory.security_config
+        validate = getattr(security, "validate_certificate", None)
+        assert validate is False, security
+
+    def test_the_result_says_the_transport_was_not_validated(self):
+        directory = FakeDirectory({
+            f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [chain().issuing]})
+        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                                  factory=factory(directory))
+        assert result.ok is True
+        assert result.validated_transport is False
+        # and the wording does not let that pass as corroboration
+        assert "not validated" in result.detail
+        assert "out of band" in result.detail
+
+
+# --------------------------------------------------------------------------- #
+# The instructions gain the step they used to assume
+# --------------------------------------------------------------------------- #
+
+class TestTheInstructionsNameTheStep:
+    def test_the_first_step_is_getting_the_file(self):
+        steps = install_commands(detect_machine("darwin", {}))
+        assert "Save the CA certificate" in steps[0].label
+        assert "Download the issuing CA certificate" in steps[0].note
+        assert steps[0].command == "", "obtaining the file is not a command"
+
+    def test_once_saved_the_first_step_says_where_it_is(self, tmp_path):
+        path = tmp_path / "ca.crt"
+        steps = install_commands(detect_machine("darwin", {}), path)
+        assert str(path) in steps[0].note
+        assert "nothing has been added to a trust store" in steps[0].note
+
+    def test_the_step_does_not_call_the_file_the_fix_on_a_joined_machine(self):
+        """On a domain-joined machine the missing root means autoenrollment is
+        broken domain-wide. A hand-imported file hides that."""
+        joined = detect_machine("win32", {"USERDNSDOMAIN": "test.local"})
+        steps = install_commands(joined)
+        assert "not the fix" in steps[0].note
+        # the existing advice still leads the commands
+        assert "find out why it is missing" in steps[1].label
+
+    def test_on_macos_the_file_is_the_fix_and_says_so(self):
+        steps = install_commands(detect_machine("darwin", {}))
+        assert "what the commands below operate on" in steps[0].note
+
+    def test_every_platform_gains_the_step(self):
+        for system, environ in (("darwin", {}), ("linux", {}),
+                                ("win32", {"USERDOMAIN": "WS01"}),
+                                ("win32", {"USERDNSDOMAIN": "test.local"}),
+                                ("win32", {})):
+            steps = install_commands(detect_machine(system, environ))
+            assert steps, (system, environ)
+            assert "CA certificate" in steps[0].label, (system, environ)
+
+    def test_the_placeholder_still_guards_an_unsaved_path(self):
+        steps = install_commands(detect_machine("darwin", {}))
+        commands = " ".join(step.command for step in steps if step.command)
+        assert PATH_PLACEHOLDER in commands
+
+
+# --------------------------------------------------------------------------- #
+# The button: where it appears, and where it deliberately does not
+# --------------------------------------------------------------------------- #
+
+class TestTheButtonAppearsWhereItIsNeeded:
+    def _panel(self, **kwargs):
+        from .test_app_certificate_panel import a_panel
+        return a_panel(**kwargs)
+
+    def test_it_appears_when_the_controller_sent_only_its_own_certificate(self):
+        """The live case: nothing in the chain is exportable, so without this
+        button the instructions open on a path the operator has to go and find.
+        """
+        panel = self._panel(presented=[der(chain().leaf)],
+                            published=[chain().root])
+        assert "data-download-issuer" in panel
+        assert "Download the issuing CA certificate" in panel
+
+    def test_it_does_not_appear_when_the_chain_already_carries_a_ca(self):
+        """There is already an Export button on the certificate itself; a second
+        route to the same file is noise."""
+        panel = self._panel(published=[chain().root])
+        assert "data-download-issuer" not in panel
+
+    def test_the_leaf_only_warning_points_at_the_button(self):
+        panel = self._panel(presented=[der(chain().leaf)])
+        assert "sent only its own certificate" in panel
+        assert "Download the issuing CA certificate" in panel
+        # ...and no longer just tells the operator to go and get it themselves
+        assert "Get the CA certificate from the CA server itself" not in panel
+
+    def test_the_offer_states_the_read_is_unvalidated(self):
+        panel = self._panel(presented=[der(chain().leaf)])
+        assert "validation off" in panel
+        assert "confirmed out of band" in panel
+
+    def test_the_offer_explains_why_the_right_file_is_the_right_one(self):
+        """The reason a naive version of this button would be wrong."""
+        panel = self._panel(presented=[der(chain().leaf)])
+        assert "installing the wrong one leaves the same error" in panel
+        assert "signed the one the" in panel
+
+    def test_the_offer_says_it_does_not_install(self):
+        panel = self._panel(presented=[der(chain().leaf)])
+        assert "does not add it to any trust store" in panel
+
+
+class TestTheResultPanel:
+    def _render(self, fetch):
+        from aditor.app.render import render_certificate_panel
+
+        from .test_app_certificate_panel import a_report
+        return render_certificate_panel(
+            a_report(presented=[der(chain().leaf)]), fetch=fetch)
+
+    def _fetch(self, published):
+        directory = FakeDirectory(
+            {f"{AIA_CONTAINER_RDN},{CONFIG_DN}": published})
+        return fetch_issuing_ca(settings(), "pw", leaf_facts(),
+                                factory=factory(directory))
+
+    def test_every_rejected_candidate_is_shown_not_hidden(self):
+        """An operator who is told "here is the CA" deserves to see that three
+        others were considered and why they lost."""
+        html = self._render(self._fetch(
+            [chain().root, chain().rogue_root, chain().issuing]))
+        assert "Every certificate that was considered" in html
+        assert html.count("did not sign") >= 2
+        assert "signed it" in html
+
+    def test_a_found_result_still_demands_out_of_band_confirmation(self):
+        html = self._render(self._fetch([chain().issuing]))
+        assert "Confirm the fingerprint" in html
+        assert "was not authenticated" in html
+        assert "does not prove either is legitimate" in html
+
+    def test_no_match_is_rendered_as_bad_not_as_a_shrug(self):
+        html = self._render(self._fetch([chain().rogue_root]))
+        assert "None of the published CA certificates signed this one." in html
+        # The banner carrying that headline must be the bad one, not a warning.
+        headline = "None of the published CA certificates signed this one."
+        before = html[:html.index(headline)]
+        assert before.rfind("banner-bad") > before.rfind("banner-warn"), (
+            "a controller whose certificate no published CA signed is not a "
+            "shrug")
+        assert "interception" in html
+
+    def test_the_panel_renders_without_a_fetch(self):
+        from aditor.app.render import render_certificate_panel
+
+        from .test_app_certificate_panel import a_report
+        html = render_certificate_panel(a_report(presented=[der(chain().leaf)]))
+        assert "Every certificate that was considered" not in html
+        assert "data-download-issuer" in html

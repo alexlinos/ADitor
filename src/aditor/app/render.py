@@ -407,7 +407,87 @@ def _guidance_panel(machine: Any, steps: Sequence[Any]) -> str:
                if items else ""))
 
 
-def render_certificate_panel(report: Any) -> str:
+#: The label on the download button. Deliberately says what it does -- fetches
+#: a file -- and not what the operator then does with it. "Download" and "save"
+#: are not on the forbidden-verb list in
+#: ``tests/test_app_certificate_panel.py`` because writing a file is the one
+#: thing this app is allowed to do with a certificate; "trust", "install" and
+#: "import" are, and remain, not.
+DOWNLOAD_ISSUER_LABEL = "Download the issuing CA certificate"
+
+
+def _download_issuer_prompt(report: Any) -> str:
+    """The offer to fetch the CA certificate, when there is nothing to export.
+
+    Shown when the controller sent no CA of its own, which is the ordinary case
+    for an autoenrolled domain controller certificate and the case where the
+    instructions below would otherwise begin with a path the operator has to go
+    and find by hand.
+    """
+    return _banner(
+        "info", "ADitor can fetch the issuing CA certificate for you.",
+        "<p>The controller did not send it, but Active Directory publishes it, "
+        "and the certificate the controller <em>did</em> send names the "
+        "directory object it lives in. ADitor will read it and save it as a "
+        "<code>.crt</code> file here — that is all: it does not add it to any "
+        "trust store, and the commands below stay yours to run.</p>"
+        "<p><strong>What makes the file the right one.</strong> More than one "
+        "CA certificate is normally published, including retired ones, and "
+        "installing the wrong one leaves the same error behind while looking "
+        "like a fix. So ADitor does not pick by name: it offers a certificate "
+        "only if that certificate&rsquo;s key <em>signed the one the "
+        "controller presented</em>. Anything else is discarded and counted "
+        "below.</p>"
+        "<p class=\"muted\">The read is made with certificate validation off, "
+        "because the certificate needed to validate it is the one being "
+        "fetched. That is why the signature check exists, and why the "
+        "fingerprint still has to be confirmed out of band before you install "
+        "anything.</p>"
+        f'<div class="actions actions-left">'
+        f'<button type="button" class="primary" data-download-issuer="1">'
+        f"{esc(DOWNLOAD_ISSUER_LABEL)}</button></div>")
+
+
+def _issuer_panel(fetch: Any) -> str:
+    """What the issuer fetch found, including what it refused to offer."""
+    if fetch is None:
+        return ""
+    outcome = str(getattr(fetch, "outcome", "") or "")
+    kind = {"found": "ok", "no_match": "bad"}.get(outcome, "warn")
+    body = [f"<p>{esc(fetch.detail)}</p>"]
+
+    rows = "".join(
+        f"<tr><th>{esc(item.facts.label)}</th>"
+        f'<td>{"signed it" if item.verified else "no"}</td>'
+        f'<td class="muted"><code>{esc(item.facts.fingerprint)}</code></td>'
+        f"<td class=\"muted\">{esc(item.reason)}</td></tr>"
+        for item in getattr(fetch, "candidates", ()) or ())
+    if rows:
+        body.append(
+            '<p class="label">Every certificate that was considered</p>'
+            '<table class="facts"><thead><tr><th>Certificate</th>'
+            "<th>Signed the presented certificate?</th>"
+            "<th>SHA-256 fingerprint</th><th>Why</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>")
+    if getattr(fetch, "error", ""):
+        body.append('<p class="label">What the directory said</p>'
+                    + _code_block(fetch.error))
+    if getattr(fetch, "unchecked", 0):
+        body.append(
+            f'<p class="fix">{esc(fetch.unchecked)} certificate(s) could not '
+            f"be checked at all. That is not the same as ruling them out, and "
+            f"none of them were offered.</p>")
+    if outcome == "found":
+        body.append(
+            '<p class="fix">This proves the two certificates belong together. '
+            "It does not prove either is legitimate — the connection it came "
+            "over was not authenticated. Confirm the fingerprint above with "
+            "whoever runs the certification authority before you install "
+            "it.</p>")
+    return _banner(kind, fetch.headline, "".join(body))
+
+
+def render_certificate_panel(report: Any, fetch: Any = None) -> str:
     """The whole Certificate panel: chain, corroboration, guidance, export.
 
     Ordered by what the operator has to do first. Expiry alerts lead, because
@@ -453,7 +533,10 @@ def render_certificate_panel(report: Any) -> str:
         parts.append(_banner(
             "warn", "The server sent only its own certificate.",
             "<p>No CA certificates came with it, so the chain has no visible "
-            "anchor. Get the CA certificate from the CA server itself.</p>"))
+            "anchor — which is normal for an autoenrolled controller "
+            "certificate rather than a fault in itself. The issuing CA has to "
+            "come from somewhere else, and ADitor can fetch it: see "
+            f"<strong>{esc(DOWNLOAD_ISSUER_LABEL)}</strong> below.</p>"))
     parts.extend(
         _certificate_card(facts, _position_label(index, total),
                           exportable=facts.fingerprint_hex in exportable)
@@ -462,6 +545,14 @@ def render_certificate_panel(report: Any) -> str:
     parts.append('<h3 class="section">Does Active Directory agree?</h3>')
     parts.append(_corroboration_panel(report.corroboration))
     parts.append(_directory_panel(report.directory))
+
+    parts.append('<h3 class="section">Get the CA certificate</h3>')
+    if fetch is not None:
+        parts.append(_issuer_panel(fetch))
+    if not report.export_path and not exportable:
+        # Nothing in the chain can be exported, so the instructions below would
+        # otherwise open on a path the operator has to go and find.
+        parts.append(_download_issuer_prompt(report))
 
     parts.append('<h3 class="section">What to do on this machine</h3>')
     parts.append(_guidance_panel(report.machine, report.steps))
@@ -473,11 +564,13 @@ def render_certificate_panel(report: Any) -> str:
             f"not installed it and will not: the commands above are yours to "
             f"run, and the elevation prompt is where you decide.</p>"))
     else:
+        hint = ("<strong>Export CA certificate</strong> on the certificate "
+                "you have verified" if exportable else
+                f"<strong>{esc(DOWNLOAD_ISSUER_LABEL)}</strong> above")
         parts.append(_banner(
-            "info", "Export a CA certificate to fill the path into the "
+            "info", "Save a CA certificate to fill the path into the "
                     "commands above.",
-            "<p>Use <strong>Export CA certificate</strong> on the certificate "
-            "you have verified. ADitor writes a <code>.crt</code> file and "
+            f"<p>Use {hint}. ADitor writes a <code>.crt</code> file and "
             "nothing else — it does not add it to any trust store.</p>"))
     return "".join(parts)
 
