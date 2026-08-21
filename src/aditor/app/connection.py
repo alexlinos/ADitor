@@ -261,6 +261,11 @@ def _configs(settings: ConnectionSettings, password: str
     security = SecurityConfig(
         enable_tls=True,
         validate_certificate=bool(settings.validate_certificate),
+        # Without this the scan and the connection test verify against the
+        # platform trust store, which on macOS is not the store the operator
+        # just imported into -- see ConnectionSettings.ca_cert_file.
+        ca_cert_file=str(getattr(settings, "ca_cert_file", "") or "").strip()
+        or None,
         require_secure_connection=True,
     )
     # One attempt. Three would triple the failed-logon count of a wrong

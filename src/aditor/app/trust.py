@@ -398,19 +398,65 @@ def _obtain_step(context: MachineContext,
              "file. It does not install it. " + tail)
 
 
+def _point_aditor_at_it_step(path: Optional[Path]) -> InstallStep:
+    """Tell ADitor itself about the certificate, which is a separate act.
+
+    Worth its own step because the surprise here is real and costs an hour.
+    ADitor verifies through Python's OpenSSL. OpenSSL does not read the macOS
+    login or System keychain, and on a framework Python
+    ``ssl.get_default_verify_paths()`` commonly reports **no** CA file at all --
+    so an operator can import the root, watch Safari and curl start trusting the
+    controller, and find this app still reporting an untrusted issuer, with
+    nothing left to try.
+
+    Setting ``ca_cert_file`` is the route. On Windows the platform store is
+    normally the right answer and this step is a no-op worth reading anyway,
+    because it explains why the app and the OS can disagree.
+    """
+    where = str(path) if path else PATH_PLACEHOLDER
+    return InstallStep(
+        label="Point ADitor itself at the certificate",
+        command=f'"ca_cert_file": "{where}"',
+        note="Set that inside the \"security\" block of the app's config.json, "
+             "beside \"validate_certificate\". ADitor verifies through "
+             "Python's OpenSSL, which does not read the macOS keychain and on "
+             "many builds has no CA bundle of its own — so importing the root "
+             "into the OS can fix every other program on the machine and leave "
+             "this one still reporting an untrusted issuer. This is a path to "
+             "the file, not a copy of it: the certificate stays where you can "
+             "inspect and replace it.")
+
+
+#: The last step, and the one most easily forgotten: nothing above takes effect
+#: in a process that is already running.
+RESTART_STEP = InstallStep(
+    label="Restart ADitor",
+    note="Trust is read when a connection is built, and the window is holding "
+         "a report from before the change. Close it and start it again, then "
+         "run Test connection: a pass there is the confirmation that the "
+         "certificate work actually landed, and it is the only one worth "
+         "believing.")
+
+
 def install_commands(context: MachineContext,
                      path: Optional[Path] = None) -> Tuple[InstallStep, ...]:
-    """The obtain-the-file step, then ``context.steps`` with ``{path}`` resolved.
+    """The full sequence: obtain the file, install it, point ADitor at it,
+    restart.
+
+    The first and last two steps are added here rather than in each platform's
+    list because they are true on every platform, and because a step that only
+    some lists carry is a step that gets left out of the next one.
 
     Returns text. It does not run anything, and there is no variant of this
     function that does.
     """
     where = str(path) if path else PATH_PLACEHOLDER
-    return (_obtain_step(context, path),) + tuple(
-        InstallStep(label=step.label,
-                    command=step.command.replace("{path}", where),
-                    note=step.note)
-        for step in context.steps)
+    return ((_obtain_step(context, path),)
+            + tuple(InstallStep(label=step.label,
+                                command=step.command.replace("{path}", where),
+                                note=step.note)
+                    for step in context.steps)
+            + (_point_aditor_at_it_step(path), RESTART_STEP))
 
 
 # --------------------------------------------------------------------------- #
