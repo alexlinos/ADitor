@@ -164,6 +164,9 @@ cython_debug/
 
 # Active Directory MCP specific
 ad-config/config.json
+# ...and any backup of it. A `.bak` copy of a real config holds the same
+# server, domain, base DN and bind account as the original.
+ad-config/config.json.*
 ad-config/ad-config.json
 *.log
 *.pem
@@ -179,3 +182,9 @@ ldap-config/
 *.temp
 .DS_Store
 Thumbs.db
+
+# Hardening snapshots hold real domain data (GPO names, registry values, DNs).
+# They belong OUTSIDE the git tree — see docs. This rule is a backstop only.
+scans/
+snapshots/
+*/scan.json
