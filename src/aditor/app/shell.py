@@ -7,7 +7,7 @@ this module. :func:`require_webview` turns the ``ImportError`` into the
 one-line install instruction rather than a traceback, and a test asserts that
 the whole ``aditor.app`` package imports with ``webview`` absent.
 
-pywebview rather than Electron, per ``REPLATFORM_BRIEF.md``: it uses the OS's own
+pywebview rather than Electron: it uses the OS's own
 web view (WebView2 on Windows, WebKit on macOS), which is one Python dependency
 instead of a bundled browser, and it is what the eventual PyInstaller packaging
 work package is planned around. Packaging is explicitly not this work package —

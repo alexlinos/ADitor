@@ -24,7 +24,7 @@ the files have to tell the same story, and re-deriving the time would let them
 drift by however long the scan took.
 
 **No colons.** ISO-8601's ``16:26:47`` is illegal in a Windows filename and the
-packaging target is a Windows ``.exe`` (see ``docs/REPLATFORM_BRIEF.md``), so the
+packaging target is a Windows ``.exe``, so the
 time is rendered ``162647Z``. The short ``scan_id`` prefix that follows is what
 keeps two scans in the same second in separate folders — the timestamp alone has
 one-second resolution and is not an identity.
@@ -260,9 +260,9 @@ def write_snapshot(scan_result: Dict[str, Any], output_dir: Any) -> Snapshot:
 
     try:
         scan_path, scan_bytes = write_scan(
-            scan_result, str(folder / SNAPSHOT_SCAN_FILENAME))
+            scan_result, folder / SNAPSHOT_SCAN_FILENAME)
         report_path, report_bytes = write_report(
-            scan_result, str(folder / SNAPSHOT_REPORT_FILENAME))
+            scan_result, folder / SNAPSHOT_REPORT_FILENAME)
     except (ScanFileError, ReportPathError):
         # The folder is one this call just created, so nothing of anyone else's
         # is in it. Leaving a folder with one of the two files in it would read

@@ -36,19 +36,12 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 # Identifies a file as one of our stored scans. It is the first key in the
-# document, so ``_marker_present`` never has to parse a whole file — and a
-# mistyped output path cannot silently destroy someone else's JSON.
+# document.
 SCAN_FILE_MARKER = "aditor-hardening-scan"
 
 # Version of the *stored file's* envelope: the two fields this module adds, not
 # the scan inside it (that carries its own engine and catalog versions).
 SCAN_FILE_FORMAT_VERSION = "1.0.0"
-
-# How much of an existing file to search for the marker before refusing it.
-_MARKER_SCAN_BYTES = 8192
-
-# Suffixes :func:`write_scan` accepts.
-JSON_SUFFIXES = (".json",)
 
 # The keys a payload must carry to be a scan at all. ``scan`` holds the
 # provenance a diff needs to attribute a change; ``findings`` and ``counts`` hold
@@ -198,91 +191,28 @@ def read_scan(path: Any) -> Dict[str, Any]:
     return validate_scan_payload(payload, shown)
 
 
-def _validate_output_path(output_path: Any) -> Path:
-    """Resolve and vet an output path without reading more than it has to.
-
-    Guards, in order: a usable string; a ``.json`` suffix; the path is not an
-    existing directory; and, if the file already exists, that it carries
-    :data:`SCAN_FILE_MARKER` — so re-running the tool over its own output is
-    fine while clobbering an unrelated document is refused.
-    """
-    if not isinstance(output_path, str) or not output_path.strip():
-        raise ScanFileError(
-            "output_path must be a non-empty file path ending in .json")
-
-    path = Path(os.path.expanduser(output_path.strip()))
-    if not path.is_absolute():
-        path = Path.cwd() / path
-
-    if path.suffix.lower() not in JSON_SUFFIXES:
-        raise ScanFileError(
-            f"output_path must end in {JSON_SUFFIXES[0]} (got "
-            f"{path.suffix or 'no suffix'!r}); a stored scan is the JSON "
-            f"payload, and requiring the suffix is what stops it being written "
-            f"over a file of another kind — an HTML report, say")
-
-    if path.is_dir():
-        raise ScanFileError(
-            f"output_path {str(path)!r} is a directory; give the full file name "
-            f"to write, e.g. {str(path / 'hardening-scan.json')!r}")
-
-    if path.exists():
-        if not path.is_file():
-            raise ScanFileError(
-                f"output_path {str(path)!r} exists and is not a regular file; "
-                f"refusing to write to it")
-        try:
-            with path.open("rb") as handle:
-                head = handle.read(_MARKER_SCAN_BYTES)
-        except OSError as exc:
-            raise ScanFileError(
-                f"output_path {str(path)!r} exists but could not be read to "
-                f"check whether it is a previous scan: {exc}") from exc
-        if SCAN_FILE_MARKER.encode("ascii") not in head:
-            raise ScanFileError(
-                f"output_path {str(path)!r} already exists and is not an ADitor "
-                f"hardening scan (it does not carry the "
-                f"{SCAN_FILE_MARKER!r} marker); refusing to overwrite it. "
-                f"Choose a new file name, or delete that file first if you "
-                f"meant to replace it")
-    return path
-
-
 def write_scan(scan_result: Dict[str, Any], output_path: Any) -> Tuple[Path, int]:
     """Write ``scan_result`` to ``output_path`` as a stored scan.
+
+    The only caller is :func:`aditor.hardening.snapshot.write_snapshot`, which
+    writes into a folder it has just created, so there is nothing to clobber.
 
     Returns:
         ``(path, bytes_written)``.
 
     Raises:
-        ScanFileError: the path is unusable, would clobber a non-scan file, the
-            payload is not JSON-serialisable, or the write failed.
+        ScanFileError: the payload is not JSON-serialisable, or the write failed.
     """
-    path = _validate_output_path(output_path)
-    document = scan_document(scan_result)
-
+    path = Path(output_path)
     try:
         # indent=2 costs a few bytes and buys a file a human can read, and that
         # plain `diff` and git can handle line by line.
-        text = json.dumps(document, indent=2, ensure_ascii=False)
+        text = json.dumps(scan_document(scan_result), indent=2,
+                          ensure_ascii=False)
     except (TypeError, ValueError) as exc:
         raise ScanFileError(
             f"the scan payload could not be serialised to JSON: {exc}") from exc
     payload = text.encode("utf-8")
-
-    parent = path.parent
-    if not parent.exists():
-        try:
-            parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ScanFileError(
-                f"could not create the directory {str(parent)!r} for the "
-                f"scan: {exc}") from exc
-    elif not parent.is_dir():
-        raise ScanFileError(
-            f"the parent path {str(parent)!r} is not a directory, so "
-            f"{str(path)!r} cannot be written")
-
     try:
         path.write_bytes(payload)
     except OSError as exc:
