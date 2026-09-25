@@ -19,9 +19,11 @@ jobs:
 
       # --collect-data carries controls.json and the app's web files;
       # smbclient is imported lazily, so it is collected explicitly.
-      - name: Build aditor.exe (command line)
+      # Distinct names: Windows filenames are case-insensitive, so aditor.exe
+      # and ADitor.exe would be the same file.
+      - name: Build aditor-cli.exe (command line)
         run: >
-          pyinstaller --noconfirm --onefile --name aditor
+          pyinstaller --noconfirm --onefile --name aditor-cli
           --collect-data aditor --collect-submodules aditor
           --collect-submodules smbclient --collect-submodules smbprotocol
           packaging/aditor_cli.py
@@ -36,9 +38,9 @@ jobs:
       - name: Smoke test
         shell: pwsh
         run: |
-          dist\aditor.exe --help
+          dist\aditor-cli.exe --help
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          dist\aditor.exe scan --config missing.json
+          dist\aditor-cli.exe scan --config missing.json
           if ($LASTEXITCODE -ne 2) { throw "expected exit 2, got $LASTEXITCODE" }
           $global:LASTEXITCODE = 0
 
