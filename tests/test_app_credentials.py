@@ -12,10 +12,10 @@ raise rather than quietly writing the password somewhere.
 
 import logging
 import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
-
 from aditor.app.credentials import (
     CONFIG_PASSWORD_PLACEHOLDER,
     DEFAULT_SERVICE,
@@ -85,6 +85,8 @@ class TestStoreSelection:
         assert isinstance(get_store("linux"), NoCredentialStore)
         assert isinstance(get_store("freebsd13"), NoCredentialStore)
 
+    @pytest.mark.skipif(sys.platform.startswith("win"),
+                        reason="on Windows the Windows store is available")
     def test_windows_store_is_unavailable_off_windows(self):
         # Asking for the Windows store on a Mac gets an object that says it
         # cannot run here, not one that pretends it can.

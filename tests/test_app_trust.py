@@ -19,9 +19,9 @@ arguments, and every write goes to ``tmp_path``.
 """
 
 import os
+import sys
 
 import pytest
-
 from aditor.app.certificates import certificate_facts
 from aditor.app.trust import (
     MACHINE_MACOS,
@@ -335,6 +335,8 @@ class TestExport:
         assert path.parent == tmp_path
         assert path.name == "escaped.crt"
 
+    @pytest.mark.skipif(sys.platform.startswith("win"),
+                        reason="chmod does not make a Windows folder read-only")
     def test_an_unwritable_directory_is_an_error_not_a_traceback(self,
                                                                 tmp_path):
         blocked = tmp_path / "blocked"
@@ -351,6 +353,8 @@ class TestExport:
         with pytest.raises(TrustExportError):
             export_ca_certificate(root_facts(), tmp_path, "..")
 
+    @pytest.mark.skipif(sys.platform.startswith("win"),
+                        reason="POSIX permission bits; Windows uses ACLs")
     def test_the_export_directory_is_created_owner_only(self, tmp_path):
         target = tmp_path / "exported-certificates"
         export_ca_certificate(root_facts(), target)

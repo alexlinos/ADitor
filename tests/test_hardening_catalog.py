@@ -14,9 +14,9 @@ Everything is offline: JSON dicts and the packaged data file, no LDAP, no SMB.
 """
 
 import json
+import re
 
 import pytest
-
 from aditor.hardening.catalog import (
     CHECK_TYPES,
     DEFAULT_CATALOG_PATH,
@@ -455,7 +455,7 @@ class TestLoadCatalogFromDisk:
         path.write_text(json.dumps(a_catalog(a_control(operator="vibes"))),
                         encoding="utf-8")
 
-        with pytest.raises(CatalogError, match=str(path)):
+        with pytest.raises(CatalogError, match=re.escape(str(path))):
             load_catalog(path)
 
 

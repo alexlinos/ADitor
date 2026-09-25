@@ -14,10 +14,10 @@ driven across a deliberate version change.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
-
 from aditor.app.history import (
     HistoryError,
     diff_snapshots,
@@ -194,6 +194,8 @@ class TestHistoryRendering:
         assert "No scans yet" in html
         assert "snapshots" in html
 
+    @pytest.mark.skipif(sys.platform.startswith("win"),
+                        reason="'<' and '>' are not allowed in Windows names")
     def test_a_hostile_folder_name_is_escaped(self, tmp_path):
         root = tmp_path / "snapshots"
         write_snapshot_folder(
