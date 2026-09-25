@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any, Union
 from threading import Lock
 
 import ldap3
-from ldap3 import Server, Connection, ALL, SUBTREE, ALL_ATTRIBUTES, ALL_OPERATIONAL_ATTRIBUTES
+from ldap3 import Server, Connection, ALL, SUBTREE, ALL_ATTRIBUTES
 from ldap3.core.exceptions import LDAPException, LDAPBindError, LDAPSocketOpenError
 
 from ..config.models import ActiveDirectoryConfig, SecurityConfig, PerformanceConfig
@@ -344,133 +344,6 @@ class LDAPManager:
             logger.error(f"Search error: {e}")
             raise
     
-    def add(self, dn: str, attributes: Dict[str, Any]) -> bool:
-        """
-        Add LDAP entry.
-        
-        Args:
-            dn: Distinguished name of new entry
-            attributes: Entry attributes
-            
-        Returns:
-            True if successful
-            
-        Raises:
-            LDAPException: If operation fails
-        """
-        connection = self.connect()
-        
-        try:
-            logger.debug(f"Adding entry: {dn}")
-            
-            success = connection.add(dn, attributes=attributes)
-            
-            if success:
-                logger.info(f"Successfully added entry: {dn}")
-                return True
-            else:
-                logger.error(f"Failed to add entry {dn}: {connection.result}")
-                raise LDAPException(f"Add operation failed: {connection.result}")
-                
-        except Exception as e:
-            logger.error(f"Add error for {dn}: {e}")
-            raise
-    
-    def modify(self, dn: str, changes: Dict[str, Any]) -> bool:
-        """
-        Modify LDAP entry.
-        
-        Args:
-            dn: Distinguished name of entry to modify
-            changes: Dictionary of changes to apply
-            
-        Returns:
-            True if successful
-            
-        Raises:
-            LDAPException: If operation fails
-        """
-        connection = self.connect()
-        
-        try:
-            logger.debug(f"Modifying entry: {dn}")
-            
-            success = connection.modify(dn, changes)
-            
-            if success:
-                logger.info(f"Successfully modified entry: {dn}")
-                return True
-            else:
-                logger.error(f"Failed to modify entry {dn}: {connection.result}")
-                raise LDAPException(f"Modify operation failed: {connection.result}")
-                
-        except Exception as e:
-            logger.error(f"Modify error for {dn}: {e}")
-            raise
-    
-    def delete(self, dn: str) -> bool:
-        """
-        Delete LDAP entry.
-        
-        Args:
-            dn: Distinguished name of entry to delete
-            
-        Returns:
-            True if successful
-            
-        Raises:
-            LDAPException: If operation fails
-        """
-        connection = self.connect()
-        
-        try:
-            logger.debug(f"Deleting entry: {dn}")
-            
-            success = connection.delete(dn)
-            
-            if success:
-                logger.info(f"Successfully deleted entry: {dn}")
-                return True
-            else:
-                logger.error(f"Failed to delete entry {dn}: {connection.result}")
-                raise LDAPException(f"Delete operation failed: {connection.result}")
-                
-        except Exception as e:
-            logger.error(f"Delete error for {dn}: {e}")
-            raise
-    
-    def move(self, dn: str, new_parent: str) -> bool:
-        """
-        Move LDAP entry to new parent.
-        
-        Args:
-            dn: Distinguished name of entry to move
-            new_parent: New parent DN
-            
-        Returns:
-            True if successful
-            
-        Raises:
-            LDAPException: If operation fails
-        """
-        connection = self.connect()
-        
-        try:
-            logger.debug(f"Moving entry {dn} to {new_parent}")
-            
-            success = connection.modify_dn(dn, new_superior=new_parent)
-            
-            if success:
-                logger.info(f"Successfully moved entry {dn} to {new_parent}")
-                return True
-            else:
-                logger.error(f"Failed to move entry {dn}: {connection.result}")
-                raise LDAPException(f"Move operation failed: {connection.result}")
-                
-        except Exception as e:
-            logger.error(f"Move error for {dn}: {e}")
-            raise
-    
     def test_connection(self) -> Dict[str, Any]:
         """
         Test LDAP connection and return server information.
@@ -513,11 +386,4 @@ class LDAPManager:
                 'connected': False,
                 'error': str(e)
             }
-    
-    def __enter__(self):
-        """Context manager entry."""
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
-        self.disconnect()
+

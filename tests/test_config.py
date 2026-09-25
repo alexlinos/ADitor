@@ -1,177 +1,98 @@
 """Tests for configuration module."""
 
-import pytest
-import tempfile
 import json
-import os
-from pathlib import Path
 
-from aditor.config.loader import load_config, validate_config
-from aditor.config.models import Config, ActiveDirectoryConfig
+import pytest
 
+from aditor.config.loader import load_config
+from aditor.config.models import ActiveDirectoryConfig, Config
 
-def test_load_config_from_file():
-    """Test loading configuration from JSON file."""
-    config_data = {
-        "active_directory": {
-            "server": "ldap://test.local:389",
-            "domain": "test.local",
-            "base_dn": "DC=test,DC=local",
-            "bind_dn": "CN=admin,DC=test,DC=local",
-            "password": "password123"
-        },
-        "organizational_units": {
-            "users_ou": "OU=Users,DC=test,DC=local",
-            "groups_ou": "OU=Groups,DC=test,DC=local",
-            "computers_ou": "OU=Computers,DC=test,DC=local",
-            "service_accounts_ou": "OU=Service Accounts,DC=test,DC=local"
-        }
-    }
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-        json.dump(config_data, f)
-        config_path = f.name
-    
-    try:
-        config = load_config(config_path)
-        assert isinstance(config, Config)
-        assert config.active_directory.server == "ldap://test.local:389"
-        assert config.active_directory.domain == "test.local"
-    finally:
-        os.unlink(config_path)
+AD = {
+    "server": "ldap://test.local:389",
+    "domain": "test.local",
+    "base_dn": "DC=test,DC=local",
+    "bind_dn": "CN=admin,DC=test,DC=local",
+    "password": "password123",
+}
 
 
-def test_load_config_from_env():
-    """Test loading configuration from environment variable."""
-    config_data = {
-        "active_directory": {
-            "server": "ldap://env-test.local:389",
-            "domain": "env-test.local",
-            "base_dn": "DC=env-test,DC=local",
-            "bind_dn": "CN=admin,DC=env-test,DC=local",
-            "password": "envpassword123"
-        },
-        "organizational_units": {
-            "users_ou": "OU=Users,DC=env-test,DC=local",
-            "groups_ou": "OU=Groups,DC=env-test,DC=local",
-            "computers_ou": "OU=Computers,DC=env-test,DC=local",
-            "service_accounts_ou": "OU=Service Accounts,DC=env-test,DC=local"
-        }
-    }
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-        json.dump(config_data, f)
-        config_path = f.name
-    
-    try:
-        # Set environment variable
-        os.environ['AD_MCP_CONFIG'] = config_path
-        
-        config = load_config()
-        assert isinstance(config, Config)
-        assert config.active_directory.domain == "env-test.local"
-    finally:
-        os.unlink(config_path)
-        if 'AD_MCP_CONFIG' in os.environ:
-            del os.environ['AD_MCP_CONFIG']
+def write(tmp_path, data):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(data) if not isinstance(data, str) else data,
+                    encoding="utf-8")
+    return str(path)
 
 
-def test_config_validation():
-    """Test configuration validation."""
-    config_data = {
-        "active_directory": {
-            "server": "ldap://test.local:389",
-            "domain": "test.local", 
-            "base_dn": "DC=test,DC=local",
-            "bind_dn": "CN=admin,DC=test,DC=local",
-            "password": "password123"
-        },
-        "organizational_units": {
-            "users_ou": "OU=Users,DC=test,DC=local",
-            "groups_ou": "OU=Groups,DC=test,DC=local",
-            "computers_ou": "OU=Computers,DC=test,DC=local",
-            "service_accounts_ou": "OU=Service Accounts,DC=test,DC=local"
-        }
-    }
-    
-    config = Config(**config_data)
-    # Should not raise exception
-    validate_config(config)
+def test_load_config_from_file(tmp_path):
+    config = load_config(write(tmp_path, {"active_directory": AD}))
+    assert isinstance(config, Config)
+    assert config.active_directory.server == "ldap://test.local:389"
+    assert config.active_directory.domain == "test.local"
+
+
+def test_load_config_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("AD_MCP_CONFIG", write(tmp_path, {"active_directory": AD}))
+    assert load_config().active_directory.base_dn == "DC=test,DC=local"
+
+
+def test_the_password_placeholder_is_expanded_from_the_environment(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("AD_MCP_PASSWORD", "from-env")
+    path = write(tmp_path, {"active_directory": dict(
+        AD, password="${AD_MCP_PASSWORD}")})
+    assert load_config(path).active_directory.password == "from-env"
+
+
+def test_legacy_blocks_and_unknown_keys_are_ignored(tmp_path):
+    # Configs written before the MCP removal still carry these.
+    path = write(tmp_path, {
+        "_comment": "written by the app",
+        "active_directory": dict(AD, use_ssl=True, ssl_port=636),
+        "organizational_units": {"users_ou": "OU=Users,DC=test,DC=local"},
+        "logging": {"level": "INFO"},
+        "security": {"require_secure_connection": True},
+        "performance": {"connection_pool_size": 10, "max_retries": 1},
+    })
+    config = load_config(path)
+    assert config.performance.max_retries == 1
 
 
 def test_invalid_server_url():
-    """Test validation of invalid server URL."""
     with pytest.raises(ValueError, match="Server must start with ldap:// or ldaps://"):
-        ActiveDirectoryConfig(
-            server="http://invalid.com",
-            domain="test.local",
-            base_dn="DC=test,DC=local",
-            bind_dn="CN=admin,DC=test,DC=local",
-            password="password123"
-        )
+        ActiveDirectoryConfig(**dict(AD, server="http://invalid.com"))
 
 
 def test_missing_config_file():
-    """Test handling of missing configuration file."""
     with pytest.raises(FileNotFoundError):
         load_config("/nonexistent/path/config.json")
 
 
-def test_invalid_json():
-    """Test handling of invalid JSON."""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-        f.write("invalid json content")
-        config_path = f.name
-    
-    try:
-        with pytest.raises(json.JSONDecodeError):
-            load_config(config_path)
-    finally:
-        os.unlink(config_path)
+def test_invalid_json(tmp_path):
+    with pytest.raises(json.JSONDecodeError):
+        load_config(write(tmp_path, "invalid json content"))
 
 
-def test_missing_required_fields():
-    """Test validation of missing required fields."""
-    config_data = {
-        "active_directory": {
-            "server": "ldap://test.local:389",
-            # Missing required fields
-        },
-        "organizational_units": {
-            "users_ou": "OU=Users,DC=test,DC=local",
-            "groups_ou": "OU=Groups,DC=test,DC=local",
-            "computers_ou": "OU=Computers,DC=test,DC=local",
-            "service_accounts_ou": "OU=Service Accounts,DC=test,DC=local"
-        }
-    }
-    
-    with pytest.raises(ValueError):
-        Config(**config_data)
+def test_missing_required_fields(tmp_path):
+    path = write(tmp_path, {"active_directory": {"server": "ldap://test.local"}})
+    with pytest.raises(ValueError, match="invalid configuration"):
+        load_config(path)
 
 
-def test_default_values():
-    """Test default configuration values."""
-    config_data = {
-        "active_directory": {
-            "server": "ldap://test.local:389",
-            "domain": "test.local",
-            "base_dn": "DC=test,DC=local",
-            "bind_dn": "CN=admin,DC=test,DC=local",
-            "password": "password123"
-        },
-        "organizational_units": {
-            "users_ou": "OU=Users,DC=test,DC=local",
-            "groups_ou": "OU=Groups,DC=test,DC=local",
-            "computers_ou": "OU=Computers,DC=test,DC=local",
-            "service_accounts_ou": "OU=Service Accounts,DC=test,DC=local"
-        }
-    }
-    
-    config = Config(**config_data)
-    
-    # Test default values
-    assert config.security.enable_tls == True
-    assert config.logging.level == "INFO"
-    assert config.performance.connection_pool_size == 10
-    assert config.active_directory.use_ssl == True
-    assert config.active_directory.ssl_port == 636
+def test_a_config_without_an_active_directory_block_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="active_directory"):
+        load_config(write(tmp_path, {"security": {}}))
+
+
+def test_non_positive_retries_are_refused(tmp_path):
+    path = write(tmp_path, {"active_directory": AD,
+                            "performance": {"max_retries": 0}})
+    with pytest.raises(ValueError, match="positive"):
+        load_config(path)
+
+
+def test_default_values(tmp_path):
+    config = load_config(write(tmp_path, {"active_directory": AD}))
+    assert config.security.enable_tls is True
+    assert config.security.validate_certificate is True
+    assert config.performance.max_retries == 3
+    assert config.active_directory.timeout == 30

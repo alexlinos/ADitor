@@ -64,7 +64,6 @@ to drive action rather than to be admired. See :data:`SECTIONS`:
 from __future__ import annotations
 
 import html
-import os
 from pathlib import Path
 from string import Template
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -77,17 +76,8 @@ from .catalog import SEVERITY_RANK
 # which catalog scored it.
 REPORT_FORMAT_VERSION = "1.3.0"
 
-# The string that identifies a file as one of our reports. ``write_report``
-# refuses to overwrite an existing file that does not carry it, so a mistyped
-# output path cannot silently destroy someone's document.
+# The string that identifies a file as one of our reports.
 REPORT_MARKER = "aditor-hardening-report"
-
-# How much of an existing file to search for the marker before refusing it.
-_MARKER_SCAN_BYTES = 8192
-
-# Suffixes ``write_report`` accepts. A path guard as much as a formality: it
-# stops ``write_report(payload, "controls.json")`` from ever being attempted.
-HTML_SUFFIXES = (".html", ".htm")
 
 # Placeholder for a value the scan did not provide.
 _ABSENT = "&mdash;"
@@ -1408,96 +1398,23 @@ def render_report(scan_result: Dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 
 class ReportPathError(ValueError):
-    """The requested output path cannot be written to safely.
-
-    Raised *before* anything is written, with a message saying what to do
-    instead. Writing the file is this module's only side effect, so refusing a
-    doubtful path loudly beats overwriting something a reader cared about.
-    """
-
-
-def _validate_output_path(output_path: Any) -> Path:
-    """Resolve and vet an output path without touching the filesystem's contents.
-
-    Guards, in order: a usable string; an ``.html``/``.htm`` suffix (which also
-    stops a report being written over a ``.json`` or a ``.py`` by typo); the path
-    is not an existing directory; and, if the file already exists, it carries
-    :data:`REPORT_MARKER` — so re-running the tool over its own output is fine
-    while clobbering an unrelated document is refused.
-    """
-    if not isinstance(output_path, str) or not output_path.strip():
-        raise ReportPathError(
-            "output_path must be a non-empty file path ending in .html")
-
-    path = Path(os.path.expanduser(output_path.strip()))
-    if not path.is_absolute():
-        path = Path.cwd() / path
-
-    if path.suffix.lower() not in HTML_SUFFIXES:
-        raise ReportPathError(
-            f"output_path must end in {' or '.join(HTML_SUFFIXES)} (got "
-            f"{path.suffix or 'no suffix'!r}); this report is a single HTML "
-            f"file, and requiring the suffix is what stops it being written "
-            f"over a file of another kind")
-
-    if path.is_dir():
-        raise ReportPathError(
-            f"output_path {str(path)!r} is a directory; give the full file name "
-            f"to write, e.g. {str(path / 'hardening-report.html')!r}")
-
-    if path.exists():
-        if not path.is_file():
-            raise ReportPathError(
-                f"output_path {str(path)!r} exists and is not a regular file; "
-                f"refusing to write to it")
-        try:
-            with path.open("rb") as handle:
-                head = handle.read(_MARKER_SCAN_BYTES)
-        except OSError as exc:
-            raise ReportPathError(
-                f"output_path {str(path)!r} exists but could not be read to "
-                f"check whether it is a previous report: {exc}") from exc
-        if REPORT_MARKER.encode("ascii") not in head:
-            raise ReportPathError(
-                f"output_path {str(path)!r} already exists and is not an ADitor "
-                f"hardening report (it does not carry the "
-                f"{REPORT_MARKER!r} marker); refusing to overwrite it. Choose a "
-                f"new file name, or delete that file first if you meant to "
-                f"replace it")
-    return path
+    """The report file could not be written."""
 
 
 def write_report(scan_result: Dict[str, Any], output_path: Any) -> Tuple[Path, int]:
     """Render ``scan_result`` and write it to ``output_path``.
 
-    Parent directories are created when missing; anything that cannot be created
-    or written fails with a :class:`ReportPathError` naming the path, rather than
-    a bare ``OSError`` from somewhere in the middle of the write.
+    The only caller is :func:`aditor.hardening.snapshot.write_snapshot`, which
+    writes into a folder it has just created, so there is nothing to clobber.
 
     Returns:
         ``(path, bytes_written)``.
 
     Raises:
-        ReportPathError: the path is unusable, would clobber a non-report file,
-            or could not be created/written.
+        ReportPathError: the file could not be written.
     """
-    path = _validate_output_path(output_path)
-    document = render_report(scan_result)
-    payload = document.encode("utf-8")
-
-    parent = path.parent
-    if not parent.exists():
-        try:
-            parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ReportPathError(
-                f"could not create the directory {str(parent)!r} for the "
-                f"report: {exc}") from exc
-    elif not parent.is_dir():
-        raise ReportPathError(
-            f"the parent path {str(parent)!r} is not a directory, so "
-            f"{str(path)!r} cannot be written")
-
+    path = Path(output_path)
+    payload = render_report(scan_result).encode("utf-8")
     try:
         path.write_bytes(payload)
     except OSError as exc:

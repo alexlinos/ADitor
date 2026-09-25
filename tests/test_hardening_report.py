@@ -42,7 +42,6 @@ from aditor.hardening.report import (
     SECTION_PASSES,
     SECTION_UNKNOWN,
     SECTIONS,
-    ReportPathError,
     _delivered_by_preference,
     group_findings,
     headline_counts,
@@ -918,69 +917,6 @@ class TestWriteReport:
         assert text.startswith("<!DOCTYPE html>")
         assert REPORT_MARKER in text
         assert "Provenance" in text
-
-    def test_creates_missing_parent_directories(self, tmp_path, mixed_scan):
-        target = tmp_path / "nested" / "deeper" / "report.html"
-        path, _size = write_report(mixed_scan, str(target))
-        assert path.is_file()
-
-    def test_reruns_over_its_own_output(self, tmp_path, mixed_scan):
-        target = tmp_path / "report.html"
-        write_report(mixed_scan, str(target))
-        write_report(mixed_scan, str(target))  # must not raise
-        assert REPORT_MARKER in target.read_text(encoding="utf-8")
-
-    def test_refuses_to_clobber_a_file_that_is_not_a_report(self, tmp_path,
-                                                           mixed_scan):
-        target = tmp_path / "someones-notes.html"
-        target.write_text("<html><body>my notes</body></html>", encoding="utf-8")
-
-        with pytest.raises(ReportPathError) as exc:
-            write_report(mixed_scan, str(target))
-        assert "not an ADitor" in str(exc.value)
-        assert target.read_text(encoding="utf-8") == \
-            "<html><body>my notes</body></html>"
-
-    @pytest.mark.parametrize("name", ["controls.json", "report", "report.py",
-                                      "report.txt"])
-    def test_requires_an_html_suffix(self, tmp_path, mixed_scan, name):
-        with pytest.raises(ReportPathError) as exc:
-            write_report(mixed_scan, str(tmp_path / name))
-        assert ".html" in str(exc.value)
-
-    def test_accepts_htm_too(self, tmp_path, mixed_scan):
-        path, _size = write_report(mixed_scan, str(tmp_path / "report.htm"))
-        assert path.is_file()
-
-    def test_refuses_a_directory(self, tmp_path, mixed_scan):
-        directory = tmp_path / "somewhere.html"
-        directory.mkdir()
-        with pytest.raises(ReportPathError) as exc:
-            write_report(mixed_scan, str(directory))
-        assert "is a directory" in str(exc.value)
-
-    @pytest.mark.parametrize("bad", ["", "   ", None, 7, []])
-    def test_refuses_an_unusable_path(self, mixed_scan, bad):
-        with pytest.raises(ReportPathError):
-            write_report(mixed_scan, bad)
-
-    def test_expands_the_user_home_marker(self, tmp_path, mixed_scan,
-                                          monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
-        path, _size = write_report(mixed_scan, "~/report.html")
-        assert path == tmp_path / "report.html"
-
-    def test_relative_paths_resolve_against_the_working_directory(
-            self, tmp_path, mixed_scan, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        path, _size = write_report(mixed_scan, "out/report.html")
-        assert path == tmp_path / "out" / "report.html"
-
-    def test_nothing_is_written_when_the_path_is_refused(self, tmp_path,
-                                                        mixed_scan):
-        with pytest.raises(ReportPathError):
-            write_report(mixed_scan, str(tmp_path / "report.json"))
-        assert list(tmp_path.iterdir()) == []
 
 
 # --------------------------------------------------------------------------- #

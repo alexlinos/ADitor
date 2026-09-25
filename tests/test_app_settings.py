@@ -144,7 +144,7 @@ class TestConfigDocument:
     def test_no_log_file_is_configured(self):
         # A log file is one more artifact that would need proving free of the
         # password, and the app has nowhere to display it.
-        assert build_config_document(a_connection())["logging"]["file"] is None
+        assert "logging" not in build_config_document(a_connection())
 
     def test_one_bind_attempt_not_three(self):
         # Three retries against a wrong password walks a real bind account

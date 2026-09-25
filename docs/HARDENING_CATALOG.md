@@ -1,8 +1,7 @@
 # ADitor — AD Hardening Control Catalog
 
-> **ADitor** — an Active Directory / GPO auditing tool and MCP server for
-> hardening your environment. This is ADitor's Phase-2 scan-engine spec; the
-> backend foundation is in [`REPLATFORM_BRIEF.md`](REPLATFORM_BRIEF.md).
+> **ADitor** — a read-only Active Directory / GPO hardening auditor. This is
+> the spec for its scan engine and control catalog.
 
 **Baseline source:** Jerry Devore, "Active Directory Hardening Series," Microsoft
 Core Infrastructure and Security Blog. **Every control cites the specific article
@@ -83,7 +82,7 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
    / rollout) + baseline (the *exact value*).
 
 2. **Three engines, two already exist.** `gpo-security-template` and
-   `gpo-registry-pol` are served by `get_gpo_contents` (GptTmpl.inf `[Registry Values]`
+   `gpo-registry-pol` are served by the SYSVOL reader (GptTmpl.inf `[Registry Values]`
    + Registry.pol + Group Policy Preferences `Registry.xml`). `directory-state`
    controls (SMBv1 feature, msDS-SupportedEncryptionTypes,
    Least Privilege, Protected Users) map onto tools you already have —

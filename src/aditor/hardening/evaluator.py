@@ -117,8 +117,7 @@ RESULT_UNKNOWN = "unknown"
 RESULT_NOT_APPLICABLE = "not_applicable"
 RESULT_ERROR = "error"
 
-# Every value ``result`` can take. Advertised by the tool layer, so it lives
-# next to the constants rather than being retyped there.
+# Every value ``result`` can take.
 RESULTS = (RESULT_PASS, RESULT_FAIL, RESULT_UNKNOWN, RESULT_NOT_APPLICABLE,
            RESULT_ERROR)
 
@@ -148,11 +147,6 @@ EVIDENCE_SOURCE_GPO = "gpo"
 EVIDENCE_SOURCE_OS_DEFAULT = "os-default"
 EVIDENCE_SOURCE_NOT_CONFIGURED = "not-configured"
 EVIDENCE_SOURCE_UNKNOWN = "unknown"
-
-# Every value ``evidence.source`` can take. The tool layer advertises this list,
-# so it lives next to the constants rather than being retyped there.
-EVIDENCE_SOURCES = (EVIDENCE_SOURCE_GPO, EVIDENCE_SOURCE_OS_DEFAULT,
-                    EVIDENCE_SOURCE_NOT_CONFIGURED, EVIDENCE_SOURCE_UNKNOWN)
 
 # How a GPO put the value in place. Recorded per found value in
 # ``evidence.found[].delivery`` — see the module docstring for why this is

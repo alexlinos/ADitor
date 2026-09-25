@@ -15,10 +15,6 @@ Covered formats:
 - the ``[Registry Values]`` section of a ``GptTmpl.inf`` security template, whose
   raw lines ``parse_ini`` hands back verbatim
   (``parse_security_template_registry_values``, ``normalize_registry_key``)
-- AppLocker ``SrpV2`` policy, which lives inside the machine ``Registry.pol``
-  as per-rule XML blobs (``extract_applocker``, ``applocker_rule_digest``)
-- the packed ``versionNumber`` and ``flags`` attributes (``decode_version``,
-  ``decode_gpo_status``)
 - the ``gPLink`` attribute found on OUs, domains and sites (``parse_gp_link``)
 """
 
@@ -51,9 +47,6 @@ _HIVE_ALIASES = {
     "HKCR": "HKCR",
     "HKEY_CLASSES_ROOT": "HKCR",
 }
-
-# AppLocker per-collection EnforcementMode DWORD values (registry form).
-APPLOCKER_ENFORCEMENT = {0: "AuditOnly", 1: "Enabled"}
 
 # Registry value type *names*, as a Group Policy Preferences Registry.xml writes
 # them, mapped back onto the numeric Windows type code every other parser here
@@ -588,166 +581,6 @@ def _xml_flag(raw: Optional[str]) -> bool:
     return isinstance(raw, str) and raw.strip().lower() in _XML_TRUE
 
 
-def extract_applocker(machine_entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Pull AppLocker rules/enforcement out of parsed machine registry entries.
-
-    AppLocker policy is stored under ``...\\SrpV2\\<Collection>\\<RuleId>``
-    with the rule XML in the ``Value`` entry and the collection's
-    ``EnforcementMode`` alongside it.
-
-    Returns:
-        ``{"collections": {name: {enforcement_mode, rules, rule_count}}}`` or
-        ``None`` when the entries contain no AppLocker policy at all.
-    """
-    collections: Dict[str, Dict[str, Any]] = {}
-    for e in machine_entries or []:
-        key = e.get("key", "") or ""
-        if "SrpV2" not in key:
-            continue
-        after = key.split("SrpV2", 1)[1].strip("\\")
-        parts = after.split("\\") if after else []
-        collection = parts[0] if parts else "Unknown"
-        col = collections.setdefault(collection, {"enforcement_mode": None, "rules": []})
-
-        if e.get("value") == "EnforcementMode":
-            col["enforcement_mode"] = APPLOCKER_ENFORCEMENT.get(e.get("data"), e.get("data"))
-        elif e.get("value") == "Value" and len(parts) >= 2:
-            col["rules"].append({"id": parts[1], "xml": e.get("data")})
-
-    if not collections:
-        return None
-    for col in collections.values():
-        col["rule_count"] = len(col["rules"])
-    return {"collections": collections}
-
-
-def applocker_rule_digest(rule_xml: Any, fallback_id: str = "") -> Dict[str, str]:
-    """Reduce one AppLocker rule's XML to ``{type, id, name, action, sid}``.
-
-    The rule element is parsed as real XML, so attribute *order* is irrelevant
-    (it varies between rules and between rule kinds — ``FilePublisherRule``,
-    ``FilePathRule``, ``FileHashRule``, ...). Attribute names are matched
-    case-insensitively and XML namespaces are stripped.
-
-    Unparseable or truncated XML yields the same five keys with empty strings
-    (``id`` falling back to ``fallback_id``, the registry-derived rule GUID)
-    rather than raising.
-    """
-    digest = {"type": "", "id": fallback_id or "", "name": "", "action": "", "sid": ""}
-    if not isinstance(rule_xml, str) or not rule_xml.strip():
-        return digest
-
-    try:
-        element = ElementTree.fromstring(rule_xml)
-    except ElementTree.ParseError:
-        return digest
-
-    digest["type"] = _local_name(element.tag)
-    attributes = {_local_name(name).lower(): value
-                  for name, value in element.attrib.items()}
-    for field, attr_name in _DIGEST_ATTRS:
-        value = attributes.get(attr_name)
-        if value:
-            digest[field] = value
-    return digest
-
-
-def summarize_applocker(applocker: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Replace every AppLocker rule's full XML with a digest.
-
-    ``enforcement_mode`` and ``rule_count`` are preserved verbatim.
-    """
-    if not applocker:
-        return applocker
-    collections = applocker.get("collections") or {}
-    summarized: Dict[str, Any] = {}
-    for name, col in collections.items():
-        rules = col.get("rules") or []
-        summarized[name] = {
-            "enforcement_mode": col.get("enforcement_mode"),
-            "rule_count": col.get("rule_count", len(rules)),
-            "rules": [applocker_rule_digest(rule.get("xml"), rule.get("id", ""))
-                      for rule in rules],
-        }
-    return {"collections": summarized}
-
-
-def summarize_gpo_contents(contents: Dict[str, Any]) -> Dict[str, Any]:
-    """Drop the heavy bodies from parsed GPO contents (``summary=True`` mode).
-
-    Kept: identity, ``files[]``, ``gpt_ini``, each Registry.pol's
-    ``entry_count``/``entries_truncated``, each Registry.xml's ``entry_count``,
-    and AppLocker ``enforcement_mode``/``rule_count``. Registry ``entries[]``
-    are omitted, AppLocker rule XML becomes a digest, and security template /
-    script sections are reduced to their section names.
-
-    The input dict is not mutated.
-    """
-    out: Dict[str, Any] = dict(contents)
-
-    for key in ("machine_registry_pol", "user_registry_pol"):
-        pol = contents.get(key)
-        if isinstance(pol, dict):
-            out[key] = {name: pol[name] for name in _REGISTRY_SUMMARY_KEYS if name in pol}
-
-    for key in ("machine_registry_xml", "user_registry_xml"):
-        preferences = contents.get(key)
-        if isinstance(preferences, dict):
-            out[key] = {name: preferences[name]
-                        for name in _REGISTRY_XML_SUMMARY_KEYS
-                        if name in preferences}
-
-    if contents.get("applocker"):
-        out["applocker"] = summarize_applocker(contents["applocker"])
-
-    for key in ("security_templates", "scripts"):
-        items = contents.get(key)
-        if isinstance(items, list):
-            out[key] = [
-                {"path": item.get("path"), "sections": list(item.get("sections") or {})}
-                for item in items
-            ]
-
-    return out
-
-
-def decode_version(version: Any) -> Dict[str, Any]:
-    """Split the packed ``versionNumber`` into user/computer revisions.
-
-    AD packs this as ``versionNumber = user * 65536 + computer``, i.e. the
-    computer revision is the low word and the user revision is the high word.
-    """
-    try:
-        v = int(version)
-    except (TypeError, ValueError):
-        v = 0
-    return {
-        'raw': v,
-        'computer_version': v & 0xFFFF,
-        'user_version': (v >> 16) & 0xFFFF,
-    }
-
-
-def decode_gpo_status(flags: Any) -> Dict[str, Any]:
-    """Decode the GPO ``flags`` attribute into enabled/disabled halves."""
-    try:
-        f = int(flags)
-    except (TypeError, ValueError):
-        f = 0
-    descriptions = {
-        0: "All settings enabled",
-        1: "User settings disabled",
-        2: "Computer settings disabled",
-        3: "All settings disabled",
-    }
-    return {
-        'raw': f,
-        'computer_settings_enabled': not bool(f & 2),
-        'user_settings_enabled': not bool(f & 1),
-        'description': descriptions.get(f & 3, "Unknown"),
-    }
-
-
 def parse_gp_link(gp_link: Any) -> List[Dict[str, Any]]:
     """Parse a ``gPLink`` attribute into ordered link descriptors.
 
@@ -794,17 +627,6 @@ def parse_gp_link(gp_link: Any) -> List[Dict[str, Any]]:
     except Exception:
         return links
     return links
-
-
-def normalize_guid(value: Any) -> Optional[str]:
-    """Return the bare GUID if ``value`` looks like one, else ``None``."""
-    if not isinstance(value, str):
-        return None
-    candidate = value.strip().strip('{}')
-    parts = candidate.split('-')
-    if len(parts) == 5 and all(c in '0123456789abcdefABCDEF-' for c in candidate):
-        return candidate
-    return None
 
 
 def _local_name(tag: Any) -> str:
