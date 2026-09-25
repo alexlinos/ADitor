@@ -36,7 +36,7 @@ CONTROL_ID = "TEST-01-LDAP-CHANNEL-BINDING"
 def a_payload(scan_id, timestamp, *, catalog_version="1.0.0",
               engine_version=SCAN_ENGINE_VERSION, result="fail",
               rollout_state="not_started", gpos=3, unreadable=0):
-    """A scan payload of the shape ``write_hardening_scan`` stores."""
+    """A scan payload of the shape ``aditor scan`` stores."""
     counts = {
         "total": 2, "scored": 2, "pass": 1 if result == "pass" else 0,
         "fail": 1 if result == "fail" else 0, "error": 0, "unknown": 0,
@@ -253,7 +253,7 @@ class TestReportUri:
 
 
 # --------------------------------------------------------------------------- #
-# The diff — through the real tool, with no LDAP at all
+# The diff — two files, no LDAP at all
 # --------------------------------------------------------------------------- #
 
 class TestDiff:
@@ -263,18 +263,6 @@ class TestDiff:
         assert diff["success"] is True
         assert diff["totals"]["improvements"] == 1
         assert diff["attribution"]["verdict"] == "domain"
-
-    def test_it_needs_no_ldap_manager(self, archive):
-        # The diff reads two files and touches no directory, so History must
-        # not demand credentials to compare scans already on disk. If a future
-        # edit makes diff_hardening_scans reach for self.ldap, this fails.
-        from aditor.tools.hardening import HardeningTools
-
-        tools = HardeningTools(None)
-        assert tools.ldap is None
-        diff = diff_snapshots(archive, "2026-08-18T101500Z-aaaaaaaa",
-                              "2026-08-19T101500Z-bbbbbbbb", tools=tools)
-        assert diff["success"] is True
 
     def test_diffing_a_snapshot_against_itself_is_refused(self, archive):
         with pytest.raises(HistoryError, match="same snapshot"):

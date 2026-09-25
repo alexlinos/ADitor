@@ -1,6 +1,6 @@
 """ADitor's hardening scan engine.
 
-Six pieces, deliberately layered so the logic is testable offline:
+Seven pieces, deliberately layered so the logic is testable offline:
 
 * :mod:`aditor.hardening.catalog` — the declarative control catalog
   (``controls.json``), its model, and a validating loader.
@@ -11,17 +11,16 @@ Six pieces, deliberately layered so the logic is testable offline:
   self-contained HTML file, ordered by actionability. Consumes the scan and adds
   nothing to it; the JSON stays the source of truth.
 * :mod:`aditor.hardening.scanfile` — storing that same JSON payload on disk and
-  reading it back, with the report tool's path guards.
+  reading it back, with the report's path guards.
 * :mod:`aditor.hardening.snapshot` — putting one scan's ``scan.json`` and
   ``report.html`` in one dated folder, from a single payload so the two cannot
   disagree.
 * :mod:`aditor.hardening.diff` — comparing two stored scans. Its first job is to
   say whether a difference is the *domain's* or the *tool's*; see that module's
   docstring for why that distinction is the whole feature.
-* :mod:`aditor.tools.hardening` — the orchestration behind the
-  ``scan_hardening``, ``write_hardening_report``, ``write_hardening_scan``,
-  ``write_hardening_snapshot`` and ``diff_hardening_scans`` MCP tools: read
-  GPOs, hand them to the evaluator, add the provenance header.
+* :mod:`aditor.hardening.collect` — the one piece that touches the directory:
+  read GPOs over LDAP and SYSVOL, hand them to the evaluator, add the provenance
+  header. ``aditor scan`` and the desktop app both run it.
 
 ``SCAN_ENGINE_VERSION`` is the version of the *scan logic* and
 ``REPORT_FORMAT_VERSION`` the version of the rendered layout. Both are reported

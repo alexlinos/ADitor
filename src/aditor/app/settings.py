@@ -7,17 +7,16 @@ Documents::
     ~/Library/Application Support/ADitor/     (macOS)
     $XDG_CONFIG_HOME/aditor/                  (anything else)
 
-        config.json      an ADitor server config, password = ${AD_MCP_PASSWORD}
+        config.json      an ADitor config, password = ${AD_MCP_PASSWORD}
         snapshots/       where scans land unless the operator moves them
 
-``config.json`` is deliberately **the same shape the headless server already
+``config.json`` is deliberately **the same shape ``aditor scan --config``
 reads** (:func:`aditor.config.loader.load_config`), rather than an app-specific
-format. Two reasons. The onboarding story the app exists for is "enter
-credentials here, then start the server and paste the config" — if the app kept
-its own format, starting the server would mean translating between two files
-that could disagree about which domain is being scanned. And the loader already
-expands ``${AD_MCP_PASSWORD}``, which is the whole mechanism keeping the secret
-off disk.
+format. Two reasons. A connection set up in the app can be scanned from the
+command line (or a scheduled task) with no second file that could disagree
+about which domain is being scanned. And the loader already expands
+``${AD_MCP_PASSWORD}``, which is the whole mechanism keeping the secret off
+disk.
 
 **The password is never in this file.** Its ``password`` field holds the literal
 string ``${AD_MCP_PASSWORD}`` and nothing else, ever.
@@ -110,7 +109,7 @@ class ConnectionSettings:
     snapshot_dir: str = ""
     #: The credential-store service name. Exposed so an operator with more than
     #: one forest can keep the two secrets apart, but defaulted to the value
-    #: ``start_server_keychain.sh`` already uses.
+    #: ``scan_keychain.sh`` already uses.
     credential_service: str = DEFAULT_SERVICE
 
     def with_values(self, **changes: Any) -> "ConnectionSettings":
@@ -145,9 +144,7 @@ class ConnectionSettings:
     def resolved_snapshot_dir(self) -> Path:
         """The snapshot directory, defaulted under the app's own directory.
 
-        Defaulted rather than required — unlike the ``write_hardening_snapshot``
-        tool, which deliberately has no default because an agent choosing where
-        directory content lands is a different risk. Here a human is looking at
+        Defaulted rather than required: a human is looking at
         the path on screen and can change it, and an app whose one button fails
         with "output_dir is required" is not an app for someone who does not
         want a terminal.
@@ -230,7 +227,7 @@ def build_config_document(settings: ConnectionSettings) -> Dict[str, Any]:
             "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             # No log file by default. A log file is one more artifact that has
             # to be proven free of the password, and the app has nowhere to
-            # show it; the server writes to stderr, which the app captures.
+            # show it.
             "file": None,
         },
         "performance": {
@@ -318,8 +315,8 @@ def persist_connection(settings: ConnectionSettings, password: str,
     **The credential store goes first, and a refusal there aborts the whole
     save.** Not because the config file would leak anything — it holds the
     placeholder either way — but because the alternative is a config file
-    pointing at a credential that does not exist. The app would then start a
-    server whose ``${AD_MCP_PASSWORD}`` expands to nothing, and the operator
+    pointing at a credential that does not exist. A later ``aditor scan`` of it
+    would find ``${AD_MCP_PASSWORD}`` expanding to nothing, and the operator
     would debug an authentication failure instead of reading "there is nowhere
     to keep your password". A save is both halves or neither.
 

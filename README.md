@@ -1,32 +1,25 @@
 # ADitor
 
-An Active Directory / GPO auditing tool and MCP server for hardening your environment.
+A read-only Active Directory / GPO hardening auditor.
 
-ADitor is a Python [Model Context Protocol](https://modelcontextprotocol.io) (MCP)
-server that exposes Active Directory — over LDAP and SYSVOL — to an MCP client such
-as Claude Code. Its focus is **read-only auditing**: domain and password-policy
-review, privileged-group and admin-account analysis, inactive-account detection,
-and Group Policy inspection, including parsing a GPO's actual SYSVOL contents
-(Registry.pol, Group Policy Preferences Registry.xml, security
-templates, AppLocker rules). It also provides full
-directory management — users, groups, computers, and organizational units — for
-day-to-day administration.
+ADitor reads a domain's Group Policy over LDAP and SYSVOL, checks it against a
+versioned catalog of hardening controls, and writes a report you can hand to
+someone. Run it again next month and diff the two scans to see what your fixes
+changed and whether anything regressed. It never writes to the directory.
 
 > **Status.** ADitor began as a fork of
 > [ActiveDirectoryMCP](https://github.com/alpadalar/ActiveDirectoryMCP)
-> (Alperen Adalar, MIT) and is being reworked into a focused AD/GPO hardening
-> auditor. A hardening-verification scanner — checking a domain against Microsoft's
-> published Active Directory hardening guidance — is in design; the control catalog
-> and architecture are in [`docs/`](docs/).
+> (Alperen Adalar, MIT). The MCP server and its directory-management tools were
+> removed; the last version with them is tagged `v-mcp-final`. The control
+> catalog and its design are in [`docs/HARDENING_CATALOG.md`](docs/HARDENING_CATALOG.md).
 
 ## Requirements
 
 - Python 3.12
 - [uv](https://github.com/astral-sh/uv) (recommended) or pip
 - LDAP/LDAPS access to a domain controller, with a bind account that has read
-  permissions (and write permissions for management operations)
-- SMB read access to the SYSVOL share, for Group Policy content inspection
-  (`get_gpo_contents`)
+  permissions
+- SMB read access to the SYSVOL share
 
 ## Installation
 
@@ -37,7 +30,7 @@ cd ADitor
 uv venv --python 3.12
 source .venv/bin/activate
 
-uv pip install -e ".[dev,smb]"
+uv pip install -e ".[smb]"          # add ,gui for the desktop app
 ```
 
 ## Configuration
@@ -63,204 +56,99 @@ chmod 600 ad-config/config.json
 ```
 
 The `password` field supports `${ENV_VAR}` expansion, so the secret can be supplied
-at runtime rather than stored on disk. `config.json` is gitignored.
+at runtime rather than stored on disk. If it is unset and you run `aditor scan`
+from a terminal, you are prompted for it. `config.json` is gitignored.
+
+On macOS, [`scan_keychain.sh`](scan_keychain.sh) pulls the password from the
+Keychain (service `admcp-ldap`) and runs a scan with it.
+
+## Usage
+
+```bash
+aditor scan --config ad-config/config.json --out ~/scans
+aditor diff ~/scans/2026-08-20T193156Z-26f204f6 ~/scans/2026-08-24T184004Z-9d7d8ba2
+```
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Nothing needs attention |
+| 1 | The scan has a `fail` or `error` finding, or the diff has a regression |
+| 2 | The command could not run (config, connection, or a refused file); nothing was written |
+
+The exit codes let it run unattended from a scheduled task or an RMM agent.
+
+### `aditor scan`
+
+Runs the scan **once** and writes one dated folder:
+
+```
+<out>/2026-08-20T162647Z-b288e925/
+    scan.json      <- the payload (source of truth)
+    report.html    <- the rendered document
+```
+
+Both files come from the same scan, so they carry the same `scan_id`,
+timestamp and findings. The folder name is the scan's own timestamp plus a
+`scan_id` prefix, with no colon so it is legal on Windows. An existing folder is
+never overwritten, and a failed write leaves no folder behind.
+
+Each finding carries a result, a rollout state (not started / audit / enforced,
+so a domain correctly mid-rollout does not read as failing), and evidence: the
+expected value next to every value found, with the source GPO and its link path.
+Controls come from the Devore AD Hardening Series, and each one cites its
+article. Policy precedence is not resolved: GPOs that disagree are reported as
+conflicts. Controls whose exact expected value the source does not state are
+reported but never scored or guessed.
+
+The report is one self-contained HTML file (inline CSS, no scripts, no network)
+that opens from a `file://` path and prints to PDF from a browser. It is ordered
+by what needs action: unreadable GPOs and unknown verdicts first, then failures,
+conflicts, settings resting on a Windows default, unscored controls, and passes
+last. See [`examples/hardening-report-sample.html`](examples/hardening-report-sample.html),
+rendered from synthetic data.
+
+**Both files contain directory content** — GPO display names, registry values
+and DNs. Treat them accordingly when sharing.
+
+### `aditor diff OLD NEW`
+
+Compares two scans, given as `scan.json` files or snapshot folders. It reads two
+files and touches no directory.
+
+It says first whether a difference is **the domain's** or **the tool's**. If
+the two scans ran different catalog or engine versions, every difference may be
+the scanner rather than the domain, and the diff says so before anything else.
+This is not hypothetical: one control here went `fail` → `pass` between two real
+scans only because the scanner learned to read Group Policy Preferences.
+
+Regressions are listed before improvements. A rollout moving backwards
+(`enforced` → `audit`) counts as a regression even when the result stays `pass`.
+A control added to or removed from the catalog is never counted as either.
 
 ## The desktop app
 
-For an administrator who would rather not use a terminal, ADitor ships a desktop
-app: four screens, none of which can change the directory.
+For an administrator who would rather not use a terminal:
 
 ```bash
 uv pip install -e ".[gui,smb]"
 python -m aditor.app
 ```
 
-`pywebview` is an **optional extra** (`gui`) — the headless server installs and
-runs without it. `python -m aditor.app --check` prints the generated client
-config and the exposure assessment without opening a window.
-
 | Screen | What it does |
 |---|---|
-| **Connection** | Enter and test read-only credentials. On failure it shows the *actual* LDAP error, because "invalid credentials", "certificate not trusted" and "host unreachable" have different fixes. |
-| **Scan** | One button. Runs the read-only hardening scan once through `write_hardening_snapshot`, shows that scan's counts and progress, and opens the report. |
-| **History** | The snapshot archive. Open a report, or pick two scans and diff them — with the diff's `attribution` shown first, and an `ambiguous` verdict rendered as a warning rather than as a count of improvements. |
-| **Connect Claude Code / Codex** | Start and stop the MCP server, and copy a config snippet generated from the server's live host, port and path — trailing slash included. |
-
-**The app exposes none of the 22 write tools.** Directory management stays in the
-MCP server, where an operator has to ask for it explicitly.
+| **Connection** | Enter and test read-only credentials. On failure it shows the *actual* LDAP error, and helps establish LDAPS certificate trust. |
+| **Scan** | One button. Runs the same scan as `aditor scan`, shows its progress and counts, and opens the report. |
+| **History** | The snapshot archive. Open a report, or pick two scans and diff them, with an ambiguous attribution shown as a warning. |
 
 **Credentials.** The bind password is never written to disk. It goes to the OS
-credential store — Windows Credential Manager (DPAPI) or the macOS Keychain,
-under the same `admcp-ldap` service name `start_server_keychain.sh` uses — and
-the app's own config file holds the `${AD_MCP_PASSWORD}` placeholder, exactly as
-the server config does. If no OS credential store is available, the app **says so
-and refuses to save** rather than falling back to a file.
+credential store — Windows Credential Manager or the macOS Keychain, under the
+same `admcp-ldap` service name `scan_keychain.sh` uses — and the app's config
+file holds the `${AD_MCP_PASSWORD}` placeholder. That file has the same shape
+`aditor scan --config` reads. If no OS credential store is available, the app
+says so and refuses to save.
 
-**The server the app starts binds loopback by default**, so it accepts
-connections only from that machine and needs no firewall change. If it is bound
-anywhere else the Connect screen says so, warns that the endpoint has no
-authentication and no TLS while binding a privileged account, and gives a
-`New-NetFirewallRule` command scoped with `-RemoteAddress` — see
-[`docs/REPLATFORM_BRIEF.md`](docs/REPLATFORM_BRIEF.md) §8, which makes endpoint
-auth and TLS a hard gate before any non-localhost deployment.
-
-Packaging into a Windows `.exe` / macOS `.app` is a separate work package; today
-the app runs from source.
-
-## Running
-
-ADitor runs as an HTTP MCP server:
-
-```bash
-AD_MCP_PASSWORD='…' PYTHONPATH=src \
-  .venv/bin/python -m aditor.server --transport http \
-  --config ad-config/config.json
-```
-
-It serves on `http://localhost:8813/activedirectory-mcp/` by default (HTTP is the
-default transport). The same server speaks stdio with `--transport stdio`.
-
-### MCP client
-
-Point the client at the HTTP endpoint (keep the trailing slash — a bare path
-redirects):
-
-```json
-{
-  "mcpServers": {
-    "aditor": {
-      "type": "http",
-      "url": "http://localhost:8813/activedirectory-mcp/"
-    }
-  }
-}
-```
-
-## Tools
-
-**Auditing and security**
-`get_domain_info`, `get_privileged_groups`, `audit_admin_accounts`,
-`get_user_permissions`, `get_inactive_users`, `get_password_policy_violations`,
-`check_password_policy`
-
-**Group Policy**
-`get_gpos`, `get_gpo`, `get_linked_gpos` (enforcement and inheritance),
-`get_gpo_contents` (parses Registry.pol, Group Policy Preferences
-Registry.xml, security templates, and AppLocker rules
-from SYSVOL)
-
-**Hardening scan**
-`scan_hardening` — evaluates the domain's GPOs against a versioned control
-catalog derived from the Devore AD Hardening Series, with each control citing
-the specific article it comes from. Each finding
-carries a result, a rollout state (not started / audit / enforced, so a domain
-correctly mid-rollout does not read as failing), and evidence: expected value
-next to every value found, with the source GPO DN and link path. Policy
-precedence is not resolved — conflicting GPOs are reported as conflicts instead.
-Controls whose exact expected value the source does not state are reported but
-never scored or guessed.
-
-`write_hardening_report` — runs the same read-only scan and writes it as a
-single self-contained HTML file: inline CSS, no external assets, no JavaScript,
-opens from a `file://` path, and a browser can print it to PDF. The JSON from
-`scan_hardening` stays the source of truth; the document renders it and adds
-nothing. It is ordered by actionability rather than catalog order — GPO read
-failures and unknown verdicts first (an unreadable GPO makes an unset key
-unknown, not clean), then failures with expected-vs-found evidence, the source
-GPO DN, the catalog's remediation and the rollout order (the interim audit step
-first where a control has one), then conflicts, then findings resting on a
-documented Windows default framed as hardening opportunities rather than as
-something Group Policy enforces, then unscored controls, then passes. Writing the
-file is the only side effect; the directory is not modified. Note that the file
-contains the domain's GPO display names, registry values and DNs. See
-[`examples/hardening-report-sample.html`](examples/hardening-report-sample.html)
-for the layout, rendered from synthetic data.
-
-`write_hardening_scan` — the report tool's sibling: the same read-only scan,
-written as the **JSON** payload rather than a rendered document, so two runs can
-be compared later. Always covers the whole catalog and filters nothing, because
-a scan that hid part of the catalog is indistinguishable from one whose catalog
-was smaller. Like the report, the file contains the domain's GPO display names,
-registry values and DNs.
-
-`write_hardening_snapshot` — runs the scan **once** and writes both artifacts
-into one dated folder, so a scan is a single thing you can keep, hand over and
-diff later:
-
-```
-<output_dir>/2026-08-20T162647Z-b288e925/
-    scan.json      <- the payload (source of truth)
-    report.html    <- the rendered document
-```
-
-Use this rather than calling the two tools above in turn. They each run their
-*own* scan, so calling both would put a report and a payload from two different
-scans in one folder — different `scan_id`, different timestamps, and on a domain
-that changed in between, different findings. The JSON is the evidence of record;
-a report that disagrees with it destroys the provenance the pair exists to
-provide. Here the scan runs once and both writers are handed that one payload, so
-the two files carry the same `scan_id`, the same timestamp and the same findings
-by construction.
-
-The folder name comes from the scan's *own* timestamp rather than a separate
-clock reading, so a directory listing and the provenance inside the files tell
-the same story; it contains no colon, which is illegal in a Windows filename; and
-it ends in a short `scan_id` prefix so two scans in the same second cannot
-collide. An existing snapshot folder is refused by name, never overwritten or
-merged into, and a refusal after the folder was created leaves no folder behind —
-a snapshot is both files or neither. `output_dir` is required: there is
-deliberately no default, because both files hold real directory content and where
-they land is the operator's choice. Both files carry the same caveat as the
-standalone report and scan — they embed the domain's GPO display names, registry
-values and DNs.
-
-`diff_hardening_scans` — compares two stored scans to answer "did my fix land,
-and did anything regress?". Touches no directory: two scans in, one diff out.
-Each input is either a `.json` scan file or a snapshot folder, whose `scan.json`
-is then read, so `diff <folder-a> <folder-b>` works without reaching inside
-either folder.
-
-Its first job is to distinguish **the domain changing** from **the tool
-changing**, and the payload's opening key is `attribution` for that reason.
-`domain` means both scans ran the same catalog *and* engine version, so a
-difference is the domain's. `ambiguous` means they did not, so every difference
-may be the scanner or the baseline instead — and the diff refuses to present any
-of it as domain progress, naming both version pairs and stamping the verdict on
-every entry. This is not hypothetical: one control here went `fail` → `pass`
-between two real scans purely because the scanner learned to read Group Policy
-Preferences. The value had been set correctly the whole time and the domain never
-changed; a naive diff would have announced a remediation that never happened.
-
-Regressions are listed before improvements, because a regression matters more. A
-rollout moving backwards (`enforced` → `audit` → `not_started`) counts as one
-even when `result` stays `pass`. A control added to or removed from the catalog
-goes to `catalog_changes` and is never counted as an improvement or a regression
-— there is no before-and-after verdict for it — and the diff says whether an
-absence really means the catalog changed or just that one scan did not evaluate
-it. A control whose verdict held but whose *evidence* moved — a different value,
-a different GPO delivering it, policy replaced by a preference (which tattoos, so
-it is a weaker statement), a changed evidence source, or a conflict appearing or
-clearing — is surfaced under `evidence_changes`. Diffing two scans of different
-domains, or a file that is not a scan payload, fails with a clear error.
-
-**Directory management**
-- Users: `list_users`, `get_user`, `get_user_groups`, `create_user`, `modify_user`,
-  `delete_user`, `enable_user`, `disable_user`, `reset_user_password`
-- Groups: `list_groups`, `get_group`, `get_group_members`, `create_group`,
-  `modify_group`, `delete_group`, `add_group_member`, `remove_group_member`
-- Computers: `list_computers`, `get_computer`, `get_stale_computers`,
-  `create_computer`, `modify_computer`, `delete_computer`, `enable_computer`,
-  `disable_computer`, `reset_computer_password`
-- Organizational units: `list_organizational_units`, `get_organizational_unit`,
-  `get_organizational_unit_contents`, `create_organizational_unit`,
-  `modify_organizational_unit`, `delete_organizational_unit`,
-  `move_organizational_unit`
-
-**System**
-`test_connection`, `health`, `get_schema_info`
-
-Management operations perform real directory writes and require a bind account with
-the corresponding permissions.
+`pywebview` is an optional extra (`gui`); the `aditor` command installs and runs
+without it.
 
 ## Development
 
@@ -268,17 +156,16 @@ the corresponding permissions.
 pytest
 ```
 
-Layout:
-
 ```
 src/aditor/
-  server.py            # unified MCP server (stdio or streamable-HTTP)
-  registry.py          # single tool registry (declare each tool once)
-  config/              # configuration models and loader
+  cli.py               # the aditor command: scan, diff
+  hardening/           # catalog, collection, evaluator, report, snapshot, diff
+  gpo/                 # pure GPO parsers (Registry.pol, GptTmpl.inf, Registry.xml)
   core/                # LDAP connection manager, logging
-  tools/               # user, group, computer, organizational_unit, security, gpo
-tests/                 # unit and integration tests
-docs/                  # design docs (re-platform brief, hardening control catalog)
+  config/              # configuration models and loader
+  app/                 # the desktop app
+tests/
+docs/                  # design docs and the hardening control catalog
 ```
 
 ## License

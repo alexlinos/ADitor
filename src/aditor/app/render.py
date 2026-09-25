@@ -33,7 +33,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # attribute access, so importing them at runtime would buy nothing and
     # would make the renderer depend on the whole package.
     from .connection import ConnectionTestResult
-    from .endpoint import ExposureAssessment
     from .history import SnapshotEntry
     from .scanning import ScanResult
 
@@ -607,10 +606,9 @@ def render_counts(counts: Dict[str, Any]) -> str:
 def render_scan_result(result: "ScanResult") -> str:
     """The Scan screen's outcome panel.
 
-    Every number here is read from the ``write_hardening_snapshot`` response —
-    one scan, its own counts. ``scans_run`` is displayed for exactly that
-    reason: it is the tool asserting that it ran once, and showing it makes the
-    guarantee visible rather than merely true.
+    Every number here is read from the one scan's payload — its own counts.
+    ``scans_run`` is displayed for exactly that reason: showing that it ran
+    once makes the guarantee visible rather than merely true.
     """
     if not result.ok:
         return _banner(
@@ -915,93 +913,6 @@ def _render_catalog_changes(catalog: Dict[str, Any]) -> str:
                    "".join(body) + f"<p>{esc(note)}</p>")
 
 
-# --------------------------------------------------------------------------- #
-# 5. Connect Claude Code / Codex
-# --------------------------------------------------------------------------- #
-
-def render_server_status(status: Dict[str, Any]) -> str:
-    running = bool(status.get("running"))
-    kind = "ok" if running else "muted"
-    title = ("Server running" if running else "Server stopped")
-    body = [_rows([
-        ("Endpoint", f'<code>{esc(status.get("url"))}</code>'),
-        ("Bound to", f'<code>{esc(status.get("bind"))}</code>'),
-        ("Process id", esc(status.get("pid"))),
-        ("Uptime", (f'{esc(status.get("uptime_seconds"), "0")} s'
-                    if running else _ABSENT)),
-        ("Config file", f'<code>{esc(status.get("config_path"))}</code>'),
-    ])]
-    output = status.get("recent_output")
-    if isinstance(output, list) and output:
-        body.append(
-            '<details class="server-log"><summary>Server output</summary>'
-            + _code_block("\n".join(str(line) for line in output))
-            + "</details>")
-    exit_code = status.get("exit_code")
-    if not running and exit_code not in (None, 0):
-        body.append(f'<p class="fix">The server exited with code '
-                    f'{esc(exit_code)}. The output above says why.</p>')
-    return _banner(kind, title, "".join(body))
-
-
-def render_exposure(exposure: "ExposureAssessment") -> str:
-    """Same-machine or on the network — and what remote actually costs.
-
-    The exposure warning is rendered **whenever the bind is not loopback**, and
-    a test asserts that. It is the paragraph that stops "open the port" reading
-    as routine setup, and it is the paragraph a later tidy-up would delete for
-    being long.
-    """
-    parts = [_banner("ok" if exposure.loopback else "warn",
-                     exposure.headline, f"<p>{esc(exposure.detail)}</p>")]
-    if exposure.warning:
-        parts.append(_banner(
-            "bad", "Exposing this port puts a privileged AD API on the network",
-            f"<p>{esc(exposure.warning)}</p>"))
-    if exposure.recommendation:
-        parts.append(f'<p class="fix">{esc(exposure.recommendation)}</p>')
-    if exposure.firewall_command:
-        parts.append(
-            '<p class="label">If it must be remote — scope the rule to one '
-            "source address</p>"
-            + _code_block(exposure.firewall_command, "PowerShell")
-            + f'<p class="fix">{esc(exposure.firewall_note)}</p>')
-    return "".join(parts)
-
-
-def render_snippets(snippet_data: Dict[str, Any]) -> str:
-    """The two client cards, each built from the live endpoint's own URL."""
-    parts: List[str] = []
-    note = snippet_data.get("trailing_slash_note")
-    if note:
-        parts.append(_banner("info", "Use Copy, do not retype",
-                             f"<p>{esc(note)}</p>"))
-
-    for key in ("claude_code", "codex"):
-        client = snippet_data.get(key)
-        if not isinstance(client, dict):
-            continue
-        body = [_ordered(client.get("steps") or [])]
-        command = client.get("command")
-        if command:
-            body.append('<p class="label">Or run this</p>'
-                        + _code_block(command, "Command"))
-            body.append('<p class="label">Or paste this</p>')
-        body.append(_code_block(client.get("snippet"),
-                                str(client.get("format") or "").upper()))
-        locations = client.get("locations") or []
-        if locations:
-            body.append('<p class="label">Where the config file lives on '
-                        "Windows</p>" + _list(locations, "mono"))
-        parts.append(
-            f'<section class="client-card">'
-            f'<header><h3>{esc(client.get("label"))}</h3>'
-            f'<button type="button" class="ghost" data-copy="{esc(key, "")}">'
-            f'Copy snippet</button></header>'
-            f'<div class="client-body">{"".join(body)}</div></section>')
-    return "".join(parts)
-
-
 def render_credential_store(store_name: str, available: bool,
                             where: str = "",
                             detail: str = "") -> str:
@@ -1040,10 +951,7 @@ __all__ = [
     "render_credential_store",
     "render_diff",
     "render_error",
-    "render_exposure",
     "render_history",
     "render_notice",
     "render_scan_result",
-    "render_server_status",
-    "render_snippets",
 ]

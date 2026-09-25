@@ -1,20 +1,15 @@
 """One scan, in-process, with progress the operator can watch.
 
-**One scan.** The Scan screen calls
-:meth:`aditor.tools.hardening.HardeningTools.write_hardening_snapshot`, which
-runs the read-only scan exactly once and hands that single payload to both
-writers. The counts the screen then shows come out of *that* response — the
-``counts`` and ``headline`` blocks the tool already returned — and are never
-recomputed here and never obtained by scanning again. That property is the whole
-reason ``write_hardening_snapshot`` exists (see its docstring), and an app that
-re-derived the numbers would throw it away at the last step.
+**One scan.** The Scan screen runs
+:meth:`aditor.hardening.collect.Scanner.scan` exactly once and hands that single
+payload to :func:`aditor.hardening.snapshot.write_snapshot`, which writes both
+files from it. The counts the screen then shows come out of *that* payload and
+are never recomputed here and never obtained by scanning again, so the screen,
+the report and ``scan.json`` cannot disagree.
 
-**In-process.** The tool class is instantiated over an
-:class:`~aditor.core.ldap_manager.LDAPManager` and called directly. The app does
-not talk to its own MCP server to run its own scan: that would mean the server
-had to be running before Scan worked, would put the scan behind an
-unauthenticated HTTP endpoint for no benefit, and would turn one Python call
-into a JSON round trip whose failure modes are a superset of the direct call's.
+**In-process.** The scanner runs over an
+:class:`~aditor.core.ldap_manager.LDAPManager` in this process; the ``aditor
+scan`` command does the same.
 
 **Progress.** A domain with dozens of GPOs spends seconds in SYSVOL reads over SMB, and
 a window that shows nothing for eight seconds reads as a hang — the operator
@@ -29,20 +24,22 @@ kills it and files a bug. There is no callback in the scan path, so
 Both wrappers call straight through, return the result unchanged, swallow
 nothing and alter nothing. They are attached to the *instances* this module
 built and to nothing global, so no other caller of these classes is affected.
-The alternative — threading a progress callback down through the tool layer —
-would change a tested MCP tool's signature to serve the GUI, and the GUI is not
-the reason that code exists.
+The alternative — threading a progress callback down through the scanner —
+would change a tested signature to serve the GUI alone.
 """
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
+from ..hardening.collect import GpoReadFailure, Scanner
+from ..hardening.report import ReportPathError, headline_counts
+from ..hardening.scanfile import ScanFileError
+from ..hardening.snapshot import SnapshotError, write_snapshot
 from .connection import ManagerFactory, build_manager
 from .credentials import redact
 from .settings import ConnectionSettings
@@ -164,12 +161,12 @@ class ScanError(RuntimeError):
 
 @dataclass
 class ScanResult:
-    """The tool's own response, plus where the snapshot went.
+    """The scan's outcome, plus where the snapshot went.
 
-    ``counts`` and ``headline`` are lifted straight out of the
-    ``write_hardening_snapshot`` response — not recomputed. ``payload`` keeps
-    the whole response so the renderer can show provenance (scan id, timestamp,
-    catalog version) without a second read of ``scan.json``.
+    ``counts`` and ``headline`` are lifted straight out of the one scan's
+    payload — not recomputed. ``payload`` keeps the provenance header so the
+    renderer can show scan id, timestamp and catalog version without a second
+    read of ``scan.json``.
     """
 
     ok: bool
@@ -200,16 +197,16 @@ class ScanResult:
         return ""
 
 
-def _observe_gpo_reads(hardening: Any, progress: ScanProgress) -> None:
+def _observe_gpo_reads(scanner: Scanner, progress: ScanProgress) -> None:
     """Wrap the two slow seams so progress can be reported per GPO.
 
     Pure observation: both wrappers call the original, return its result
     unchanged, and let every exception propagate. They are bound to the objects
     this module just constructed, so nothing outside this scan sees them.
     """
-    manager = hardening.ldap
+    manager = scanner.ldap
     original_search = manager.search
-    original_read = hardening.scanner._read_gpo_sysvol
+    original_read = scanner._read_gpo_sysvol
 
     def search(*args: Any, **kwargs: Any) -> Any:
         result = original_search(*args, **kwargs)
@@ -231,14 +228,13 @@ def _observe_gpo_reads(hardening: Any, progress: ScanProgress) -> None:
         return original_read(*args, **kwargs)
 
     manager.search = search  # type: ignore[method-assign]
-    hardening.scanner._read_gpo_sysvol = read_sysvol  # type: ignore[method-assign]
+    scanner._read_gpo_sysvol = read_sysvol  # type: ignore[method-assign]
 
 
 def run_scan(settings: ConnectionSettings, password: str,
              output_dir: Optional[Path] = None,
              progress: Optional[ScanProgress] = None,
              factory: Optional[ManagerFactory] = None,
-             tools_factory: Optional[Callable[[Any], Any]] = None
              ) -> ScanResult:
     """Run the read-only hardening scan and write one snapshot folder.
 
@@ -250,7 +246,6 @@ def run_scan(settings: ConnectionSettings, password: str,
         progress: Updated as the scan moves. The UI polls
             :meth:`ScanProgress.snapshot`.
         factory: Injected ``LDAPManager`` builder, for tests.
-        tools_factory: Injected ``HardeningTools`` builder, for tests.
 
     Returns:
         A :class:`ScanResult` whose counts came from this one scan.
@@ -278,18 +273,17 @@ def run_scan(settings: ConnectionSettings, password: str,
         return ScanResult(ok=False, error=(
             f"these connection settings are not usable: {redact(str(exc))}"))
 
-    if tools_factory is not None:
-        hardening = tools_factory(manager)
-    else:
-        from ..tools.hardening import HardeningTools
-
-        hardening = HardeningTools(manager)
-
-    _observe_gpo_reads(hardening, tracker)
+    scanner = Scanner(manager)
+    _observe_gpo_reads(scanner, tracker)
     tracker.set_stage(STAGE_ENUMERATE)
 
     try:
-        response = hardening.write_hardening_snapshot(str(target))
+        payload = scanner.scan(operation="aditor app scan")
+    except GpoReadFailure as failure:
+        tracker.set_stage(STAGE_FAILED)
+        return ScanResult(ok=False, error=(
+            f"the scan could not read the directory: "
+            f"{redact(str(failure.cause))}"))
     except Exception as exc:
         tracker.set_stage(STAGE_FAILED)
         return ScanResult(ok=False, error=(
@@ -301,45 +295,38 @@ def run_scan(settings: ConnectionSettings, password: str,
             pass
 
     tracker.set_stage(STAGE_EVALUATE)
-    payload = _parse_tool_response(response)
-    if payload is None:
-        tracker.set_stage(STAGE_FAILED)
-        return ScanResult(ok=False, error=(
-            "the scan returned something this app could not read. That is a "
-            "bug; the scan may or may not have written a snapshot."))
-
-    if not payload.get("success"):
+    if payload.get("success") is False:
         tracker.set_stage(STAGE_FAILED)
         return ScanResult(ok=False, payload=payload,
                           error=redact(str(payload.get("error")
                                            or "the scan did not succeed")))
 
     tracker.set_stage(STAGE_WRITE)
-    tracker.set_stage(STAGE_DONE)
-    return ScanResult(ok=True, payload=payload)
-
-
-def _parse_tool_response(response: Any) -> Optional[Dict[str, Any]]:
-    """The JSON payload out of an MCP content list.
-
-    The tool classes return ``[TextContent(text=<json>)]``. Calling them in
-    process means unwrapping that here — one ``json.loads``, which is a smaller
-    price than the HTTP round trip the alternative would cost.
-    """
-    if isinstance(response, dict):
-        return response
-    if not isinstance(response, (list, tuple)) or not response:
-        return None
-    text = getattr(response[0], "text", None)
-    if text is None and isinstance(response[0], dict):
-        text = response[0].get("text")
-    if not isinstance(text, str):
-        return None
     try:
-        parsed = json.loads(text)
-    except ValueError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+        snapshot = write_snapshot(payload, str(target))
+    except (SnapshotError, ScanFileError, ReportPathError) as exc:
+        tracker.set_stage(STAGE_FAILED)
+        return ScanResult(ok=False, error=(
+            f"the scan completed but could not be written, and no snapshot "
+            f"folder was left behind: {redact(str(exc))}"))
+
+    tracker.set_stage(STAGE_DONE)
+    return ScanResult(ok=True, payload={
+        "success": True,
+        "snapshot_dir": str(snapshot.folder),
+        "snapshot_name": snapshot.folder.name,
+        "scan_id": payload["scan"]["scan_id"],
+        "scans_run": 1,
+        "files": {
+            "scan": {"path": str(snapshot.scan_path),
+                     "bytes_written": snapshot.scan_bytes},
+            "report": {"path": str(snapshot.report_path),
+                       "bytes_written": snapshot.report_bytes},
+        },
+        "counts": payload["counts"],
+        "headline": headline_counts(payload),
+        "scan": payload["scan"],
+    })
 
 
 class ScanJob:

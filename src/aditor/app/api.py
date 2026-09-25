@@ -6,12 +6,10 @@ thin: it holds the app's state, calls into the modules that do the work, and
 returns dicts of **already-escaped HTML fragments** plus a few scalars. No
 domain logic lives here.
 
-**What this class does not expose is the point.** The MCP server offers 52 tools,
-22 of which write to Active Directory. The app's surface is the methods below:
-test a connection, save it, run one read-only scan, list and diff snapshots,
-start and stop the server, generate a config snippet. There is no method here
-that modifies the directory, and none that takes a tool name — so the page
-cannot reach a write tool by asking for one.
+**What this class does not expose is the point.** The app's surface is the
+methods below: test a connection, save it, run one read-only scan, list and
+diff snapshots, and help establish LDAPS trust. There is no method here that
+modifies the directory.
 
 **The password.** It lives in ``self._password`` and in the OS credential store,
 and nowhere else. It is:
@@ -21,9 +19,7 @@ and nowhere else. It is:
 * never written to the app's config file (:mod:`aditor.app.settings` writes the
   ``${AD_MCP_PASSWORD}`` placeholder);
 * never logged — and registered with the redaction filter so a future edit that
-  logs it emits ``***REDACTED***`` instead;
-* passed to the server child process only through its environment, never in
-  ``argv``.
+  logs it emits ``***REDACTED***`` instead.
 
 ``tests/test_app_password_never_leaks.py`` drives this class end to end with a
 distinctive password and asserts it appears in none of those places.
@@ -45,14 +41,6 @@ from .credentials import (
     install_redaction,
     redact,
     register_secret,
-)
-from .endpoint import (
-    Endpoint,
-    ServerControlError,
-    ServerProcess,
-    assess_exposure,
-    default_endpoint,
-    snippets,
 )
 from .history import HistoryError, diff_snapshots, list_snapshots, report_uri
 
@@ -103,7 +91,6 @@ class AditorApi:
     """The bridge between ``web/app.js`` and the rest of this package."""
 
     def __init__(self, directory: Optional[Path] = None,
-                 endpoint: Optional[Endpoint] = None,
                  store: Any = None,
                  chain_fetch: Any = None,
                  ldap_factory: Any = None) -> None:
@@ -111,9 +98,6 @@ class AditorApi:
         self._dir = Path(directory) if directory else settings_dir()
         self._store = store or get_store()
         self._settings: AppSettings = load_settings(self._dir)
-        self._endpoint = endpoint or default_endpoint()
-        self._server = ServerProcess(endpoint=self._endpoint,
-                                     config_path=config_path(self._dir))
         self._scan = ScanJob()
         self._password: str = ""
         # Injected for the certificate tests, which run with no domain
@@ -195,7 +179,6 @@ class AditorApi:
             },
             settings_path=str(config_path(self._dir)),
             scan_running=self._scan.running(),
-            server=self.server_status(),
         )
 
     # -- 1. connection ----------------------------------------------------- #
@@ -237,7 +220,6 @@ class AditorApi:
 
         self._settings = AppSettings(connection=candidate)
         self._set_password(password)
-        self._server.config_path = result.config_path
         return _ok(html=render.render_notice(
             f"Saved. The password is in {result.store_name}.",
             f"Connection settings: {result.config_path}. The password is not "
@@ -492,59 +474,10 @@ class AditorApi:
                    attribution=str((payload.get("attribution") or {})
                                    .get("verdict") or ""))
 
-    # -- 4. connect Claude Code / Codex ------------------------------------ #
-
-    def server_status(self) -> Dict[str, Any]:
-        status = self._server.status()
-        exposure = assess_exposure(self._endpoint)
-        return {
-            "running": status["running"],
-            "url": status["url"],
-            "loopback": exposure.loopback,
-            "status_html": render.render_server_status(status),
-            "exposure_html": render.render_exposure(exposure),
-        }
-
-    def connect_screen(self) -> Dict[str, Any]:
-        """Status, exposure and both generated snippets, in one call.
-
-        The snippets are generated from :class:`aditor.app.endpoint.Endpoint` on
-        every call, so they always describe the endpoint this app would actually
-        serve — including the trailing slash.
-        """
-        data = snippets(self._endpoint)
-        return _ok(server=self.server_status(),
-                   url=data["url"],
-                   snippets={"claude_code": data["claude_code"]["snippet"],
-                             "codex": data["codex"]["snippet"]},
-                   html=render.render_snippets(data))
-
-    def start_server(self) -> Dict[str, Any]:
-        try:
-            self._server.start(self._password)
-        except ServerControlError as exc:
-            return _fail(exc, server=self.server_status())
-        return _ok(server=self.server_status())
-
-    def stop_server(self) -> Dict[str, Any]:
-        try:
-            self._server.stop()
-        except ServerControlError as exc:
-            return _fail(exc, server=self.server_status())
-        return _ok(server=self.server_status())
-
     # -- shutdown ---------------------------------------------------------- #
 
     def shutdown(self) -> None:
-        """Stop the child server when the window closes.
-
-        A GUI that leaves an unauthenticated AD API listening after its window
-        is gone is a worse thing than a GUI that takes an extra second to quit.
-        """
-        try:
-            self._server.stop(timeout=3.0)
-        except Exception:
-            pass
+        """Forget the password when the window closes."""
         if self._password:
             forget_secret(self._password)
             self._password = ""

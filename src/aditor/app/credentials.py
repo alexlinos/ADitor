@@ -6,7 +6,7 @@ credential store — Windows Credential Manager (DPAPI-backed) on Windows, the
 login Keychain on macOS — and is read back into memory at the moment it is
 needed.
 
-This is not a new scheme. ``start_server_keychain.sh`` already established the
+This is not a new scheme. ``scan_keychain.sh`` already established the
 pattern this module generalises:
 
 * the config file's ``password`` field holds the literal
@@ -43,14 +43,13 @@ edit that logs the wrong variable emits ``***REDACTED***`` — on any logger, at
 any depth. This mirrors the discipline in :mod:`aditor.hardening.report`, where
 every value goes through one escaper so no later edit can open a hole.
 
-Only the desktop app installs it. The headless MCP server does not import this
-module, so its logging behaviour is unchanged.
+Only the desktop app installs it. ``aditor scan`` does not import this module,
+so its logging behaviour is unchanged.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 import sys
@@ -60,13 +59,13 @@ from typing import Any, Optional
 
 # The environment variable the config loader expands, and the placeholder that
 # stands in for the password inside a config file. Both are fixed by
-# ``start_server_keychain.sh`` and the patched loader; this module does not get
+# ``scan_keychain.sh`` and the patched loader; this module does not get
 # to pick new ones.
 PASSWORD_ENV_VAR = "AD_MCP_PASSWORD"
 CONFIG_PASSWORD_PLACEHOLDER = "${" + PASSWORD_ENV_VAR + "}"
 
 # The credential-store service name. Same default as
-# ``ADMCP_KEYCHAIN_SERVICE`` in ``start_server_keychain.sh``, so the app and the
+# ``ADMCP_KEYCHAIN_SERVICE`` in ``scan_keychain.sh``, so the app and the
 # script read the same item rather than each keeping their own copy.
 DEFAULT_SERVICE = "admcp-ldap"
 
@@ -376,7 +375,7 @@ _SECURITY = "/usr/bin/security"
 class MacOSKeychainStore(CredentialStore):
     """The macOS login Keychain, via ``/usr/bin/security``.
 
-    The same service name and the same tool ``start_server_keychain.sh`` uses,
+    The same service name and the same tool ``scan_keychain.sh`` uses,
     so an operator who already ran::
 
         security add-generic-password -s admcp-ldap -a 'DOMAIN\\binduser' -w
@@ -498,9 +497,8 @@ class NoCredentialStore(CredentialStore):
             f"supports Windows Credential Manager and the macOS Keychain. It "
             f"will not write the LDAP bind password to a file instead, so this "
             f"connection cannot be saved. You can still test the connection "
-            f"and run a scan by entering the password each time, and the "
-            f"headless server can be started with the password supplied in "
-            f"{PASSWORD_ENV_VAR}.")
+            f"and run a scan by entering the password each time, or run "
+            f"`aditor scan` with the password supplied in {PASSWORD_ENV_VAR}.")
 
 
 def get_store(platform: Optional[str] = None) -> CredentialStore:
@@ -519,29 +517,6 @@ def get_store(platform: Optional[str] = None) -> CredentialStore:
         return MacOSKeychainStore()
     return NoCredentialStore(name)
 
-
-# --------------------------------------------------------------------------- #
-# The runtime side: the secret into one process's environment, nowhere else
-# --------------------------------------------------------------------------- #
-
-def password_environment(password: str,
-                         base: Optional[dict] = None) -> dict:
-    """A copy of ``base`` (default ``os.environ``) carrying the secret.
-
-    For the *child* process only — the headless MCP server, whose config file
-    holds :data:`CONFIG_PASSWORD_PLACEHOLDER`. Returns a new dict; it never
-    mutates the app's own ``os.environ``, because a secret in the parent's
-    environment is inherited by every later child, including whatever a
-    ``webbrowser.open`` hands the report to.
-    """
-    environment = dict(os.environ if base is None else base)
-    environment[PASSWORD_ENV_VAR] = password
-    return environment
-
-
-# --------------------------------------------------------------------------- #
-# Log redaction
-# --------------------------------------------------------------------------- #
 
 class SecretRedactingFilter(logging.Filter):
     """Replace any registered secret with :data:`REDACTED` in every record.
@@ -623,8 +598,8 @@ def install_redaction() -> SecretRedactingFilter:
 
     This mutates process-global logging state, so it is called **only from the
     desktop app** (:class:`aditor.app.api.AditorApi` and
-    :func:`register_secret`). The headless MCP server never reaches this module
-    and its logging is untouched. With no secret registered the scrub is a
+    :func:`register_secret`). ``aditor scan`` never reaches this module and
+    its logging is untouched. With no secret registered the scrub is a
     single empty-set check per record.
 
     Idempotent — calling it twice does not double-wrap or double-filter.
@@ -703,7 +678,6 @@ __all__ = [
     "forget_secret",
     "get_store",
     "install_redaction",
-    "password_environment",
     "redact",
     "register_secret",
 ]

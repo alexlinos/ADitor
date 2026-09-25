@@ -228,7 +228,7 @@ class TestReadGuards:
     def test_a_missing_file_says_so_and_says_what_to_do(self, tmp_path):
         with pytest.raises(ScanFileError, match="does not exist") as caught:
             read_scan(str(tmp_path / "absent.json"))
-        assert "write_hardening_scan" in str(caught.value)
+        assert "aditor scan" in str(caught.value)
 
     def test_a_directory_is_not_a_scan_file(self, tmp_path):
         with pytest.raises(ScanFileError, match="is a directory"):
@@ -254,7 +254,7 @@ class TestReadGuards:
 
         with pytest.raises(ScanFileError, match="looks like an HTML file") as caught:
             read_scan(str(target))
-        assert "write_hardening_scan" in str(caught.value)
+        assert "scan.json" in str(caught.value)
 
     def test_non_utf8_bytes_are_diagnosed_rather_than_crashing(self, tmp_path):
         target = tmp_path / "scan.json"
