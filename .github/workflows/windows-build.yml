@@ -1,0 +1,53 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main, windows-build]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install ".[gui,smb,dev]" pyinstaller
+
+      # --collect-data carries controls.json and the app's web files;
+      # smbclient is imported lazily, so it is collected explicitly.
+      - name: Build aditor.exe (command line)
+        run: >
+          pyinstaller --noconfirm --onefile --name aditor
+          --collect-data aditor --collect-submodules aditor
+          --collect-submodules smbclient --collect-submodules smbprotocol
+          packaging/aditor_cli.py
+
+      - name: Build ADitor.exe (desktop app)
+        run: >
+          pyinstaller --noconfirm --onefile --windowed --name ADitor
+          --collect-data aditor --collect-submodules aditor
+          --collect-submodules smbclient --collect-submodules smbprotocol
+          packaging/aditor_app.py
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          dist\aditor.exe --help
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          dist\aditor.exe scan --config missing.json
+          if ($LASTEXITCODE -ne 2) { throw "expected exit 2, got $LASTEXITCODE" }
+          $global:LASTEXITCODE = 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aditor-windows
+          path: dist/*.exe
+
+      # After the upload, so a Windows-only test failure still leaves a build
+      # to try; the run is still marked failed.
+      - name: Tests
+        run: pytest -q
