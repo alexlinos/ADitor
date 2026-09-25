@@ -16,33 +16,20 @@ offline-testable functions.
 """
 
 from typing import List, Dict, Any, Optional
-from urllib.parse import urlparse
 import base64
 
 import ldap3
 
 from .base import BaseTool
 from ..core.logging import log_ldap_operation
+from ..hardening.collect import Scanner
 from ..gpo.parsers import (
     decode_gpo_status,
     decode_version,
-    extract_applocker,
     normalize_guid,
     parse_gp_link,
-    parse_ini,
-    parse_registry_pol,
-    parse_registry_xml,
     summarize_gpo_contents,
 )
-
-# The Registry preferences file, per side. Group Policy Preferences deliver
-# registry values that have no ADMX policy behind them, so a GPO's real
-# hardening often lives here rather than in Registry.pol.
-_REGISTRY_XML_FILES = (
-    (r"machine\preferences\registry\registry.xml", "machine_registry_xml"),
-    (r"user\preferences\registry\registry.xml", "user_registry_xml"),
-)
-
 
 class GPOTools(BaseTool):
     """Read-only tools for inspecting Active Directory Group Policy Objects."""
@@ -311,130 +298,15 @@ class GPOTools(BaseTool):
 
     # --- SMB / SYSVOL ------------------------------------------------------
 
-    def _smb_target(self, sysvol_path: str) -> Dict[str, str]:
-        """Derive SMB (host, share, relative path) for a gPCFileSysPath.
-
-        gPCFileSysPath is a domain DFS UNC such as
-        ``\\\\domain\\SysVol\\domain\\Policies\\{GUID}``. We connect to the
-        specific DC (from the LDAP server URL) to avoid DFS resolution, but
-        reuse the share and path components from gPCFileSysPath.
-        """
-        host = urlparse(self.ldap.ad_config.server).hostname or self.ldap.ad_config.domain
-        parts = [p for p in sysvol_path.replace('/', '\\').split('\\') if p]
-        # parts: [<server-or-domain>, <share>, <relative...>]
-        share = parts[1] if len(parts) > 1 else 'SYSVOL'
-        relative = '\\'.join(parts[2:]) if len(parts) > 2 else ''
-        return {"host": host, "share": share, "relative": relative,
-                "unc": rf"\\{host}\{share}\{relative}"}
-
     def _read_gpo_sysvol(self, sysvol_path: str, include_registry: bool,
                          max_value_chars: int) -> Dict[str, Any]:
-        """Read and parse the files under a GPO's SYSVOL folder."""
-        import smbclient
+        """Read and parse the files under a GPO's SYSVOL folder.
 
-        target = self._smb_target(sysvol_path)
-        cfg = self.ldap.ad_config
-        base = target["unc"]
-
-        out: Dict[str, Any] = {
-            "smb_source": base,
-            "files": [],
-            "gpt_ini": {},
-            "machine_registry_pol": None,
-            "user_registry_pol": None,
-            "applocker": None,
-            "security_templates": [],
-            "scripts": [],
-        }
-
-        try:
-            smbclient.register_session(target["host"], username=cfg.bind_dn,
-                                       password=cfg.password)
-
-            # Inventory every file in the GPO folder.
-            file_index: Dict[str, str] = {}
-            for dirpath, _dirs, filenames in smbclient.walk(base):
-                for fname in filenames:
-                    full = dirpath + "\\" + fname
-                    rel = full[len(base):].lstrip("\\")
-                    try:
-                        size = smbclient.stat(full).st_size
-                    except Exception:
-                        size = None
-                    out["files"].append({"path": rel, "size": size})
-                    file_index[rel.lower()] = full
-
-            def read_bytes(rel_lower: str) -> Optional[bytes]:
-                full = file_index.get(rel_lower)
-                if not full:
-                    return None
-                with smbclient.open_file(full, mode="rb") as fh:
-                    return fh.read()
-
-            # GPT.INI (version marker)
-            gpt = read_bytes("gpt.ini")
-            if gpt is not None:
-                out["gpt_ini"] = parse_ini(gpt)
-
-            # Registry.pol (machine + user)
-            machine_entries: List[Dict[str, Any]] = []
-            if include_registry:
-                for side, key in (("machine\\registry.pol", "machine_registry_pol"),
-                                  ("user\\registry.pol", "user_registry_pol")):
-                    data = read_bytes(side)
-                    if data is None:
-                        continue
-                    entries, truncated = parse_registry_pol(data, max_value_chars)
-                    out[key] = {
-                        "entry_count": len(entries),
-                        "entries_truncated": truncated,
-                        "entries": entries,
-                    }
-                    if side.startswith("machine"):
-                        machine_entries = entries
-
-                # Group Policy Preferences registry items. Deliberately only
-                # added to the response when the file exists, so a GPO with no
-                # preferences returns exactly the shape it returned before this
-                # was read at all — the common case must not change.
-                for rel, key in _REGISTRY_XML_FILES:
-                    data = read_bytes(rel)
-                    if data is None:
-                        continue
-                    preferences = parse_registry_xml(data)
-                    out[key] = {
-                        "entry_count": len(preferences),
-                        "entries": preferences,
-                    }
-
-            # AppLocker rules (live inside the machine Registry.pol as SrpV2)
-            applocker = extract_applocker(machine_entries)
-            if applocker:
-                out["applocker"] = applocker
-
-            # Security templates (GptTmpl.inf), scripts.ini
-            for rel_lower, full in file_index.items():
-                if rel_lower.endswith("gpttmpl.inf"):
-                    data = read_bytes(rel_lower)
-                    if data is not None:
-                        out["security_templates"].append({
-                            "path": full[len(base):].lstrip("\\"),
-                            "sections": parse_ini(data),
-                        })
-                elif rel_lower.endswith("scripts.ini") or rel_lower.endswith("psscripts.ini"):
-                    data = read_bytes(rel_lower)
-                    if data is not None:
-                        out["scripts"].append({
-                            "path": full[len(base):].lstrip("\\"),
-                            "sections": parse_ini(data),
-                        })
-        finally:
-            try:
-                smbclient.reset_connection_cache()
-            except Exception:
-                pass
-
-        return out
+        The reader lives in :mod:`aditor.hardening.collect`, where the scan
+        uses it; this tool shares it rather than keeping a second copy.
+        """
+        return Scanner(self.ldap)._read_gpo_sysvol(
+            sysvol_path, include_registry, max_value_chars)
 
     # --- helpers -----------------------------------------------------------
 

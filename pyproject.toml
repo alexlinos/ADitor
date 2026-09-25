@@ -70,7 +70,7 @@ Repository = "https://github.com/alexlinos/ADitor.git"
 Issues = "https://github.com/alexlinos/ADitor/issues"
 
 [project.scripts]
-aditor = "aditor.server:main"
+aditor = "aditor.cli:main"
 
 [tool.setuptools.package-data]
 # The hardening control catalog is data the engine loads at runtime, so it has

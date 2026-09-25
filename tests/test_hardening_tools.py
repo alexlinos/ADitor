@@ -22,13 +22,13 @@ import pytest
 
 from aditor.gpo.parsers import parse_registry_xml
 from aditor.hardening import SCAN_ENGINE_VERSION, read_scan
-from aditor.tools.gpo import GPOTools
-from aditor.tools.hardening import (
-    HardeningTools,
+from aditor.hardening.collect import (
+    Scanner,
     _machine_pol_entries,
     _machine_preference_entries,
     _template_entries,
 )
+from aditor.tools.hardening import HardeningTools
 
 BASE_DN = "DC=test,DC=local"
 POLICIES_DN = f"CN=Policies,CN=System,{BASE_DN}"
@@ -95,7 +95,7 @@ def preference_entry(**overrides):
 
 
 def sysvol_contents(*registry_lines, pol_entries=None, preference_entries=None):
-    """What GPOTools._read_gpo_sysvol returns for a GPO, synthesized.
+    """What Scanner._read_gpo_sysvol returns for a GPO, synthesized.
 
     ``machine_registry_xml`` is added only when ``preference_entries`` is given,
     matching the real reader: the block is absent for a GPO that has no
@@ -169,7 +169,7 @@ def run_scan(tools, contents_by_guid, **kwargs):
         return sysvol_contents()
 
     with patch.dict(sys.modules, {"smbclient": Mock()}), \
-         patch.object(GPOTools, "_read_gpo_sysvol", side_effect=read_sysvol):
+         patch.object(Scanner, "_read_gpo_sysvol", side_effect=read_sysvol):
         result = tools.scan_hardening(**kwargs)
     return json.loads(result[0].text)
 
@@ -630,7 +630,7 @@ class TestScanHardeningFailureModes:
             self, tools, mock_ldap_manager):
         from aditor.hardening.catalog import CatalogError
 
-        with patch("aditor.tools.hardening.load_catalog",
+        with patch("aditor.hardening.collect.load_catalog",
                    side_effect=CatalogError("duplicate control id 'X'")):
             result = tools.scan_hardening()
         response = json.loads(result[0].text)
@@ -661,7 +661,7 @@ class TestWriteHardeningReport:
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol):
             result = tools.write_hardening_report(str(output_path), **kwargs)
         return json.loads(result[0].text)
@@ -800,7 +800,7 @@ class TestWriteHardeningReport:
                                              tmp_path):
         from aditor.hardening.catalog import CatalogError
 
-        with patch("aditor.tools.hardening.load_catalog",
+        with patch("aditor.hardening.collect.load_catalog",
                    side_effect=CatalogError("duplicate control id 'X'")):
             result = tools.write_hardening_report(str(tmp_path / "r.html"))
         response = json.loads(result[0].text)
@@ -888,7 +888,7 @@ class TestWriteHardeningScan:
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol):
             result = tools.write_hardening_scan(str(output_path), **kwargs)
         return json.loads(result[0].text)
@@ -1002,7 +1002,7 @@ class TestWriteHardeningScan:
                                              tmp_path):
         from aditor.hardening.catalog import CatalogError
 
-        with patch("aditor.tools.hardening.load_catalog",
+        with patch("aditor.hardening.collect.load_catalog",
                    side_effect=CatalogError("duplicate control id 'X'")):
             result = tools.write_hardening_scan(str(tmp_path / "s.json"))
         response = json.loads(result[0].text)
@@ -1080,7 +1080,7 @@ class TestWriteHardeningSnapshot:
     def snapshot(self, tools, contents_by_guid, output_dir):
         """Call write_hardening_snapshot with SMB stubbed out; parse the JSON."""
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=self._reader(contents_by_guid)):
             result = tools.write_hardening_snapshot(str(output_dir))
         return json.loads(result[0].text)
@@ -1154,7 +1154,7 @@ class TestWriteHardeningSnapshot:
 
         mock_ldap_manager.reset_mock()
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=self._reader(contents)) as one_scan_reads:
             tools.scan_hardening(include_not_applicable=True)
         searches_for_one_scan = mock_ldap_manager.search.call_count
@@ -1163,7 +1163,7 @@ class TestWriteHardeningSnapshot:
 
         mock_ldap_manager.reset_mock()
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=self._reader(contents)) as snapshot_reads:
             response = json.loads(
                 tools.write_hardening_snapshot(str(tmp_path))[0].text)
@@ -1213,7 +1213,7 @@ class TestWriteHardeningSnapshot:
 
         mock_ldap_manager.reset_mock()
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=self._reader({})):
             scan_response = json.loads(tools.write_hardening_scan(
                 str(folder / "scan.json"))[0].text)
@@ -1240,7 +1240,7 @@ class TestWriteHardeningSnapshot:
         wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
         frozen = datetime(2026, 8, 20, 16, 26, 47, 123456, tzinfo=timezone.utc)
 
-        with patch("aditor.tools.hardening.datetime") as clock:
+        with patch("aditor.hardening.collect.datetime") as clock:
             clock.now.return_value = frozen
             response = self.snapshot(tools, {}, tmp_path)
 
@@ -1261,7 +1261,7 @@ class TestWriteHardeningSnapshot:
         wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LDAP Signing")], [])
         frozen = datetime(2026, 8, 20, 16, 26, 47, tzinfo=timezone.utc)
 
-        with patch("aditor.tools.hardening.datetime") as clock:
+        with patch("aditor.hardening.collect.datetime") as clock:
             clock.now.return_value = frozen
             first = self.snapshot(tools, {}, tmp_path)
             second = self.snapshot(tools, {}, tmp_path)
@@ -1286,8 +1286,8 @@ class TestWriteHardeningSnapshot:
         frozen = datetime(2026, 8, 20, 16, 26, 47, tzinfo=timezone.utc)
         fixed_id = Mock(hex="b288e925" + "0" * 24)
 
-        with patch("aditor.tools.hardening.datetime") as clock, \
-             patch("aditor.tools.hardening.uuid4", return_value=fixed_id):
+        with patch("aditor.hardening.collect.datetime") as clock, \
+             patch("aditor.hardening.collect.uuid4", return_value=fixed_id):
             clock.now.return_value = frozen
             first = self.snapshot(tools, {}, tmp_path)
             before = Path(first["files"]["scan"]["path"]).read_bytes()
@@ -1384,7 +1384,7 @@ class TestWriteHardeningSnapshot:
                                              tmp_path):
         from aditor.hardening.catalog import CatalogError
 
-        with patch("aditor.tools.hardening.load_catalog",
+        with patch("aditor.hardening.collect.load_catalog",
                    side_effect=CatalogError("duplicate control id 'X'")):
             result = tools.write_hardening_snapshot(str(tmp_path))
         response = json.loads(result[0].text)
@@ -1481,7 +1481,7 @@ class TestDiffingSnapshotFoldersThroughTheTool:
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol):
             return json.loads(
                 tools.write_hardening_snapshot(str(output_dir))[0].text)
@@ -1548,7 +1548,7 @@ class TestDiffingSnapshotFoldersThroughTheTool:
         after = self.snapshot(tools, tmp_path)
         mock_ldap_manager.reset_mock()
 
-        with patch.object(GPOTools, "_read_gpo_sysvol",
+        with patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=AssertionError("SYSVOL must not be read")):
             response = self.diff(tools, before["snapshot_dir"],
                                  after["snapshot_dir"])
@@ -1572,7 +1572,7 @@ class TestDiffHardeningScans:
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol):
             tools.write_hardening_scan(str(output_path))
 
@@ -1702,7 +1702,7 @@ class TestDiffHardeningScans:
         self.save(tools, {}, after)
         mock_ldap_manager.reset_mock()
 
-        with patch.object(GPOTools, "_read_gpo_sysvol",
+        with patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=AssertionError("SYSVOL must not be read")):
             response = self.diff(tools, before, after)
 
@@ -1813,7 +1813,7 @@ class TestScanId:
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol", side_effect=read_sysvol):
+             patch.object(Scanner, "_read_gpo_sysvol", side_effect=read_sysvol):
             json.loads(tools.write_hardening_report(str(out))[0].text)
 
         document = out.read_text(encoding="utf-8")
@@ -1897,7 +1897,7 @@ class TestUnknownVerdictThroughTheScan:
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol", side_effect=read_sysvol):
+             patch.object(Scanner, "_read_gpo_sysvol", side_effect=read_sysvol):
             response = json.loads(
                 tools.write_hardening_report(str(out))[0].text)
 
