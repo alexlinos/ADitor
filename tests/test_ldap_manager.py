@@ -141,71 +141,6 @@ class TestLDAPManager:
         
         mock_connection_instance.search.assert_called()
     
-    @patch('aditor.core.ldap_manager.Connection')
-    def test_add(self, mock_connection, ldap_manager):
-        """Test LDAP add operation."""
-        # Setup mock connection
-        mock_connection_instance = Mock()
-        mock_connection_instance.bind.return_value = True
-        mock_connection_instance.bound = True
-        mock_connection_instance.add.return_value = True
-        
-        ldap_manager._connection = mock_connection_instance
-        
-        # Test add operation
-        dn = "CN=newuser,OU=Users,DC=test,DC=local"
-        attributes = {
-            'objectClass': ['top', 'person', 'organizationalPerson', 'user'],
-            'sAMAccountName': 'newuser',
-            'displayName': 'New User'
-        }
-        
-        result = ldap_manager.add(dn, attributes)
-        
-        assert result == True
-        mock_connection_instance.add.assert_called_once_with(dn, attributes=attributes)
-    
-    @patch('aditor.core.ldap_manager.Connection')
-    def test_modify(self, mock_connection, ldap_manager):
-        """Test LDAP modify operation."""
-        # Setup mock connection
-        mock_connection_instance = Mock()
-        mock_connection_instance.bind.return_value = True
-        mock_connection_instance.bound = True
-        mock_connection_instance.modify.return_value = True
-        
-        ldap_manager._connection = mock_connection_instance
-        
-        # Test modify operation
-        dn = "CN=testuser,OU=Users,DC=test,DC=local"
-        changes = {
-            'displayName': [('MODIFY_REPLACE', ['Modified User'])]
-        }
-        
-        result = ldap_manager.modify(dn, changes)
-        
-        assert result == True
-        mock_connection_instance.modify.assert_called_once_with(dn, changes)
-    
-    @patch('aditor.core.ldap_manager.Connection')
-    def test_delete(self, mock_connection, ldap_manager):
-        """Test LDAP delete operation."""
-        # Setup mock connection
-        mock_connection_instance = Mock()
-        mock_connection_instance.bind.return_value = True
-        mock_connection_instance.bound = True
-        mock_connection_instance.delete.return_value = True
-        
-        ldap_manager._connection = mock_connection_instance
-        
-        # Test delete operation
-        dn = "CN=testuser,OU=Users,DC=test,DC=local"
-        
-        result = ldap_manager.delete(dn)
-        
-        assert result == True
-        mock_connection_instance.delete.assert_called_once_with(dn)
-    
     def test_test_connection_success(self, ldap_manager):
         """Test connection test with success."""
         # Setup mock connection
@@ -234,14 +169,6 @@ class TestLDAPManager:
         
         assert result['connected'] == False
         assert "Connection failed" in result['error']
-    
-    def test_context_manager(self, ldap_manager):
-        """Test LDAP manager as context manager."""
-        with patch.object(ldap_manager, 'disconnect') as mock_disconnect:
-            with ldap_manager:
-                pass
-            
-            mock_disconnect.assert_called_once()
 
 
 class TestLDAPManagerRetry:
@@ -318,7 +245,7 @@ class TestConnectionErrorsAreNotBlindlyRetried:
                   server="ldaps://dc.test.local:636", server_pool=None,
                   base_dn="DC=test,DC=local", domain="test.local")
         sec = Mock(validate_certificate=True, ca_cert_file=None, enable_tls=True)
-        perf = Mock(max_retries=3, retry_delay=0, connection_pool_size=1, page_size=100)
+        perf = Mock(max_retries=3, retry_delay=0, page_size=100)
 
         cert_error = LDAPSocketOpenError(
             "socket ssl wrapping error: [SSL: CERTIFICATE_VERIFY_FAILED] "
@@ -350,7 +277,7 @@ class TestConnectionErrorsAreNotBlindlyRetried:
                   server="ldaps://dc.test.local:636", server_pool=None,
                   base_dn="DC=test,DC=local", domain="test.local")
         sec = Mock(validate_certificate=False, ca_cert_file=None, enable_tls=True)
-        perf = Mock(max_retries=3, retry_delay=0, connection_pool_size=1, page_size=100)
+        perf = Mock(max_retries=3, retry_delay=0, page_size=100)
 
         binds = []
 

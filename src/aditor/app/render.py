@@ -16,7 +16,7 @@ no "trusted" variant, because the one place a trusted variant gets used by
 accident is on a GPO display name.
 
 The JS side does ``element.innerHTML = fragment`` and nothing else. There is no
-templating engine and no framework, per ``REPLATFORM_BRIEF.md``: the same
+templating engine and no framework: the same
 standard-library-only discipline as the self-contained report.
 """
 

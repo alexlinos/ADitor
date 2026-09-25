@@ -97,31 +97,17 @@ def sysvol_contents(*registry_lines, pol_entries=None, preference_entries=None):
     Preferences\\Registry\\Registry.xml at all.
     """
     contents = {
-        "smb_source": r"\\dc.test.local\SYSVOL\test.local\Policies",
-        "files": [{"path": "GPT.INI", "size": 59}],
-        "gpt_ini": {"General": ["Version=3"]},
-        "machine_registry_pol": {
-            "entry_count": len(pol_entries or []),
-            "entries_truncated": False,
-            "entries": list(pol_entries or []),
-        },
-        "user_registry_pol": None,
-        "applocker": None,
+        "machine_registry_pol": {"entries": list(pol_entries or [])},
         "security_templates": [{
-            "path": r"Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf",
             "sections": {
                 "Unicode": ["Unicode=yes"],
                 "Registry Values": list(registry_lines),
                 "Version": ["Revision=1"],
             },
         }],
-        "scripts": [],
     }
     if preference_entries is not None:
-        contents["machine_registry_xml"] = {
-            "entry_count": len(preference_entries),
-            "entries": list(preference_entries),
-        }
+        contents["machine_registry_xml"] = {"entries": list(preference_entries)}
     return contents
 
 
@@ -170,7 +156,7 @@ def run_scan(tools, contents_by_guid, include_not_applicable=False, **kwargs):
 
 
 class TestContentExtraction:
-    """The two helpers that turn get_gpo_contents output into evaluator input."""
+    """The helpers that turn the SYSVOL reader's output into evaluator input."""
 
     def test_registry_values_sections_become_structured_entries(self):
         entries = _template_entries(sysvol_contents(*LDAP_LINES))
@@ -719,7 +705,7 @@ class TestKeyScopedDeleteThroughTheScan:
     """Fix 3 end to end: a GPO deleting the key under a hardened value.
 
     The preference item is produced by running the real ``parse_registry_xml``
-    over hand-written XML, exactly as ``get_gpo_contents`` does before the scan
+    over hand-written XML, exactly as the SYSVOL reader does before the scan
     sees it, so the parser change and the evaluator disclosure are exercised
     together rather than a hand-shaped dict being asserted against itself.
     """

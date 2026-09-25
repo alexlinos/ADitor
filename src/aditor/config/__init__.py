@@ -1,21 +1,12 @@
 """Configuration module for ADitor."""
 
 from .loader import load_config
-from .models import (
-    ActiveDirectoryConfig,
-    OrganizationalUnitsConfig,
-    SecurityConfig,
-    LoggingConfig,
-    PerformanceConfig,
-    Config,
-)
+from .models import ActiveDirectoryConfig, Config, PerformanceConfig, SecurityConfig
 
 __all__ = [
     "load_config",
     "ActiveDirectoryConfig",
-    "OrganizationalUnitsConfig", 
     "SecurityConfig",
-    "LoggingConfig",
     "PerformanceConfig",
     "Config",
 ]

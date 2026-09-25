@@ -338,8 +338,8 @@ class TestBuildManager:
         captured = {}
 
         def factory(active, security, performance):
-            captured["active"] = active
+            captured["security"] = security
             return object()
 
         build_manager(a_connection(), PASSWORD, factory)
-        assert captured["active"].use_ssl is True
+        assert captured["security"].enable_tls is True

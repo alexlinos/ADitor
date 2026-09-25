@@ -1,106 +1,80 @@
 """Configuration models for ADitor."""
 
-from typing import List, Optional
-from pydantic import BaseModel, Field, field_validator
+from dataclasses import dataclass, fields
+from typing import Any, Dict, List, Optional, Type, TypeVar
+
+T = TypeVar("T")
 
 
-class OrganizationalUnitsConfig(BaseModel):
-    """Organizational Units configuration."""
+def build(cls: Type[T], data: Any) -> T:
+    """``cls(**data)``, ignoring keys ``cls`` does not declare.
 
-    users_ou: str = Field(..., description="Users organizational unit DN")
-    groups_ou: str = Field(..., description="Groups organizational unit DN")
-    computers_ou: str = Field(..., description="Computers organizational unit DN")
-    service_accounts_ou: str = Field(..., description="Service accounts organizational unit DN")
+    Older config files carry blocks and keys ADitor no longer reads (the MCP
+    era's ``organizational_units``, ``logging``, ``use_ssl``...), and the app
+    writes a ``_comment``; none of that should stop a config from loading.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"{cls.__name__} must be a JSON object")
+    names = {f.name for f in fields(cls)}  # type: ignore[arg-type]
+    return cls(**{k: v for k, v in data.items() if k in names})
 
 
-class ActiveDirectoryConfig(BaseModel):
+@dataclass
+class ActiveDirectoryConfig:
     """Active Directory connection configuration."""
 
-    server: str = Field(..., description="Primary LDAP server URL")
-    server_pool: Optional[List[str]] = Field(default=None, description="Additional LDAP servers for redundancy")
-    use_ssl: bool = Field(default=True, description="Use SSL/TLS connection")
-    ssl_port: int = Field(default=636, description="SSL port for LDAP")
-    domain: str = Field(..., description="Active Directory domain")
-    base_dn: str = Field(..., description="Base Distinguished Name")
-    bind_dn: str = Field(..., description="Service account DN for binding")
-    password: str = Field(..., description="Service account password")
-    timeout: int = Field(default=30, description="Connection timeout in seconds")
-    auto_bind: bool = Field(default=True, description="Automatically bind on connection")
-    receive_timeout: int = Field(default=10, description="Receive timeout in seconds")
-    # Populated at load time from the top-level ``organizational_units`` block so
-    # tools can resolve default OUs via ``ldap_manager.ad_config.organizational_units``.
-    organizational_units: Optional[OrganizationalUnitsConfig] = Field(
-        default=None, description="OU layout (wired in from the top-level config)"
-    )
+    server: str
+    domain: str
+    base_dn: str
+    bind_dn: str
+    password: str
+    server_pool: Optional[List[str]] = None
+    timeout: int = 30
+    auto_bind: bool = True
+    receive_timeout: int = 10
 
-    @field_validator('server')
-    @classmethod
-    def validate_server(cls, v):
-        """Validate server URL format."""
-        if not v.startswith(('ldap://', 'ldaps://')):
-            raise ValueError('Server must start with ldap:// or ldaps://')
-        return v
+    def __post_init__(self) -> None:
+        if not self.server.startswith(("ldap://", "ldaps://")):
+            raise ValueError("Server must start with ldap:// or ldaps://")
 
 
-class SecurityConfig(BaseModel):
+@dataclass
+class SecurityConfig:
     """Security configuration for LDAP connections."""
-    
-    enable_tls: bool = Field(default=True, description="Enable TLS encryption")
-    validate_certificate: bool = Field(default=True, description="Validate server certificate")
-    ca_cert_file: Optional[str] = Field(default=None, description="CA certificate file path")
-    require_secure_connection: bool = Field(default=True, description="Require secure connection")
+
+    enable_tls: bool = True
+    validate_certificate: bool = True
+    ca_cert_file: Optional[str] = None
 
 
-class LoggingConfig(BaseModel):
-    """Logging configuration."""
-    
-    level: str = Field(default="INFO", description="Logging level")
-    format: str = Field(
-        default="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        description="Log message format"
-    )
-    file: Optional[str] = Field(default=None, description="Log file path")
-    
-    @field_validator('level')
-    @classmethod
-    def validate_level(cls, v):
-        """Validate logging level."""
-        valid_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-        if v.upper() not in valid_levels:
-            raise ValueError(f'Level must be one of: {valid_levels}')
-        return v.upper()
+@dataclass
+class PerformanceConfig:
+    """Retry and paging configuration."""
+
+    max_retries: int = 3
+    retry_delay: float = 1.0
+    page_size: int = 1000
+
+    def __post_init__(self) -> None:
+        if self.max_retries <= 0 or self.retry_delay <= 0 or self.page_size <= 0:
+            raise ValueError(
+                "max_retries, retry_delay and page_size must be positive")
 
 
-class PerformanceConfig(BaseModel):
-    """Performance configuration."""
-    
-    connection_pool_size: int = Field(default=10, description="Connection pool size")
-    max_retries: int = Field(default=3, description="Maximum connection retries")
-    retry_delay: float = Field(default=1.0, description="Retry delay in seconds")
-    page_size: int = Field(default=1000, description="LDAP search page size")
-    
-    @field_validator('connection_pool_size', 'max_retries', 'page_size')
-    @classmethod
-    def validate_positive_int(cls, v):
-        """Validate positive integers."""
-        if v <= 0:
-            raise ValueError('Value must be positive')
-        return v
-    
-    @field_validator('retry_delay')
-    @classmethod
-    def validate_positive_float(cls, v):
-        """Validate positive float."""
-        if v <= 0:
-            raise ValueError('Retry delay must be positive')
-        return v
-
-
-class Config(BaseModel):
+@dataclass
+class Config:
     """Main configuration class."""
-    
+
     active_directory: ActiveDirectoryConfig
-    organizational_units: OrganizationalUnitsConfig
-    security: SecurityConfig = Field(default_factory=SecurityConfig)
-    logging: LoggingConfig = Field(default_factory=LoggingConfig)
-    performance: PerformanceConfig = Field(default_factory=PerformanceConfig)
+    security: SecurityConfig
+    performance: PerformanceConfig
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Config":
+        if not isinstance(data, dict) or "active_directory" not in data:
+            raise ValueError("config must have an 'active_directory' block")
+        return cls(
+            active_directory=build(ActiveDirectoryConfig, data["active_directory"]),
+            security=build(SecurityConfig, data.get("security") or {}),
+            performance=build(PerformanceConfig, data.get("performance") or {}),
+        )
