@@ -1,7 +1,7 @@
 """The hardening scan tools: read the domain's GPOs, evaluate the catalog.
 
-This module is orchestration only — LDAP queries, SYSVOL reads over SMB, and
-response shaping. The control definitions live in
+This module is response shaping only: the LDAP queries and SYSVOL reads live
+in :mod:`aditor.hardening.collect`. The control definitions live in
 :mod:`aditor.hardening.catalog`, the verdict logic in
 :mod:`aditor.hardening.evaluator`, the HTML rendering in
 :mod:`aditor.hardening.report`, and the parsing in :mod:`aditor.gpo.parsers`;
@@ -40,23 +40,15 @@ version, timestamp, domain and base DN — because a report that cannot state
 "against which baseline, when, which domain" is not audit-grade.
 """
 
-from datetime import datetime, timezone
-from uuid import uuid4
 from typing import Any, Dict, List, Optional, Sequence
 
-import ldap3
-
 from ..core.logging import log_ldap_operation
-from ..gpo.parsers import parse_gp_link, parse_security_template_registry_values
-from ..hardening import SCAN_ENGINE_VERSION
-from ..hardening.catalog import Catalog, CatalogError, load_catalog
+from ..hardening.catalog import CatalogError, load_catalog
+from ..hardening.collect import GpoReadFailure, RSOP_NOTE, Scanner
 from ..hardening.evaluator import (
     DELIVERIES,
     EVIDENCE_SOURCES,
     RESULTS,
-    GpoLink,
-    GpoSnapshot,
-    evaluate_controls,
 )
 from ..hardening.diff import (
     ATTRIBUTION_AMBIGUOUS,
@@ -84,34 +76,6 @@ from ..hardening.snapshot import (
     write_snapshot,
 )
 from .base import BaseTool
-from .gpo import GPOTools
-
-# The GptTmpl.inf section holding registry-backed security options.
-_REGISTRY_VALUES_SECTION = "Registry Values"
-
-# How this release resolves (or rather, does not resolve) policy precedence.
-_RSOP_NOTE = (
-    "Precedence is not resolved: this scan reports every GPO that sets a "
-    "control's key, with its link path and enforced flag, and flags "
-    "disagreements as conflicts. Where a finding carries a conflict, confirm the "
-    "effective value with RSoP / gpresult before acting on it."
-)
-
-
-class _GpoReadFailure(Exception):
-    """The LDAP enumeration or SYSVOL read failed outright.
-
-    Raised inside :meth:`HardeningTools._scan` so both tools can turn the same
-    failure into their own response shape — ``scan_hardening`` through the shared
-    ``_handle_ldap_error`` path it has always used, ``write_hardening_report``
-    into an error payload that writes no file. The alternative, returning a
-    pre-formatted MCP response from the shared scan, would force the report tool
-    to parse JSON back out of its own scan.
-    """
-
-    def __init__(self, cause: Exception) -> None:
-        super().__init__(str(cause))
-        self.cause = cause
 
 
 class HardeningTools(BaseTool):
@@ -119,9 +83,9 @@ class HardeningTools(BaseTool):
 
     def __init__(self, ldap_manager: Any) -> None:
         super().__init__(ldap_manager)
-        # GPO enumeration and the SYSVOL/SMB read are already solved in
-        # GPOTools; reuse them rather than growing a second implementation.
-        self.gpo = GPOTools(ldap_manager)
+        # The collection itself lives in aditor.hardening.collect, which the
+        # CLI uses directly; these tools only shape its payload for MCP.
+        self.scanner = Scanner(ldap_manager)
 
     # --- the tool ----------------------------------------------------------
 
@@ -147,7 +111,7 @@ class HardeningTools(BaseTool):
         try:
             payload = self._scan(control_ids, include_not_applicable,
                                  operation="scan_hardening")
-        except _GpoReadFailure as failure:
+        except GpoReadFailure as failure:
             return self._handle_ldap_error(failure.cause, "scan_hardening",
                                            self.ldap.ad_config.base_dn)
         return self._format_response(payload, "scan_hardening")
@@ -184,7 +148,7 @@ class HardeningTools(BaseTool):
         try:
             payload = self._scan(control_ids, include_not_applicable=True,
                                  operation="write_hardening_report")
-        except _GpoReadFailure as failure:
+        except GpoReadFailure as failure:
             return self._handle_ldap_error(failure.cause,
                                            "write_hardening_report",
                                            self.ldap.ad_config.base_dn)
@@ -273,7 +237,7 @@ class HardeningTools(BaseTool):
         try:
             payload = self._scan(control_ids, include_not_applicable=True,
                                  operation="write_hardening_scan")
-        except _GpoReadFailure as failure:
+        except GpoReadFailure as failure:
             return self._handle_ldap_error(failure.cause,
                                            "write_hardening_scan",
                                            self.ldap.ad_config.base_dn)
@@ -378,7 +342,7 @@ class HardeningTools(BaseTool):
         try:
             payload = self._scan(None, include_not_applicable=True,
                                  operation="write_hardening_snapshot")
-        except _GpoReadFailure as failure:
+        except GpoReadFailure as failure:
             return self._handle_ldap_error(failure.cause,
                                            "write_hardening_snapshot",
                                            self.ldap.ad_config.base_dn)
@@ -537,188 +501,8 @@ class HardeningTools(BaseTool):
     def _scan(self, control_ids: Optional[Sequence[str]],
               include_not_applicable: bool,
               operation: str) -> Dict[str, Any]:
-        """Run the scan and return the payload dict both tools render.
-
-        Returns either the full scan payload or a ``success: False`` dict for a
-        catalog, argument or missing-dependency failure. ``operation`` only names
-        the caller in error messages, so a reader of a failed
-        ``write_hardening_report`` is not told to fix ``scan_hardening``.
-
-        Raises:
-            _GpoReadFailure: the LDAP enumeration or SYSVOL read failed outright.
-        """
-        try:
-            catalog = load_catalog()
-        except CatalogError as exc:
-            return {
-                "success": False,
-                "error": f"hardening control catalog failed to load: {exc}",
-                "operation": operation,
-            }
-
-        controls, unknown_ids = catalog.select(control_ids)
-        if not controls:
-            return {
-                "success": False,
-                "error": ("no controls selected"
-                          + (f"; unknown control_ids: {', '.join(unknown_ids)}"
-                             if unknown_ids else "")),
-                "known_control_ids": [c.id for c in catalog.controls],
-                "operation": operation,
-            }
-
-        try:
-            import smbclient  # noqa: F401  (from the smbprotocol package)
-        except ImportError:
-            return {
-                "success": False,
-                "error": f"{operation} reads GPO settings from SYSVOL, which "
-                         f"requires the 'smbprotocol' package. Install it with: "
-                         f"uv pip install smbprotocol",
-                "operation": operation,
-            }
-
-        try:
-            links_by_guid = self._links_by_gpo_guid()
-            snapshots, read_errors = self._read_gpo_snapshots(links_by_guid)
-        except Exception as exc:
-            raise _GpoReadFailure(exc) from exc
-
-        findings, counts = evaluate_controls(
-            controls, snapshots, include_not_applicable=include_not_applicable)
-
-        log_ldap_operation(operation, self.ldap.ad_config.base_dn, True,
-                           f"Evaluated {counts['total']} controls against "
-                           f"{len(snapshots)} GPOs")
-
-        return {
-            "scan": self._provenance(catalog, snapshots, read_errors,
-                                     include_not_applicable),
-            "counts": counts,
-            "findings": findings,
-            "unscored_control_ids": [c.id for c in controls if not c.scored],
-            "unknown_control_ids": list(unknown_ids),
-            "gpo_read_errors": read_errors,
-        }
-
-    # --- provenance --------------------------------------------------------
-
-    def _provenance(self, catalog: Catalog, snapshots: Sequence[GpoSnapshot],
-                    read_errors: Sequence[Dict[str, str]],
-                    include_not_applicable: bool) -> Dict[str, Any]:
-        """The audit header: what ran, against what baseline, when, and where."""
-        config = self.ldap.ad_config
-        provenance: Dict[str, Any] = {
-            "tool": "scan_hardening",
-            "tool_version": SCAN_ENGINE_VERSION,
-            # Identity for this run. The timestamp orders scans; this names one,
-            # so a diff (or a report quoted in a ticket) can refer to it
-            # unambiguously even if two scans share a timestamp.
-            "scan_id": uuid4().hex,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "domain": config.domain,
-            "base_dn": config.base_dn,
-            "gpos_scanned": len(snapshots),
-            "gpos_unreadable": len(read_errors),
-            "include_not_applicable": include_not_applicable,
-            "read_only": True,
-            "precedence": _RSOP_NOTE,
-        }
-        provenance.update(catalog.provenance())
-        provenance["catalog_notes"] = list(catalog.notes)
-        return provenance
-
-    # --- GPO reads ---------------------------------------------------------
-
-    def _links_by_gpo_guid(self) -> Dict[str, List[GpoLink]]:
-        """Map each GPO GUID to the links that reference it, domain-wide.
-
-        One subtree search for objects carrying ``gPLink`` (the domain root, OUs
-        and, where in scope, sites), parsed with the same ``parse_gp_link`` that
-        backs ``get_linked_gpos`` — one query instead of one per GPO.
-        """
-        links: Dict[str, List[GpoLink]] = {}
-        results = self.ldap.search(
-            search_base=self.ldap.ad_config.base_dn,
-            search_filter="(gPLink=*)",
-            attributes=["gPLink", "gPOptions", "distinguishedName"],
-            search_scope=ldap3.SUBTREE,
-        )
-        for entry in results or []:
-            attributes = entry.get("attributes", {}) or {}
-            target_dn = entry.get("dn") or self._get_attr_value(
-                attributes, "distinguishedName", "")
-            try:
-                block_inheritance = bool(
-                    int(self._get_attr_value(attributes, "gPOptions", 0)) & 1)
-            except (TypeError, ValueError):
-                block_inheritance = False
-
-            for link in parse_gp_link(self._get_attr_value(attributes, "gPLink", "")):
-                guid = (link.get("guid") or "").strip("{}").lower()
-                if not guid:
-                    continue
-                links.setdefault(guid, []).append(GpoLink(
-                    target_dn=target_dn,
-                    enforced=bool(link.get("enforced")),
-                    link_enabled=bool(link.get("link_enabled")),
-                    block_inheritance=block_inheritance,
-                ))
-        return links
-
-    def _read_gpo_snapshots(self, links_by_guid: Dict[str, List[GpoLink]]
-                            ) -> tuple:
-        """Read and parse every GPO's policy content.
-
-        A GPO whose SYSVOL folder cannot be read becomes a snapshot carrying a
-        ``read_error`` rather than an empty one, so findings can distinguish "not
-        configured" from "could not tell" — and the scan continues instead of
-        failing wholesale on one unreadable GPO.
-
-        Returns:
-            ``(snapshots, read_errors)``.
-        """
-        results = self.ldap.search(
-            search_base=f"CN=Policies,CN=System,{self.ldap.ad_config.base_dn}",
-            search_filter="(objectClass=groupPolicyContainer)",
-            attributes=["cn", "displayName", "gPCFileSysPath"],
-            search_scope=ldap3.SUBTREE,
-        )
-
-        snapshots: List[GpoSnapshot] = []
-        read_errors: List[Dict[str, str]] = []
-        for entry in results or []:
-            attributes = entry.get("attributes", {}) or {}
-            cn = self._get_attr_value(attributes, "cn", "") or ""
-            guid = cn.strip("{}") if isinstance(cn, str) else ""
-            display_name = self._get_attr_value(attributes, "displayName", "") or ""
-            sysvol_path = self._get_attr_value(attributes, "gPCFileSysPath", "") or ""
-            links = tuple(links_by_guid.get(guid.lower(), ()))
-
-            try:
-                contents = self.gpo._read_gpo_sysvol(sysvol_path,
-                                                     include_registry=True,
-                                                     max_value_chars=6000)
-            except Exception as exc:
-                read_errors.append({"gpo_dn": entry.get("dn", ""),
-                                    "display_name": display_name,
-                                    "error": str(exc)})
-                snapshots.append(GpoSnapshot(dn=entry.get("dn", ""),
-                                             display_name=display_name,
-                                             guid=guid, links=links,
-                                             read_error=str(exc)))
-                continue
-
-            snapshots.append(GpoSnapshot(
-                dn=entry.get("dn", ""),
-                display_name=display_name,
-                guid=guid,
-                security_template_entries=_template_entries(contents),
-                registry_pol_entries=_machine_pol_entries(contents),
-                registry_xml_entries=_machine_preference_entries(contents),
-                links=links,
-            ))
-        return snapshots, read_errors
+        """Run the scan in :mod:`aditor.hardening.collect`."""
+        return self.scanner.scan(control_ids, include_not_applicable, operation)
 
     def get_schema_info(self) -> Dict[str, Any]:
         """Get schema information for the hardening scan operations."""
@@ -783,7 +567,7 @@ class HardeningTools(BaseTool):
                 "key is reported as a 'policy-preference-disagreement' conflict: "
                 "which one lands depends on client-side extension ordering, not "
                 "on link precedence, and this scan resolves neither.",
-                _RSOP_NOTE,
+                RSOP_NOTE,
                 "Controls flagged needs_baseline_value are reported but not "
                 "scored: their exact expected value is not stated by the source "
                 "and is never guessed.",
@@ -858,38 +642,3 @@ class HardeningTools(BaseTool):
             ],
             **catalog_info,
         }
-
-
-# --------------------------------------------------------------------------- #
-# Content extraction (module-level so it stays trivially testable)
-# --------------------------------------------------------------------------- #
-
-def _template_entries(contents: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Structured ``[Registry Values]`` entries from every GptTmpl.inf found."""
-    entries: List[Dict[str, Any]] = []
-    for template in contents.get("security_templates") or []:
-        sections = template.get("sections") or {}
-        entries.extend(parse_security_template_registry_values(
-            sections.get(_REGISTRY_VALUES_SECTION)))
-    return entries
-
-
-def _machine_pol_entries(contents: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Parsed machine ``Registry.pol`` entries (user-side policy is not scanned)."""
-    pol = contents.get("machine_registry_pol")
-    if not isinstance(pol, dict):
-        return []
-    return list(pol.get("entries") or [])
-
-
-def _machine_preference_entries(contents: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Parsed machine ``Registry.xml`` preference items.
-
-    Machine side only, matching ``_machine_pol_entries``: every control in the
-    catalog is a machine setting. The block is absent altogether for a GPO with
-    no preferences, so ``.get`` is doing real work here.
-    """
-    preferences = contents.get("machine_registry_xml")
-    if not isinstance(preferences, dict):
-        return []
-    return list(preferences.get("entries") or [])
