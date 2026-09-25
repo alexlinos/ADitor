@@ -27,7 +27,6 @@ import ldap3
 
 from ..core.logging import log_ldap_operation
 from ..gpo.parsers import (
-    extract_applocker,
     parse_gp_link,
     parse_ini,
     parse_registry_pol,
@@ -41,13 +40,11 @@ from .evaluator import GpoLink, GpoSnapshot, evaluate_controls
 # The GptTmpl.inf section holding registry-backed security options.
 _REGISTRY_VALUES_SECTION = "Registry Values"
 
-# The Registry preferences file, per side. Group Policy Preferences deliver
-# registry values that have no ADMX policy behind them, so a GPO's real
-# hardening often lives here rather than in Registry.pol.
-_REGISTRY_XML_FILES = (
-    (r"machine\preferences\registry\registry.xml", "machine_registry_xml"),
-    (r"user\preferences\registry\registry.xml", "user_registry_xml"),
-)
+_MACHINE_REGISTRY_POL = r"machine\registry.pol"
+# Group Policy Preferences deliver registry values that have no ADMX policy
+# behind them, so a GPO's real hardening often lives here rather than in
+# Registry.pol.
+_MACHINE_REGISTRY_XML = r"machine\preferences\registry\registry.xml"
 
 # How this release resolves (or rather, does not resolve) policy precedence.
 RSOP_NOTE = (
@@ -247,9 +244,7 @@ class Scanner:
             links = tuple(links_by_guid.get(guid.lower(), ()))
 
             try:
-                contents = self._read_gpo_sysvol(sysvol_path,
-                                                 include_registry=True,
-                                                 max_value_chars=6000)
+                contents = self._read_gpo_sysvol(sysvol_path)
             except Exception as exc:
                 read_errors.append({"gpo_dn": entry.get("dn", ""),
                                     "display_name": display_name,
@@ -289,107 +284,46 @@ class Scanner:
         return {"host": host, "share": share, "relative": relative,
                 "unc": rf"\\{host}\{share}\{relative}"}
 
-    def _read_gpo_sysvol(self, sysvol_path: str, include_registry: bool,
-                         max_value_chars: int) -> Dict[str, Any]:
-        """Read and parse the files under a GPO's SYSVOL folder."""
+    def _read_gpo_sysvol(self, sysvol_path: str) -> Dict[str, Any]:
+        """Read and parse the policy files the scan evaluates from one GPO.
+
+        Machine side only — every control in the catalog is a machine setting:
+        ``Registry.pol``, the Preferences ``Registry.xml`` (whose block is
+        present only when the file exists) and every ``GptTmpl.inf``.
+        """
         import smbclient
 
         target = self._smb_target(sysvol_path)
         cfg = self.ldap.ad_config
         base = target["unc"]
-
-        out: Dict[str, Any] = {
-            "smb_source": base,
-            "files": [],
-            "gpt_ini": {},
-            "machine_registry_pol": None,
-            "user_registry_pol": None,
-            "applocker": None,
-            "security_templates": [],
-            "scripts": [],
-        }
+        out: Dict[str, Any] = {"machine_registry_pol": None,
+                               "security_templates": []}
 
         try:
             smbclient.register_session(target["host"], username=cfg.bind_dn,
                                        password=cfg.password)
 
-            # Inventory every file in the GPO folder.
-            file_index: Dict[str, str] = {}
+            # Relative path (lower-cased, as SYSVOL is case-insensitive) -> UNC.
+            files: Dict[str, str] = {}
             for dirpath, _dirs, filenames in smbclient.walk(base):
                 for fname in filenames:
                     full = dirpath + "\\" + fname
-                    rel = full[len(base):].lstrip("\\")
-                    try:
-                        size = smbclient.stat(full).st_size
-                    except Exception:
-                        size = None
-                    out["files"].append({"path": rel, "size": size})
-                    file_index[rel.lower()] = full
+                    files[full[len(base):].lstrip("\\").lower()] = full
 
-            def read_bytes(rel_lower: str) -> Optional[bytes]:
-                full = file_index.get(rel_lower)
-                if not full:
-                    return None
+            def read(full: str) -> bytes:
                 with smbclient.open_file(full, mode="rb") as fh:
                     return fh.read()
 
-            # GPT.INI (version marker)
-            gpt = read_bytes("gpt.ini")
-            if gpt is not None:
-                out["gpt_ini"] = parse_ini(gpt)
-
-            # Registry.pol (machine + user)
-            machine_entries: List[Dict[str, Any]] = []
-            if include_registry:
-                for side, key in (("machine\\registry.pol", "machine_registry_pol"),
-                                  ("user\\registry.pol", "user_registry_pol")):
-                    data = read_bytes(side)
-                    if data is None:
-                        continue
-                    entries, truncated = parse_registry_pol(data, max_value_chars)
-                    out[key] = {
-                        "entry_count": len(entries),
-                        "entries_truncated": truncated,
-                        "entries": entries,
-                    }
-                    if side.startswith("machine"):
-                        machine_entries = entries
-
-                # Group Policy Preferences registry items. Deliberately only
-                # added to the response when the file exists, so a GPO with no
-                # preferences returns exactly the shape it returned before this
-                # was read at all — the common case must not change.
-                for rel, key in _REGISTRY_XML_FILES:
-                    data = read_bytes(rel)
-                    if data is None:
-                        continue
-                    preferences = parse_registry_xml(data)
-                    out[key] = {
-                        "entry_count": len(preferences),
-                        "entries": preferences,
-                    }
-
-            # AppLocker rules (live inside the machine Registry.pol as SrpV2)
-            applocker = extract_applocker(machine_entries)
-            if applocker:
-                out["applocker"] = applocker
-
-            # Security templates (GptTmpl.inf), scripts.ini
-            for rel_lower, full in file_index.items():
-                if rel_lower.endswith("gpttmpl.inf"):
-                    data = read_bytes(rel_lower)
-                    if data is not None:
-                        out["security_templates"].append({
-                            "path": full[len(base):].lstrip("\\"),
-                            "sections": parse_ini(data),
-                        })
-                elif rel_lower.endswith("scripts.ini") or rel_lower.endswith("psscripts.ini"):
-                    data = read_bytes(rel_lower)
-                    if data is not None:
-                        out["scripts"].append({
-                            "path": full[len(base):].lstrip("\\"),
-                            "sections": parse_ini(data),
-                        })
+            if _MACHINE_REGISTRY_POL in files:
+                entries, _truncated = parse_registry_pol(
+                    read(files[_MACHINE_REGISTRY_POL]))
+                out["machine_registry_pol"] = {"entries": entries}
+            if _MACHINE_REGISTRY_XML in files:
+                out["machine_registry_xml"] = {
+                    "entries": parse_registry_xml(read(files[_MACHINE_REGISTRY_XML]))}
+            out["security_templates"] = [
+                {"sections": parse_ini(read(full))}
+                for rel, full in files.items() if rel.endswith("gpttmpl.inf")]
         finally:
             try:
                 smbclient.reset_connection_cache()

@@ -250,7 +250,6 @@ def _configs(settings: ConnectionSettings, password: str
     """
     active = ActiveDirectoryConfig(
         server=str(settings.server or "").strip(),
-        use_ssl=True,
         domain=str(settings.domain or "").strip(),
         base_dn=str(settings.base_dn or "").strip(),
         bind_dn=str(settings.bind_dn or "").strip(),
@@ -266,7 +265,6 @@ def _configs(settings: ConnectionSettings, password: str
         # just imported into -- see ConnectionSettings.ca_cert_file.
         ca_cert_file=str(getattr(settings, "ca_cert_file", "") or "").strip()
         or None,
-        require_secure_connection=True,
     )
     # One attempt. Three would triple the failed-logon count of a wrong
     # password against a real lockout policy, and an interactive test wants its

@@ -11,7 +11,6 @@ synthetic GUIDs).
 import io
 import sys
 from contextlib import contextmanager
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -36,7 +35,7 @@ class FakeSmbClient:
     """An in-memory stand-in for the ``smbclient`` module.
 
     ``_read_gpo_sysvol`` does ``import smbclient`` inside the method, so
-    substituting this object in ``sys.modules`` exercises the real walk/stat/read
+    substituting this object in ``sys.modules`` exercises the real walk/read
     code path — including the **relative paths** it looks for, which is the part
     that can silently be wrong. Nothing here touches a network or a filesystem.
     """
@@ -68,9 +67,6 @@ class FakeSmbClient:
                 return relative
         raise FileNotFoundError(full)
 
-    def stat(self, full):
-        return SimpleNamespace(st_size=len(self.files[self._relative(full)]))
-
     @contextmanager
     def open_file(self, full, mode="rb"):
         relative = self._relative(full)
@@ -97,10 +93,6 @@ KDC_PROPERTIES = (
     'key="SYSTEM\\CurrentControlSet\\Services\\Kdc" '
     'name="DefaultDomainSupportedEncTypes" type="REG_DWORD" value="00000038"'
 )
-USER_PROPERTIES = (
-    'action="C" hive="HKEY_CURRENT_USER" key="SOFTWARE\\Test" '
-    'name="Flag" type="REG_DWORD" value="00000001"'
-)
 
 GPT_INI = b"[General]\r\nVersion=3\r\n"
 
@@ -115,13 +107,11 @@ class TestReadGpoSysvolFindsRegistryPreferences:
     share so the path spelling is actually pinned.
     """
 
-    def _read(self, scanner, files, **kwargs):
+    def _read(self, scanner, files):
         fake = FakeSmbClient(files)
         with patch.dict(sys.modules, {'smbclient': fake}):
             contents = scanner._read_gpo_sysvol(
-                rf'\\test.local\SysVol\test.local\Policies\{{{GPO_GUID}}}',
-                kwargs.pop('include_registry', True),
-                kwargs.pop('max_value_chars', 6000))
+                rf'\\test.local\SysVol\test.local\Policies\{{{GPO_GUID}}}')
         return contents, fake
 
     def test_the_machine_preferences_file_is_read_and_parsed(self, scanner):
@@ -131,57 +121,18 @@ class TestReadGpoSysvolFindsRegistryPreferences:
                 registry_xml(KDC_PROPERTIES),
         })
 
-        assert contents["machine_registry_xml"]["entry_count"] == 1
+        assert len(contents["machine_registry_xml"]["entries"]) == 1
         entry = contents["machine_registry_xml"]["entries"][0]
         assert entry["value_name"] == "DefaultDomainSupportedEncTypes"
         assert entry["value"] == 56, "0x38, not decimal 38"
         assert entry["action"] == "U"
 
-    def test_the_user_preferences_twin_is_read_too(self, scanner):
-        contents, _fake = self._read(scanner, {
-            "GPT.INI": GPT_INI,
-            r"User\Preferences\Registry\Registry.xml":
-                registry_xml(USER_PROPERTIES),
-        })
-
-        assert contents["user_registry_xml"]["entry_count"] == 1
-        assert contents["user_registry_xml"]["entries"][0]["hive"] == \
-            "HKEY_CURRENT_USER"
-        assert "machine_registry_xml" not in contents
-
-    def test_both_sides_are_read_independently(self, scanner):
-        contents, _fake = self._read(scanner, {
-            "GPT.INI": GPT_INI,
-            r"Machine\Preferences\Registry\Registry.xml":
-                registry_xml(KDC_PROPERTIES),
-            r"User\Preferences\Registry\Registry.xml":
-                registry_xml(USER_PROPERTIES),
-        })
-
-        assert contents["machine_registry_xml"]["entries"][0]["value"] == 56
-        assert contents["user_registry_xml"]["entries"][0]["value"] == 1
-
-    def test_a_gpo_with_no_preferences_is_byte_identical_to_before(self,
-                                                                  scanner):
-        """The common case must not change shape at all.
-
-        Spelled out as an exact dict rather than a subset check: the keys are
-        added **only** when the GPO has a preferences file, so a GPO without one
-        must produce precisely the eight keys this method has always produced.
-        """
+    def test_a_gpo_with_no_preferences_has_no_preferences_block(self, scanner):
+        """The block is added only when the GPO has a preferences file."""
         contents, _fake = self._read(scanner, {"GPT.INI": GPT_INI})
 
-        assert contents == {
-            "smb_source": rf"\\dc.test.local\SysVol\test.local\Policies"
-                          rf"\{{{GPO_GUID}}}",
-            "files": [{"path": "GPT.INI", "size": len(GPT_INI)}],
-            "gpt_ini": {"General": ["Version=3"]},
-            "machine_registry_pol": None,
-            "user_registry_pol": None,
-            "applocker": None,
-            "security_templates": [],
-            "scripts": [],
-        }
+        assert contents == {"machine_registry_pol": None,
+                            "security_templates": []}
 
     def test_a_malformed_preferences_file_yields_an_empty_block_not_a_crash(
             self, scanner):
@@ -190,26 +141,5 @@ class TestReadGpoSysvolFindsRegistryPreferences:
             r"Machine\Preferences\Registry\Registry.xml": b"<RegistrySettings",
         })
 
-        assert contents["machine_registry_xml"] == {"entry_count": 0,
-                                                    "entries": []}
+        assert contents["machine_registry_xml"] == {"entries": []}
 
-    def test_include_registry_false_skips_the_preferences_file(self, scanner):
-        """Preferences are registry content, so the same switch governs them."""
-        contents, _fake = self._read(scanner, {
-            "GPT.INI": GPT_INI,
-            r"Machine\Preferences\Registry\Registry.xml":
-                registry_xml(KDC_PROPERTIES),
-        }, include_registry=False)
-
-        assert "machine_registry_xml" not in contents
-
-    def test_the_preferences_file_is_listed_in_the_file_inventory(self,
-                                                                 scanner):
-        contents, _fake = self._read(scanner, {
-            "GPT.INI": GPT_INI,
-            r"Machine\Preferences\Registry\Registry.xml":
-                registry_xml(KDC_PROPERTIES),
-        })
-
-        assert any(entry["path"].endswith(r"Registry\Registry.xml")
-                   for entry in contents["files"])

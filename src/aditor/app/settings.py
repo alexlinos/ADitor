@@ -183,12 +183,6 @@ def build_config_document(settings: ConnectionSettings) -> Dict[str, Any]:
     A pure function, so the one property that matters most — that the
     ``password`` field is the placeholder and never a secret — is asserted by a
     test without touching a filesystem.
-
-    The OU block is required by :class:`aditor.config.models.Config` and is
-    derived from the base DN rather than asked for on the Connection screen:
-    the app runs no tool that resolves a default OU (it exposes none of the 22
-    write tools), so making an operator type four DNs to run a read-only scan
-    would be asking for input that nothing reads.
     """
     base_dn = str(settings.base_dn or "").strip()
     return {
@@ -199,8 +193,6 @@ def build_config_document(settings: ConnectionSettings) -> Dict[str, Any]:
             "secret itself lives in the OS credential store."),
         "active_directory": {
             "server": str(settings.server or "").strip(),
-            "use_ssl": True,
-            "ssl_port": 636,
             "domain": str(settings.domain or "").strip(),
             "base_dn": base_dn,
             "bind_dn": str(settings.bind_dn or "").strip(),
@@ -210,29 +202,13 @@ def build_config_document(settings: ConnectionSettings) -> Dict[str, Any]:
             "auto_bind": True,
             "receive_timeout": 10,
         },
-        "organizational_units": {
-            "users_ou": f"CN=Users,{base_dn}" if base_dn else "",
-            "groups_ou": f"CN=Users,{base_dn}" if base_dn else "",
-            "computers_ou": f"CN=Computers,{base_dn}" if base_dn else "",
-            "service_accounts_ou": f"CN=Users,{base_dn}" if base_dn else "",
-        },
         "security": {
             "enable_tls": True,
             "validate_certificate": bool(settings.validate_certificate),
             "ca_cert_file": str(settings.ca_cert_file or "").strip() or None,
-            "require_secure_connection": True,
-        },
-        "logging": {
-            "level": "INFO",
-            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            # No log file by default. A log file is one more artifact that has
-            # to be proven free of the password, and the app has nowhere to
-            # show it.
-            "file": None,
         },
         "performance": {
-            "connection_pool_size": 10,
-            # One attempt, not three. The server's own default retries a
+            # One attempt, not three. The default retries a
             # failed bind three times; against a real domain that turns one
             # wrong password into three failed logons and walks the bind
             # account toward the lockout threshold. An interactive app gets its

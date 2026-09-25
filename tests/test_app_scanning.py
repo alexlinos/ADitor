@@ -73,20 +73,12 @@ def gpo_entry(guid, display_name):
 
 def sysvol_contents(*registry_lines):
     return {
-        "smb_source": r"\\dc01.test.local\SYSVOL\test.local\Policies",
-        "files": [{"path": "GPT.INI", "size": 59}],
-        "gpt_ini": {"General": ["Version=3"]},
-        "machine_registry_pol": {"entry_count": 0, "entries_truncated": False,
-                                 "entries": []},
-        "user_registry_pol": None,
-        "applocker": None,
+        "machine_registry_pol": {"entries": []},
         "security_templates": [{
-            "path": r"Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf",
             "sections": {"Unicode": ["Unicode=yes"],
                          "Registry Values": list(registry_lines),
                          "Version": ["Revision=1"]},
         }],
-        "scripts": [],
     }
 
 
