@@ -23,7 +23,7 @@ kills it and files a bug. There is no callback in the scan path, so
 
 * the LDAP search that enumerates ``groupPolicyContainer`` objects, which is
   where the **total** number of GPOs first becomes known;
-* :meth:`GPOTools._read_gpo_sysvol`, which is called once per GPO and is the
+* :meth:`Scanner._read_gpo_sysvol`, which is called once per GPO and is the
   slow part.
 
 Both wrappers call straight through, return the result unchanged, swallow
@@ -209,7 +209,7 @@ def _observe_gpo_reads(hardening: Any, progress: ScanProgress) -> None:
     """
     manager = hardening.ldap
     original_search = manager.search
-    original_read = hardening.gpo._read_gpo_sysvol
+    original_read = hardening.scanner._read_gpo_sysvol
 
     def search(*args: Any, **kwargs: Any) -> Any:
         result = original_search(*args, **kwargs)
@@ -231,7 +231,7 @@ def _observe_gpo_reads(hardening: Any, progress: ScanProgress) -> None:
         return original_read(*args, **kwargs)
 
     manager.search = search  # type: ignore[method-assign]
-    hardening.gpo._read_gpo_sysvol = read_sysvol  # type: ignore[method-assign]
+    hardening.scanner._read_gpo_sysvol = read_sysvol  # type: ignore[method-assign]
 
 
 def run_scan(settings: ConnectionSettings, password: str,

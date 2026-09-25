@@ -38,7 +38,7 @@ from aditor.app.credentials import (
 )
 from aditor.app.endpoint import Endpoint
 from aditor.app.render import esc
-from aditor.tools.gpo import GPOTools
+from aditor.hardening.collect import Scanner
 
 # Distinctive, and deliberately full of characters HTML-escaping changes, so the
 # search below can look for both the raw and the escaped form.
@@ -237,7 +237,7 @@ def exercised(tmp_path, monkeypatch):
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol), \
              patch("aditor.app.scanning.build_manager",
                    side_effect=lambda s, p, f=None: FakeManager(

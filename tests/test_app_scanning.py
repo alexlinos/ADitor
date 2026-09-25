@@ -30,7 +30,7 @@ from aditor.app.scanning import (
     run_scan,
 )
 from aditor.app.settings import ConnectionSettings
-from aditor.tools.gpo import GPOTools
+from aditor.hardening.collect import Scanner
 
 BASE_DN = "DC=test,DC=local"
 POLICIES_DN = f"CN=Policies,CN=System,{BASE_DN}"
@@ -136,7 +136,7 @@ def scan(settings, manager, output_dir, progress=None, reads=None):
         return sysvol_contents()
 
     with patch.dict(sys.modules, {"smbclient": Mock()}), \
-         patch.object(GPOTools, "_read_gpo_sysvol", side_effect=read_sysvol):
+         patch.object(Scanner, "_read_gpo_sysvol", side_effect=read_sysvol):
         return run_scan(settings, PASSWORD, output_dir, progress,
                         factory=lambda *_args: manager)
 
@@ -237,7 +237,7 @@ class TestProgress:
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol):
             run_scan(a_connection(), PASSWORD, tmp_path, progress,
                      factory=lambda *_args: manager)
@@ -257,7 +257,7 @@ class TestProgress:
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol):
             run_scan(a_connection(), PASSWORD, tmp_path, progress,
                      factory=lambda *_args: three_gpos)
@@ -277,7 +277,7 @@ class TestProgress:
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol):
             run_scan(a_connection(), PASSWORD, tmp_path, progress,
                      factory=lambda *_args: three_gpos)
@@ -328,7 +328,7 @@ class TestObserversArePassive:
             raise OSError("SMB session setup failed")
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol):
             result = run_scan(a_connection(), PASSWORD, tmp_path,
                               factory=lambda *_args: three_gpos)
@@ -346,7 +346,7 @@ class TestObserversArePassive:
             raise OSError("SMB session setup failed")
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol):
             result = run_scan(a_connection(), PASSWORD, tmp_path,
                               factory=lambda *_args: three_gpos)
@@ -415,7 +415,7 @@ class TestScanJob:
             return sysvol_contents()
 
         with patch.dict(sys.modules, {"smbclient": Mock()}), \
-             patch.object(GPOTools, "_read_gpo_sysvol",
+             patch.object(Scanner, "_read_gpo_sysvol",
                           side_effect=read_sysvol):
             job.start(a_connection(), PASSWORD, tmp_path,
                       factory=lambda *_args: three_gpos)
