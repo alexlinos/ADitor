@@ -300,6 +300,7 @@ class TestWriteSnapshot:
 
     def test_a_user_relative_output_dir_is_expanded(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # what Windows reads
 
         snapshot = write_snapshot(scan_payload(), "~/snapshots")
 
