@@ -1,15 +1,9 @@
-"""
-ActiveDirectoryMCP - Model Context Protocol server for Active Directory management.
+"""ADitor: a read-only Active Directory / GPO hardening auditor.
 
-This package provides a comprehensive MCP server for interacting with Active Directory
-through LDAP protocol, offering tools for user management, group operations, 
-organizational unit management, and security operations.
+Run ``aditor scan`` for a snapshot (``scan.json`` + ``report.html``) and
+``aditor diff`` to compare two; ``python -m aditor.app`` opens the desktop app.
 """
 
 __version__ = "0.1.0"
 __author__ = "Alperen Adalar"
 __email__ = "alp.adalar@gmail.com"
-
-from .server import ActiveDirectoryMCPServer
-
-__all__ = ["ActiveDirectoryMCPServer"]

@@ -7,15 +7,10 @@ the domain controller switched off, which is the point of storing scans.
 
 Two design notes worth stating.
 
-**The diff goes through the real tool.** ``diff_hardening_scans`` is the one
-hardening tool that touches no directory: it reads two files and returns a diff.
-So it is called on a :class:`~aditor.tools.hardening.HardeningTools` built with
-**no LDAP manager at all** — that is exactly as much connection as the diff
-needs, and it means History does not demand credentials to compare two files
-that are already on disk. Using the tool rather than reaching past it to
-:func:`aditor.hardening.diff.diff_scan_files` keeps the tool's own ``headline``,
-which is where the ambiguous-attribution wording already lives. A test pins the
-no-LDAP property, because it is the sort of thing a later edit breaks silently.
+**The diff needs no connection.** :func:`aditor.hardening.diff.diff_scan_files`
+reads two files and returns a diff, the same function ``aditor diff`` uses, so
+History does not demand credentials to compare two files that are already on
+disk.
 
 **Opening a report is confined to the archive.** :func:`report_uri` refuses any
 path that is not inside the snapshot directory it was given. The app hands the
@@ -30,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..hardening.diff import ScanDiffError, diff_scan_files
+from ..hardening.scanfile import ScanFileError
 from ..hardening.snapshot import (
     SNAPSHOT_REPORT_FILENAME,
     SNAPSHOT_SCAN_FILENAME,
@@ -137,7 +134,7 @@ def list_snapshots(directory: Any, limit: int = 200) -> List[SnapshotEntry]:
     """Every snapshot in ``directory``, newest first.
 
     Only immediate children are examined. A snapshot folder is created directly
-    inside the output directory by ``write_hardening_snapshot``, and recursing
+    inside the output directory by :func:`~aditor.hardening.snapshot.write_snapshot`, and recursing
     would eventually walk into whatever else the operator keeps under there.
     """
     try:
@@ -223,18 +220,14 @@ def scan_path(directory: Any, folder_name: str) -> Path:
     return path
 
 
-def diff_snapshots(directory: Any, before_name: str, after_name: str,
-                   tools: Any = None) -> Dict[str, Any]:
-    """Diff two snapshot folders through the ``diff_hardening_scans`` tool.
+def diff_snapshots(directory: Any, before_name: str, after_name: str
+                   ) -> Dict[str, Any]:
+    """Diff two snapshot folders with :func:`aditor.hardening.diff.diff_scan_files`.
 
-    ``tools`` is injectable for tests; production builds a
-    :class:`~aditor.tools.hardening.HardeningTools` with **no LDAP manager**,
-    because the diff reads two files and touches no directory. If a future edit
-    makes ``diff_hardening_scans`` reach for ``self.ldap``, the test that pins
-    this will fail — which is the intent.
+    The diff reads two files and touches no directory.
 
     Returns:
-        The tool's own diff payload. ``attribution`` is its first key and stays
+        The diff payload. ``attribution`` is its first content key and stays
         first; the renderer leads with it.
     """
     before = scan_path(directory, before_name)
@@ -244,38 +237,11 @@ def diff_snapshots(directory: Any, before_name: str, after_name: str,
             "those are the same snapshot. Pick two different scans — a diff of "
             "a scan against itself says nothing.")
 
-    if tools is None:
-        from ..tools.hardening import HardeningTools
-
-        tools = HardeningTools(None)
-
-    response = tools.diff_hardening_scans(str(before), str(after))
-    payload = _unwrap(response)
-    if payload is None:
-        raise HistoryError(
-            "the diff tool returned something this app could not read.")
-    if not payload.get("success"):
-        raise HistoryError(redact(str(payload.get("error")
-                                      or "the two scans could not be "
-                                         "compared.")))
-    return payload
-
-
-def _unwrap(response: Any) -> Optional[Dict[str, Any]]:
-    if isinstance(response, dict):
-        return response
-    if not isinstance(response, (list, tuple)) or not response:
-        return None
-    text = getattr(response[0], "text", None)
-    if text is None and isinstance(response[0], dict):
-        text = response[0].get("text")
-    if not isinstance(text, str):
-        return None
     try:
-        parsed = json.loads(text)
-    except ValueError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+        diff = diff_scan_files(str(before), str(after))
+    except (ScanFileError, ScanDiffError) as exc:
+        raise HistoryError(redact(str(exc))) from exc
+    return {"success": True, **diff}
 
 
 __all__ = [

@@ -6,7 +6,7 @@ lookup — :func:`diff_scans` takes two dicts and returns one dict, and
 diff out; there is deliberately no scan store, no history directory and no
 trend analysis across N scans.
 
-Either input may also be a snapshot folder from ``write_hardening_snapshot``, in
+Either input may also be a snapshot folder from ``aditor scan``, in
 which case the ``scan.json`` inside it is read. That is a path-resolution
 convenience and nothing more: it happens before any comparison, so diffing two
 folders is the same call as diffing the two payloads they hold.
@@ -1046,7 +1046,7 @@ def diff_scan_files(before_path: Any, after_path: Any) -> Dict[str, Any]:
     :func:`diff_scans`.
 
     Either side may be a ``.json`` scan file **or** a snapshot folder written by
-    ``write_hardening_snapshot``, in which case its ``scan.json`` is read — see
+    ``aditor scan``, in which case its ``scan.json`` is read — see
     :func:`aditor.hardening.snapshot.resolve_scan_path`. Resolution happens
     before anything else, so ``scans.<side>.source`` always names the file that
     was actually read and diffing two folders gives exactly the result diffing

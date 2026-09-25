@@ -1,9 +1,9 @@
 #!/bin/bash
-# Launch ActiveDirectoryMCP with the LDAP bind password pulled from the macOS
-# Keychain at startup. config.json's password field is the placeholder
-# ${AD_MCP_PASSWORD}, which the patched config loader expands from the
-# environment — this script supplies it so the password never sits on disk
-# or in shell history.
+# Run `aditor scan` with the LDAP bind password pulled from the macOS Keychain.
+# config.json's password field is the placeholder ${AD_MCP_PASSWORD}, which the
+# config loader expands from the environment — this script supplies it so the
+# password never sits on disk or in shell history. Extra arguments are passed
+# to `aditor scan`, e.g. ./scan_keychain.sh --out ~/ADMCP/scans
 #
 # One-time setup (prompts for the password interactively, stores it in your
 # login keychain under service name "admcp-ldap"). Replace DOMAIN\binduser
@@ -32,4 +32,4 @@ fi
 export AD_MCP_PASSWORD
 
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-exec .venv/bin/python -m aditor.server --transport http --config ad-config/config.json
+exec .venv/bin/python -m aditor.cli scan --config ad-config/config.json "$@"

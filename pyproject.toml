@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aditor"
 version = "0.1.0"
-description = "An Active Directory / GPO auditing tool and MCP server for hardening your environment"
+description = "A read-only Active Directory / GPO hardening auditor"
 requires-python = ">=3.12"
 authors = [
     {name = "Alex Linos"}
@@ -13,7 +13,7 @@ authors = [
 readme = "README.md"
 license = {text = "MIT"}
 keywords = [
-    "active-directory", "mcp", "ldap", "ad", "group-policy", "gpo",
+    "active-directory", "ldap", "ad", "group-policy", "gpo",
     "auditing", "hardening", "security", "directory-services",
 ]
 classifiers = [
@@ -29,13 +29,8 @@ classifiers = [
 ]
 
 dependencies = [
-    # Pinned: the 2.0 line is a breaking rewrite with no mcp.types /
-    # mcp.server.stdio, which aditor.server imports directly.
-    "mcp==1.9.0",
     "ldap3>=2.9.1,<3.0.0",
     "pydantic>=2.0.0,<3.0.0",
-    "starlette>=0.27",
-    "uvicorn>=0.23.1",
     "cryptography>=41.0.0,<42.0.0",
 ]
 
@@ -48,13 +43,13 @@ dev = [
     "ruff>=0.1.0,<0.2.0",
     "pytest-mock>=3.11.0,<4.0.0",
 ]
-# Optional: enables get_gpo_contents to read GPO settings from SYSVOL over SMB.
+# Optional: lets the scan read GPO settings from SYSVOL over SMB.
 smb = [
     "smbprotocol>=1.10.0,<2.0.0",
 ]
 # Optional: the desktop app (``python -m aditor.app``). Deliberately an extra,
-# not a runtime dependency -- the headless MCP server must keep installing and
-# running on a host with no GUI toolkit at all. Nothing on the server's import
+# not a runtime dependency -- the ``aditor`` command must keep installing and
+# running on a host with no GUI toolkit at all. Nothing on the CLI's import
 # path reaches ``aditor.app.shell``, which is the only module that imports
 # pywebview, and it imports it lazily. pywebview drives the OS's own web view
 # (WebView2 on Windows, WebKit on macOS): one dependency instead of a bundled

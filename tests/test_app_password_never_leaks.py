@@ -2,16 +2,15 @@
 
 This is acceptance criterion 7 and it is the one test file that exists to prove a
 negative. It drives :class:`aditor.app.api.AditorApi` through the whole app —
-save the connection, test it, scan, list history, diff, generate snippets, start
-the server — with one distinctive password, and then goes looking for that string
-in every place it could have leaked:
+save the connection, test it, scan, list history, diff — with one distinctive
+password, and then goes looking for that string in every place it could have
+leaked:
 
 * every HTML fragment any API method returned;
 * every value any API method returned at all, at any depth;
 * every log record emitted on any logger during the run;
 * every byte of every file under the settings directory and the snapshot
-  archive;
-* the child server process's ``argv``.
+  archive.
 
 The password is a fixed, distinctive literal so a substring match cannot pass by
 accident, and it is chosen to contain characters that HTML-escaping would alter
@@ -36,7 +35,6 @@ from aditor.app.credentials import (
     CredentialStore,
     install_redaction,
 )
-from aditor.app.endpoint import Endpoint
 from aditor.app.render import esc
 from aditor.hardening.collect import Scanner
 
@@ -155,33 +153,6 @@ class FakeManager:
         return None
 
 
-class FakePopen:
-    """Records the server launch. Nothing is executed and no port is bound."""
-
-    instances = []
-
-    def __init__(self, argv, env=None, **kwargs):
-        self.argv = argv
-        self.env = env or {}
-        self.pid = 4321
-        self.stderr = None
-        self._returncode = None
-        FakePopen.instances.append(self)
-
-    def poll(self):
-        return self._returncode
-
-    def terminate(self):
-        self._returncode = 0
-
-    def wait(self, timeout=None):
-        self._returncode = 0
-        return 0
-
-    def kill(self):  # pragma: no cover
-        self._returncode = -9
-
-
 # --------------------------------------------------------------------------- #
 # The whole-app exercise
 # --------------------------------------------------------------------------- #
@@ -190,14 +161,12 @@ class FakePopen:
 def exercised(tmp_path, monkeypatch):
     """Drive every API method that could see the password; collect everything.
 
-    Returns ``(returned, log_lines, settings_dir, archive_dir, launches)``.
+    Returns ``(returned, log_lines, settings_dir, archive_dir)``.
     """
     settings_dir = tmp_path / "settings"
     archive = tmp_path / "snapshots"
 
-    # Never probe or bind a real port, and never open a browser.
-    monkeypatch.setattr("aditor.app.endpoint.port_is_in_use",
-                        lambda host, port, timeout=0.4: False)
+    # Never open a browser.
     opened = []
     monkeypatch.setattr("aditor.app.api.webbrowser.open", opened.append)
 
@@ -212,7 +181,6 @@ def exercised(tmp_path, monkeypatch):
     # attached before anything can log.
     install_redaction()
 
-    FakePopen.instances = []
     returned = []
 
     def record(value):
@@ -220,7 +188,7 @@ def exercised(tmp_path, monkeypatch):
         return value
 
     try:
-        api = AditorApi(directory=settings_dir, endpoint=Endpoint(port=9111),
+        api = AditorApi(directory=settings_dir,
                         store=MemoryStore())
         form = dict(FORM, snapshot_dir=str(archive))
 
@@ -255,12 +223,6 @@ def exercised(tmp_path, monkeypatch):
         assert len(entries) == 2, entries
         record(api.diff(entries[0], entries[1]))
         record(api.open_report(entries[1]))
-        record(api.connect_screen())
-        record(api.server_status())
-        with patch("aditor.app.endpoint.subprocess.Popen", FakePopen):
-            record(api.start_server())
-            record(api.server_status())
-            record(api.stop_server())
         record(api.forget_password())
         api.shutdown()
         assert first["passed"] is True and second["passed"] is True
@@ -268,7 +230,7 @@ def exercised(tmp_path, monkeypatch):
         root.removeHandler(handler)
         root.setLevel(previous_level)
 
-    return returned, handler.lines, settings_dir, archive, FakePopen.instances
+    return returned, handler.lines, settings_dir, archive
 
 
 def _configs(settings, password):
@@ -306,7 +268,7 @@ def _needles():
 
 class TestPasswordNeverLeaks:
     def test_it_appears_in_no_value_the_api_ever_returned(self, exercised):
-        returned, _logs, _settings, _archive, _launches = exercised
+        returned, _logs, _settings, _archive = exercised
         strings = []
         _walk(returned, strings)
         assert strings, "the exercise must actually have returned something"
@@ -316,7 +278,7 @@ class TestPasswordNeverLeaks:
                 f"password leaked into an API return value: {offenders[:1]}"
 
     def test_it_appears_in_no_rendered_html(self, exercised):
-        returned, _logs, _settings, _archive, _launches = exercised
+        returned, _logs, _settings, _archive = exercised
         fragments = []
         for payload in returned:
             if isinstance(payload, dict):
@@ -326,7 +288,7 @@ class TestPasswordNeverLeaks:
             assert not any(needle in fragment for fragment in fragments)
 
     def test_it_appears_in_no_log_record(self, exercised):
-        _returned, logs, _settings, _archive, _launches = exercised
+        _returned, logs, _settings, _archive = exercised
         assert logs, "the exercise must actually have logged something"
         for needle in _needles():
             offenders = [line for line in logs if needle in line]
@@ -334,7 +296,7 @@ class TestPasswordNeverLeaks:
                 f"password leaked into a log record: {offenders[:1]}"
 
     def test_it_appears_in_no_persisted_file(self, exercised):
-        _returned, _logs, settings, archive, _launches = exercised
+        _returned, _logs, settings, archive = exercised
         files = [path for path in list(_all_files(settings))
                  + list(_all_files(archive))]
         assert files, "the exercise must actually have written files"
@@ -347,26 +309,16 @@ class TestPasswordNeverLeaks:
                     f"password leaked into {path}"
 
     def test_the_settings_file_holds_the_placeholder_instead(self, exercised):
-        _returned, _logs, settings, _archive, _launches = exercised
+        _returned, _logs, settings, _archive = exercised
         document = json.loads(
             (settings / "config.json").read_text(encoding="utf-8"))
         assert document["active_directory"]["password"] == \
             "${AD_MCP_PASSWORD}"
 
-    def test_it_appears_in_no_child_process_argument(self, exercised):
-        _returned, _logs, _settings, _archive, launches = exercised
-        assert launches, "the exercise must actually have launched the server"
-        for launch in launches:
-            assert not any(PASSWORD in str(item) for item in launch.argv)
-            # The one channel it is allowed to use.
-            assert launch.env["AD_MCP_PASSWORD"] == PASSWORD
-
     def test_the_state_call_reports_only_that_a_password_exists(self, tmp_path,
                                                                 monkeypatch):
-        monkeypatch.setattr("aditor.app.endpoint.port_is_in_use",
-                            lambda host, port, timeout=0.4: False)
         store = MemoryStore()
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9112),
+        api = AditorApi(directory=tmp_path,
                         store=store)
         api.save_connection(dict(FORM))
         state = api.state()
@@ -386,9 +338,7 @@ class TestRedactionBackstop:
         # The filter is the belt to the braces above: nothing in this package
         # logs the password today, and this asserts that a later edit which did
         # would still be scrubbed.
-        monkeypatch.setattr("aditor.app.endpoint.port_is_in_use",
-                            lambda host, port, timeout=0.4: False)
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9113),
+        api = AditorApi(directory=tmp_path,
                         store=MemoryStore())
         api.save_connection(dict(FORM))
 

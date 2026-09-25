@@ -1,7 +1,8 @@
 """Store a hardening scan on disk as JSON, and read one back.
 
-The scan payload :mod:`aditor.tools.hardening` produces is already the source of
-truth — ``scan_hardening`` returns it and ``write_hardening_report`` renders it.
+The scan payload is already the source of truth —
+:meth:`aditor.hardening.collect.Scanner.scan` returns it and the report renders
+it.
 This module gives it somewhere to *live*, so two runs can be compared later by
 :mod:`aditor.hardening.diff`. It adds no analysis: a stored scan is the same
 payload plus two identifying fields.
@@ -72,7 +73,7 @@ def scan_document(scan_result: Dict[str, Any]) -> Dict[str, Any]:
 
     The marker and the envelope version go first and the scan payload follows
     unchanged, key order intact. Nothing is removed and nothing is derived, so a
-    stored scan and the ``scan_hardening`` response it came from say the same
+    stored scan and the scan payload it came from say the same
     thing.
     """
     if not isinstance(scan_result, dict):
@@ -110,8 +111,8 @@ def validate_scan_payload(payload: Any, source: str) -> Dict[str, Any]:
         error = payload.get("error") or "no error message"
         raise ScanFileError(
             f"{source}: this is a failed-scan error response, not a scan "
-            f"({error}). Re-run write_hardening_scan and diff the file it "
-            f"writes.")
+            f"({error}). Re-run `aditor scan` and diff the "
+            f"scan.json it writes.")
 
     missing = [key for key in _REQUIRED_KEYS if key not in payload]
     if missing:
@@ -119,9 +120,8 @@ def validate_scan_payload(payload: Any, source: str) -> Dict[str, Any]:
             f"{source}: not a hardening scan payload — missing "
             f"{', '.join(repr(key) for key in missing)}. A scan carries "
             f"{', '.join(repr(key) for key in _REQUIRED_KEYS)}; write one with "
-            f"write_hardening_scan. (An HTML report from "
-            f"write_hardening_report is not a scan payload and cannot be "
-            f"diffed.)")
+            f"`aditor scan`. (An HTML report is not a scan payload and "
+            f"cannot be diffed.)")
 
     scan = payload.get("scan")
     if not isinstance(scan, dict):
@@ -171,8 +171,8 @@ def read_scan(path: Any) -> Dict[str, Any]:
             f"{shown} is a directory, not a scan file; give the full file name")
     if not resolved.exists():
         raise ScanFileError(
-            f"{shown} does not exist. Write a scan there first with "
-            f"write_hardening_scan.")
+            f"{shown} does not exist. Write a scan first with "
+            f"`aditor scan`.")
 
     try:
         text = resolved.read_text(encoding="utf-8")
@@ -181,7 +181,7 @@ def read_scan(path: Any) -> Dict[str, Any]:
     except UnicodeDecodeError as exc:
         raise ScanFileError(
             f"{shown} is not UTF-8 text, so it is not a scan file written by "
-            f"write_hardening_scan: {exc}") from exc
+            f"`aditor scan`: {exc}") from exc
 
     try:
         payload = json.loads(text)
@@ -189,9 +189,9 @@ def read_scan(path: Any) -> Dict[str, Any]:
         hint = ""
         if text.lstrip()[:9].lower().startswith("<!doctype") or \
                 text.lstrip()[:5].lower().startswith("<html"):
-            hint = (" This looks like an HTML file — probably a report from "
-                    "write_hardening_report. Reports are rendered documents; "
-                    "diffing needs the JSON payload from write_hardening_scan.")
+            hint = (" This looks like an HTML file — probably report.html. "
+                    "Reports are rendered documents; diffing needs the "
+                    "scan.json next to it.")
         raise ScanFileError(
             f"{shown} is not valid JSON ({exc}).{hint}") from exc
 
