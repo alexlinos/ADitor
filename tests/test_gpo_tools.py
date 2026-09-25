@@ -526,8 +526,9 @@ class TestNoParsingLeftInTheToolModule:
             "do not reintroduce it as a method"
         )
 
+    # _smb_target moved to aditor.hardening.collect.Scanner with the SYSVOL
+    # reader; _read_gpo_sysvol stays here as a delegate for get_gpo_contents.
     @pytest.mark.parametrize('method_name', [
-        '_smb_target',
         '_read_gpo_sysvol',
         '_resolve_gpo_name',
         '_find_links',
