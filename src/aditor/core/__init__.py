@@ -1,4 +1,4 @@
-"""Core functionality for Active Directory MCP."""
+"""Core functionality for ADitor."""
 
 from .ldap_manager import LDAPManager
 from .logging import setup_logging

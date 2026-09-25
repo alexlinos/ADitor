@@ -1,9 +1,9 @@
 """The pywebview window: create it, hand it the API object, run it.
 
 **pywebview is imported lazily and only here.** That is what keeps the GUI an
-optional extra: ``pip install -e .`` without ``[gui]`` installs and the headless
-MCP server runs exactly as before, because nothing on the server's import path
-reaches this module. :func:`require_webview` turns the ``ImportError`` into the
+optional extra: ``pip install -e .`` without ``[gui]`` installs and ``aditor
+scan`` runs exactly as before, because nothing on the CLI's import path reaches
+this module. :func:`require_webview` turns the ``ImportError`` into the
 one-line install instruction rather than a traceback, and a test asserts that
 the whole ``aditor.app`` package imports with ``webview`` absent.
 
@@ -23,7 +23,7 @@ from .api import AditorApi
 
 WINDOW_TITLE = "ADitor — Active Directory hardening audit"
 
-# Big enough for the four screens' content at the default zoom without
+# Big enough for the three screens' content at the default zoom without
 # horizontal scrolling, small enough for a 1366x768 laptop.
 WINDOW_WIDTH = 1180
 WINDOW_HEIGHT = 820
@@ -31,10 +31,10 @@ WINDOW_MIN_SIZE = (940, 620)
 
 _INSTALL_HINT = (
     "The ADitor desktop app needs pywebview, which is an optional extra so "
-    "that the headless MCP server installs without it.\n\n"
+    "that the command-line tool installs without it.\n\n"
     "    pip install -e \".[gui]\"\n\n"
-    "The MCP server itself is unaffected and can be run with:\n\n"
-    "    python -m aditor.server --transport http --config <config.json>")
+    "The command-line scan is unaffected and can be run with:\n\n"
+    "    aditor scan --config <config.json>")
 
 
 class WebviewMissing(RuntimeError):
@@ -90,13 +90,11 @@ def run(directory: Optional[Path] = None, debug: bool = False,
         height=WINDOW_HEIGHT,
         min_size=WINDOW_MIN_SIZE,
         # No text-select/right-click restrictions: an operator has to be able to
-        # select a config snippet and an error message.
+        # select a command and an error message.
         text_select=True,
     )
 
-    # Stop the child MCP server when the window goes. A GUI that leaves an
-    # unauthenticated privileged AD API listening after it has been closed is a
-    # worse thing than a GUI that takes a moment to quit.
+    # Forget the password when the window goes.
     try:
         window.events.closing += lambda: bridge.shutdown()
     except AttributeError:  # pragma: no cover - older pywebview event API

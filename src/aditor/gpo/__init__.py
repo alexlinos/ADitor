@@ -2,10 +2,9 @@
 
 This package holds the DC-free half of ADitor's Group Policy support: pure
 functions that turn bytes and attribute strings from SYSVOL/LDAP into plain
-data structures. They are deliberately separate from ``aditor.tools.gpo``
-(the MCP tool class, which owns LDAP/SMB I/O) so they can be unit-tested
-offline and reused by any caller — the OU tools today, the Phase-2 hardening
-scanner later.
+data structures. They are deliberately separate from
+:mod:`aditor.hardening.collect` (which owns the LDAP/SMB I/O) so they can be
+unit-tested offline.
 """
 
 from .parsers import (

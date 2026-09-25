@@ -2,22 +2,18 @@
 
 Two things are asserted here.
 
-**The surface.** The MCP server offers 52 tools, 22 of which write to Active
-Directory. The app exposes **none** of the write tools, and it exposes no generic
-"call this tool by name" method either — the page cannot reach a write tool by
-asking for one. That property is easy to lose by accident (one convenience
-passthrough) so it is pinned against the live tool registry rather than against a
-hand-written list that could go stale.
+**The surface.** The app can read the directory and write files, and nothing
+else: no method changes the directory, and there is no generic "call this by
+name" method either. That property is easy to lose by accident (one convenience
+passthrough), so the allowed list is written down.
 
 **The GUI is optional.** ``pip install -e .`` without the ``gui`` extra has to
-keep working and the headless server has to keep starting: pywebview is imported
-lazily, in one module, and nothing on the server's import path reaches it. The
-tests below simulate its absence.
+keep working and the ``aditor`` command has to keep running: pywebview is
+imported lazily, in one module. The tests below simulate its absence.
 """
 
 import builtins
 import importlib
-import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -25,8 +21,6 @@ from pathlib import Path
 import pytest
 
 from aditor.app.api import AditorApi
-from aditor.app.endpoint import Endpoint
-from aditor.registry import TOOLS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,7 +33,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: act, which is the point of writing it down.
 ALLOWED_API_METHODS = {
     "certificate_screen",
-    "connect_screen",
     "diff",
     # Fetches the issuing CA and writes it to a .crt. Added deliberately: it
     # reads a certificate and writes a file, which is the same pair of verbs
@@ -53,48 +46,35 @@ ALLOWED_API_METHODS = {
     "open_report",
     "save_connection",
     "scan_progress",
-    "server_status",
     "shutdown",
     "start_scan",
-    "start_server",
     "state",
-    "stop_server",
     "test_connection",
 }
 
-#: Every registry tool that changes the directory. Derived from the registry so
-#: a newly added write tool is caught rather than assumed absent.
+#: The verbs a directory-changing method would start with.
 _WRITE_VERBS = ("create_", "modify_", "delete_", "move_", "add_", "remove_",
-                "enable_", "disable_", "reset_")
-
-
-def write_tool_names():
-    return {spec.name for spec in TOOLS
-            if spec.name.startswith(_WRITE_VERBS)}
+                "enable_", "disable_", "reset_", "set_", "update_")
 
 
 class TestApiSurface:
-    def test_the_public_surface_is_exactly_the_four_screens_worth(self,
+    def test_the_public_surface_is_exactly_the_three_screens_worth(self,
                                                                   tmp_path):
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9201))
+        api = AditorApi(directory=tmp_path)
         public = {name for name in dir(api)
                   if not name.startswith("_")
                   and callable(getattr(api, name))}
         # ``connection`` is a property, not a method, so it is not here.
         assert public == ALLOWED_API_METHODS
 
-    def test_the_registry_really_does_hold_write_tools(self):
-        # If this ever emptied out, the next test would pass vacuously.
-        assert len(write_tool_names()) >= 20
-
-    def test_no_write_tool_is_reachable_from_the_page(self, tmp_path):
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9202))
+    def test_no_method_is_named_like_a_directory_write(self, tmp_path):
+        api = AditorApi(directory=tmp_path)
         exposed = {name for name in dir(api) if not name.startswith("_")}
-        assert exposed.isdisjoint(write_tool_names())
+        assert not {name for name in exposed if name.startswith(_WRITE_VERBS)}
 
     def test_there_is_no_generic_tool_dispatch_method(self, tmp_path):
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9203))
-        # One passthrough like this would hand the page all 52 tools at once.
+        api = AditorApi(directory=tmp_path)
+        # One passthrough like this would hand the page everything at once.
         for name in ("call", "call_tool", "invoke", "run_tool", "dispatch",
                      "execute", "eval", "tool"):
             assert not hasattr(api, name)
@@ -102,7 +82,7 @@ class TestApiSurface:
     def test_no_api_method_takes_a_tool_name(self, tmp_path):
         import inspect
 
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9204))
+        api = AditorApi(directory=tmp_path)
         for name in ALLOWED_API_METHODS:
             parameters = set(
                 inspect.signature(getattr(api, name)).parameters)
@@ -168,12 +148,12 @@ class TestBridgeGeneration:
     """
 
     def test_the_bridge_builds_from_an_untouched_install(self, tmp_path):
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9206))
+        api = AditorApi(directory=tmp_path)
         assert set(walk_bridge_attributes(api)) == ALLOWED_API_METHODS
 
     def test_the_api_object_exposes_no_public_non_callable_attribute(self,
                                                                     tmp_path):
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9207))
+        api = AditorApi(directory=tmp_path)
         walked = {name for name in dir(api) if not name.startswith("_")}
         # Anything here that is not a method is something pywebview would
         # recurse into.
@@ -255,7 +235,7 @@ class TestNoNetworkAtStartup:
         monkeypatch.setattr(socket.socket, "connect", refuse)
         monkeypatch.setattr(socket.socket, "connect_ex", refuse)
         monkeypatch.setattr(socket, "getaddrinfo", refuse)
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9205))
+        api = AditorApi(directory=tmp_path)
         assert api.state()["ok"] is True
 
 
@@ -301,7 +281,7 @@ class TestGuiIsOptional:
 
         modules = ["aditor.app", "aditor.app.api", "aditor.app.credentials",
                    "aditor.app.settings", "aditor.app.connection",
-                   "aditor.app.endpoint", "aditor.app.history",
+                   "aditor.app.history",
                    "aditor.app.render", "aditor.app.scanning",
                    "aditor.app.shell", "aditor.app.__main__"]
         saved = {name: sys.modules.pop(name, None) for name in modules}
@@ -335,46 +315,4 @@ class TestGuiIsOptional:
         message = str(caught.value)
         assert 'pip install -e ".[gui]"' in message
         # And it points at the thing that still works.
-        assert "aditor.server" in message
-
-    def test_the_server_module_does_not_reach_the_app_package(self):
-        source = (REPO_ROOT / "src" / "aditor" / "server.py"
-                  ).read_text(encoding="utf-8")
-        assert "aditor.app" not in source
-        assert "from .app" not in source
-
-    def test_the_registry_does_not_reach_the_app_package(self):
-        source = (REPO_ROOT / "src" / "aditor" / "registry.py"
-                  ).read_text(encoding="utf-8")
-        assert "from .app" not in source
-
-
-class TestEntryPoint:
-    def test_check_prints_the_snippets_without_opening_a_window(self):
-        # Runs the real entry point in a subprocess, which is the closest thing
-        # to the acceptance criterion that does not need a display.
-        completed = subprocess.run(
-            [sys.executable, "-m", "aditor.app", "--check"],
-            cwd=str(REPO_ROOT), capture_output=True, text=True,
-            env={"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": "/usr/bin:/bin",
-                 "HOME": str(Path.home())},
-            check=False)
-        assert completed.returncode == 0, completed.stderr
-        assert "http://127.0.0.1:8813/activedirectory-mcp/" in completed.stdout
-        assert "[mcp_servers.aditor]" in completed.stdout
-        assert '"mcpServers"' in completed.stdout
-
-    def test_check_reports_the_exposure_warning_for_a_routable_bind(self):
-        completed = subprocess.run(
-            [sys.executable, "-m", "aditor.app", "--check",
-             "--host", "0.0.0.0"],
-            cwd=str(REPO_ROOT), capture_output=True, text=True,
-            env={"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": "/usr/bin:/bin",
-                 "HOME": str(Path.home())},
-            check=False)
-        assert completed.returncode == 0, completed.stderr
-        assert "New-NetFirewallRule" in completed.stdout
-        assert "-RemoteAddress" in completed.stdout
-        assert "no authentication" in completed.stdout
-        # Even bound to a wildcard, the snippet a client uses is dialable.
-        assert "http://localhost:8813/activedirectory-mcp/" in completed.stdout
+        assert "aditor scan" in message

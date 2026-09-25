@@ -1,4 +1,4 @@
-"""Configuration loader for Active Directory MCP."""
+"""Configuration loader for ADitor."""
 
 import json
 import os

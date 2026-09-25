@@ -11,8 +11,8 @@ will actually hit have nothing in common:
 * **host unreachable** — wrong hostname, no route, LDAPS port closed.
 
 So this module never invents a message. It calls the same
-:meth:`aditor.core.ldap_manager.LDAPManager.test_connection` the
-``test_connection`` MCP tool calls, and reports **the underlying error text
+:meth:`aditor.core.ldap_manager.LDAPManager.test_connection` the scan's own
+connection uses, and reports **the underlying error text
 verbatim** in :attr:`ConnectionTestResult.error`. On top of that it
 *classifies* the error to add a headline and a suggested fix — but the raw text
 is always present and always shown, because the classifier is a convenience and
@@ -21,7 +21,7 @@ to "the server rejected the connection" plus the server's own words, which is
 still actionable.
 
 The public entry point is :func:`run_connection_test`, which is the app's
-call into the same thing the ``test_connection`` MCP tool does. It is not itself
+call into :meth:`LDAPManager.test_connection`. It is not itself
 named ``test_connection`` for a dull but real reason: pytest collects any
 module-level ``test_*`` it can see, so a test file importing that name would
 have it collected as a broken test case.

@@ -1,4 +1,4 @@
-"""Configuration module for Active Directory MCP."""
+"""Configuration module for ADitor."""
 
 from .loader import load_config
 from .models import (

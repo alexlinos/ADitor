@@ -1,7 +1,6 @@
 """One scan, one dated folder, both artifacts.
 
-``write_hardening_scan`` and ``write_hardening_report`` each run their **own**
-scan. Calling both and dropping the results side by side would produce a folder
+Writing the JSON and the report from two separate scans would produce a folder
 whose ``report.html`` and ``scan.json`` came from two different scans — different
 ``scan_id``, different timestamps, and on a domain that moved between them,
 different findings. The JSON is the evidence of record; a report that disagrees
@@ -15,7 +14,7 @@ feeds it to both writers::
         report.html    <- the rendered document
 
 It never scans. It has no clock, no LDAP, no SMB and no catalog lookup: the one
-run of the scan happens in :mod:`aditor.tools.hardening`, and everything here is
+run of the scan happens in :mod:`aditor.hardening.collect`, and everything here is
 derived from the payload it hands over. That is what makes "exactly one scan"
 structural rather than a thing a caller has to remember.
 
@@ -305,8 +304,8 @@ def resolve_scan_path(path: Any) -> str:
         raise ScanFileError(
             f"{str(candidate)} is a directory, but it holds no "
             f"{SNAPSHOT_SCAN_FILENAME}, so it is not a snapshot folder. Give a "
-            f"snapshot folder written by write_hardening_snapshot, or the path "
-            f"of a .json scan written by write_hardening_scan.")
+            f"snapshot folder written by `aditor scan`, or the path of its "
+            f"scan.json.")
     return str(inner)
 
 
