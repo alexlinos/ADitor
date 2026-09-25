@@ -1,4 +1,4 @@
-"""Configuration models for Active Directory MCP."""
+"""Configuration models for ADitor."""
 
 from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator

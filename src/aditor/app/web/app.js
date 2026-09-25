@@ -60,7 +60,6 @@ function busy(button, isBusy, busyLabel) {
 
 const SCREEN_LOADERS = {
   history: () => refreshHistory(),
-  connect: () => refreshConnect(),
 };
 
 function show(screen) {
@@ -109,7 +108,6 @@ function applyState(state) {
       + 'type a new one to replace it.';
   }
   paint('credential-store', (state.credential_store || {}).html);
-  if (state.server) { paintServer(state.server); }
 }
 
 async function refreshState() {
@@ -357,54 +355,6 @@ async function openReport(folderName) {
   }
 }
 
-/* --- 4. connect ---------------------------------------------------------- */
-
-let snippetText = { claude_code: '', codex: '' };
-
-function paintServer(server) {
-  paint('server-status', server.status_html);
-  paint('server-exposure', server.exposure_html);
-  el('btn-start-server').disabled = !!server.running;
-  el('btn-stop-server').disabled = !server.running;
-}
-
-async function refreshConnect() {
-  try {
-    const result = await call('connect_screen');
-    paintServer(result.server || {});
-    snippetText = result.snippets || snippetText;
-    paint('snippets', result.html);
-  } catch (error) {
-    toast(String(error.message || error));
-  }
-}
-
-async function serverAction(method, button, label) {
-  busy(button, true, label);
-  try {
-    const result = await call(method);
-    if (result.server) { paintServer(result.server); }
-    if (!result.ok) { toast(result.message); }
-    await refreshConnect();
-  } catch (error) {
-    toast(String(error.message || error));
-  } finally {
-    busy(button, false);
-  }
-}
-
-async function copySnippet(key) {
-  const text = snippetText[key] || '';
-  if (!text) { return; }
-  try {
-    await navigator.clipboard.writeText(text);
-    toast('Copied. Paste it into your client config as-is — the URL has to keep '
-          + 'its trailing slash.');
-  } catch (error) {
-    toast('Could not reach the clipboard. Select the snippet and copy it.');
-  }
-}
-
 /* --- wiring -------------------------------------------------------------- */
 
 function wire() {
@@ -423,19 +373,11 @@ function wire() {
   el('btn-refresh-history').addEventListener('click', refreshHistory);
   el('btn-diff').addEventListener('click', runDiff);
 
-  el('btn-start-server').addEventListener('click', (event) =>
-    serverAction('start_server', event.currentTarget, 'Starting…'));
-  el('btn-stop-server').addEventListener('click', (event) =>
-    serverAction('stop_server', event.currentTarget, 'Stopping…'));
-  el('btn-refresh-server').addEventListener('click', refreshConnect);
-
   // Delegated: the buttons inside these panels are rendered by Python, so they
   // do not exist when this runs.
   document.addEventListener('click', (event) => {
     const opener = event.target.closest('[data-open-report]');
     if (opener) { openReport(opener.dataset.openReport); return; }
-    const copier = event.target.closest('[data-copy]');
-    if (copier) { copySnippet(copier.dataset.copy); return; }
     const exporter = event.target.closest('[data-export-ca]');
     if (exporter) { exportCa(exporter.dataset.exportCa); return; }
     const fetcher = event.target.closest('[data-download-issuer]');

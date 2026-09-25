@@ -1,9 +1,8 @@
 """Tests for the Scan screen: one scan, its own counts, visible progress.
 
-The acceptance property is exact: the scan goes through the existing
-``write_hardening_snapshot`` path, runs **once**, and the counts the screen shows
-come from *that* scan. So these tests drive the real
-:class:`aditor.tools.hardening.HardeningTools` end to end and count how many
+The acceptance property is exact: the scan runs **once**, and the counts the
+screen shows come from *that* scan. So these tests drive the real
+:class:`aditor.hardening.collect.Scanner` end to end and count how many
 times it read the directory — not a stub returning a canned payload, which would
 prove nothing about the "one scan" guarantee.
 
@@ -159,8 +158,8 @@ class TestOneScan:
         result = scan(a_connection(), three_gpos, tmp_path, reads=reads)
         assert result.ok is True
         # One policy enumeration and one SYSVOL read per GPO. Two scans would
-        # double both -- which is exactly what calling write_hardening_scan and
-        # write_hardening_report in turn would have done.
+        # double both -- which is exactly what writing the JSON and the report
+        # from two separate scans would have done.
         assert three_gpos.policy_searches == 1
         assert len(reads) == 3
 

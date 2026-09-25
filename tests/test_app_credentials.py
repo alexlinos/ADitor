@@ -31,7 +31,6 @@ from aditor.app.credentials import (
     decode_windows_blob,
     encode_windows_blob,
     get_store,
-    password_environment,
 )
 
 PASSWORD = "Tr0ub4dor-&3-horse-battery"
@@ -49,7 +48,7 @@ class TestCredentialRef:
         assert ref.target == f"{DEFAULT_SERVICE}:{ACCOUNT}"
 
     def test_default_service_matches_the_keychain_script(self):
-        # start_server_keychain.sh uses ADMCP_KEYCHAIN_SERVICE=admcp-ldap. The
+        # scan_keychain.sh uses ADMCP_KEYCHAIN_SERVICE=admcp-ldap. The
         # app must read the same item rather than keeping a second copy.
         assert DEFAULT_SERVICE == "admcp-ldap"
 
@@ -248,31 +247,6 @@ class TestMacOSKeychain:
     def test_it_is_unavailable_off_darwin(self):
         with patch("aditor.app.credentials.sys.platform", "linux"):
             assert MacOSKeychainStore().available() is False
-
-
-# --------------------------------------------------------------------------- #
-# The child process environment
-# --------------------------------------------------------------------------- #
-
-class TestPasswordEnvironment:
-    def test_the_secret_is_placed_in_the_one_variable(self):
-        env = password_environment(PASSWORD, base={"PATH": "/usr/bin"})
-        assert env[PASSWORD_ENV_VAR] == PASSWORD
-        assert env["PATH"] == "/usr/bin"
-
-    def test_the_parent_environment_is_not_mutated(self):
-        import os
-
-        before = dict(os.environ)
-        password_environment(PASSWORD)
-        assert PASSWORD_ENV_VAR not in os.environ or \
-            os.environ.get(PASSWORD_ENV_VAR) == before.get(PASSWORD_ENV_VAR)
-
-    def test_it_returns_a_copy(self):
-        base = {"A": "1"}
-        env = password_environment(PASSWORD, base=base)
-        assert base == {"A": "1"}
-        assert env is not base
 
 
 # --------------------------------------------------------------------------- #

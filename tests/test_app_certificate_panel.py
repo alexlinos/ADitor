@@ -45,7 +45,6 @@ from aditor.app.certificates import (
     certificate_facts,
     pki_container_dns,
 )
-from aditor.app.endpoint import Endpoint
 from aditor.app.render import OUT_OF_BAND_INSTRUCTION, render_certificate_panel
 from aditor.app.settings import ConnectionSettings
 from aditor.app.trust import EXPORT_DIRNAME, build_trust_report
@@ -216,7 +215,7 @@ class TestNoButtonInstallsOrTrusts:
                 assert "Copy" in label
 
     def test_the_bridge_exposes_no_method_that_could_install(self, tmp_path):
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9301))
+        api = AditorApi(directory=tmp_path)
         public = {name for name in dir(api) if not name.startswith("_")}
         for verb in ("trust", "install", "import", "addstore", "keychain",
                      "store_certificate", "add_root"):
@@ -502,7 +501,7 @@ class TestValidateCertificateIsUntouched:
             self, tmp_path):
         for saved in (True, False):
             api = AditorApi(directory=tmp_path / str(saved),
-                            endpoint=Endpoint(port=9302),
+                            
                             chain_fetch=lambda h, p, t: chain().chain_der(),
                             ldap_factory=factory(
                                 StubDirectory([chain().root])))
@@ -522,7 +521,7 @@ class TestValidateCertificateIsUntouched:
             assert api.state()["connection"]["validate_certificate"] is saved
 
     def test_exporting_does_not_change_the_saved_setting(self, tmp_path):
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9303),
+        api = AditorApi(directory=tmp_path,
                         chain_fetch=lambda h, p, t: chain().chain_der(),
                         ldap_factory=factory(StubDirectory([chain().root])))
         api._settings.connection = api._connection.with_values(
@@ -541,7 +540,7 @@ class TestValidateCertificateIsUntouched:
 
     def test_no_written_config_file_appears_from_looking_at_a_certificate(
             self, tmp_path):
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9304),
+        api = AditorApi(directory=tmp_path,
                         chain_fetch=lambda h, p, t: chain().chain_der(),
                         ldap_factory=factory(StubDirectory([chain().root])))
         api.certificate_screen({"server": "ldaps://dc01.test.local:636",
@@ -557,7 +556,7 @@ class TestValidateCertificateIsUntouched:
 
 def an_api(tmp_path, port, presented=None, published=(), directory_error=None):
     api = AditorApi(
-        directory=tmp_path, endpoint=Endpoint(port=port),
+        directory=tmp_path,
         chain_fetch=lambda h, p, t: list(
             presented if presented is not None else chain().chain_der()),
         ldap_factory=factory(StubDirectory(published, directory_error)))
@@ -636,7 +635,7 @@ class TestTheBridge:
         def refused(host, port, timeout):
             raise ConnectionRefusedError("[Errno 61] Connection refused")
 
-        api = AditorApi(directory=tmp_path, endpoint=Endpoint(port=9318),
+        api = AditorApi(directory=tmp_path,
                         chain_fetch=refused,
                         ldap_factory=factory(StubDirectory()))
         result = api.certificate_screen(FORM)

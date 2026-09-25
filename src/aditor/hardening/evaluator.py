@@ -3,7 +3,7 @@
 Everything here is a pure function of its arguments — a list of
 :class:`GpoSnapshot` (already-parsed GPO content plus link metadata) and a
 :class:`~aditor.hardening.catalog.Control`. No LDAP, no SMB, no clock, no
-config. The tool layer (:mod:`aditor.tools.hardening`) does the I/O and hands
+config. :mod:`aditor.hardening.collect` does the I/O and hands
 the results in, which is what lets the whole verdict engine be tested offline
 against synthesized fixtures.
 

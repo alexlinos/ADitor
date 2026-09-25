@@ -1,7 +1,7 @@
 """Render a hardening scan into a single self-contained HTML report.
 
 **The JSON is the source of truth; this module only renders it.** Everything
-below is a pure function of the dict :func:`aditor.tools.hardening.HardeningTools`
+below is a pure function of the dict :meth:`aditor.hardening.collect.Scanner.scan`
 already produces — no LDAP, no SMB, no clock, no catalog lookups. Nothing is
 derived that the scan does not already state, so a saved report and the JSON it
 came from can never disagree.
@@ -86,7 +86,7 @@ REPORT_MARKER = "aditor-hardening-report"
 _MARKER_SCAN_BYTES = 8192
 
 # Suffixes ``write_report`` accepts. A path guard as much as a formality: it
-# stops ``write_hardening_report("controls.json")`` from ever being attempted.
+# stops ``write_report(payload, "controls.json")`` from ever being attempted.
 HTML_SUFFIXES = (".html", ".htm")
 
 # Placeholder for a value the scan did not provide.

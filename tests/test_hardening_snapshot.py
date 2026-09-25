@@ -352,7 +352,7 @@ class TestResolveScanPath:
 
         assert str(empty) in str(raised.value)
         assert "holds no scan.json" in str(raised.value)
-        assert "write_hardening_snapshot" in str(raised.value)
+        assert "aditor scan" in str(raised.value)
 
     def test_a_folder_holding_only_a_report_is_not_a_snapshot_folder(self,
                                                                     tmp_path):

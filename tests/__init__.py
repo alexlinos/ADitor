@@ -1,1 +1,1 @@
-"""Test suite for ActiveDirectoryMCP."""
+"""Test suite for ADitor."""

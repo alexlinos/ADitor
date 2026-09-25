@@ -1,4 +1,4 @@
-"""Logging configuration for Active Directory MCP."""
+"""Logging configuration for ADitor."""
 
 import logging
 import logging.handlers
@@ -29,7 +29,7 @@ def setup_logging(config: LoggingConfig) -> logging.Logger:
     # Create formatter
     formatter = logging.Formatter(config.format)
     
-    # Console handler - use stderr to avoid interfering with MCP stdio protocol
+    # Console handler - stderr, so stdout stays the command's own output
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(getattr(logging, config.level))
     console_handler.setFormatter(formatter)
