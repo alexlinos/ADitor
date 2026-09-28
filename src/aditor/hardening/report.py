@@ -43,6 +43,14 @@ renderer and its native dependencies into the packaging.
 Ordering is by **actionability, not catalog order**, because the report's job is
 to drive action rather than to be admired. See :data:`SECTIONS`:
 
+The document leads with the read-failure banner and one results tile per
+section, then the sections below, and ends with "About this scan" (the
+provenance). Each card shows its verdict (found versus target), the fix, the
+rollout steps and every caveat in the open, and collapses the evidence tables:
+a first-time reader needs what to do, an auditor needs the evidence, and
+nothing safety-related is ever collapsed, because a closed ``<details>`` also
+prints closed.
+
 1. Read failures, ``error`` findings and ``unknown`` findings — first, and before
    any verdict section. Per the evaluator, one unreadable GPO turns an unset key
    into an ``error``, and a control whose remediation writes the registry
@@ -57,13 +65,15 @@ to drive action rather than to be admired. See :data:`SECTIONS`:
    is rendered with each side's delivery mechanism, because that conflict is the
    one a reader must *not* try to settle by comparing link precedence.
 4. ``os-default`` findings as hardening *opportunities* — never as enforcement.
-5. Unscored (``needs_baseline_value``) controls, explicitly not judged.
+5. Unscored (``needs_baseline_value``) controls, as compact rows badged
+   "not checked — not a pass".
 6. Passes last, compact.
 """
 
 from __future__ import annotations
 
 import html
+from datetime import datetime, timezone
 from pathlib import Path
 from string import Template
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -74,7 +84,7 @@ from .catalog import SEVERITY_RANK
 # Version of the *report layout*. Bumped when the rendered structure changes, so
 # a stored report can say which renderer produced it alongside which engine and
 # which catalog scored it.
-REPORT_FORMAT_VERSION = "1.3.0"
+REPORT_FORMAT_VERSION = "1.4.0"
 
 # The string that identifies a file as one of our reports.
 REPORT_MARKER = "aditor-hardening-report"
@@ -97,50 +107,38 @@ SECTION_NOT_JUDGED = "not-judged"
 SECTION_PASSES = "passes"
 SECTION_NOT_APPLICABLE = "not-applicable"
 
-# id, heading, lede. The order here is the order in the document.
+# id, heading, lede. The order here is the order in the document. The ledes
+# are written for a first-time reader: what the section means and what to do,
+# in two or three sentences. Detail lives on the cards.
 SECTIONS: Tuple[Tuple[str, str, str], ...] = (
-    (SECTION_UNKNOWN, "Unknown — the scan could not decide",
-     "These controls were not judged, for one of two reasons. Either the scan "
-     "could not read what it needed — an unreadable GPO could set any of these "
-     "keys to anything, including a value below the Windows default — or the "
-     "control's documented remediation writes the registry directly on the "
-     "domain controllers, which leaves no trace in Group Policy, so its absence "
-     "from every GPO is not evidence that it is unset. <strong>Either way they "
-     "are unknown, not clean, and not passes.</strong> Each card below says "
-     "which case it is and what to run to settle it."),
-    (SECTION_FAIL, "Failures — act on these",
-     "Each failure below shows what the baseline expects, every value actually "
-     "found and which GPO set it, and the catalog's remediation. "
-     "<strong>Read the rollout guidance before changing anything:</strong> "
-     "several of these controls are audit-first-then-enforce, and jumping "
-     "straight to enforcement is how a hardening project causes an outage."),
-    (SECTION_CONFLICTS, "Conflicts — precedence unresolved",
-     "Two or more GPOs set the same key to different values. This scan "
-     "deliberately does not resolve policy precedence, so which value actually "
-     "applies is <strong>unproven</strong> — confirm the effective value with "
-     "<code>gpresult</code> / RSoP before acting on any single GPO's setting. "
-     "Findings here also appear in their verdict section: a conflict on a "
-     "passing control is the one most likely to be misread."),
-    (SECTION_OPPORTUNITIES, "Hardening opportunities — at the Windows default",
-     "No GPO sets these keys. The verdict rests on a Microsoft-documented "
-     "Windows default, so the value is <em>assumed</em>, not configured. "
-     "<strong>Nothing in Group Policy holds it there</strong> and nothing would "
-     "stop a future GPO from lowering it. Configure the policy explicitly to "
-     "make the value enforced and auditable."),
-    (SECTION_NOT_JUDGED, "Not judged — no baseline value to score against",
-     "These controls were <strong>not evaluated at all</strong>. The source does "
-     "not state their exact expected value, and this tool never guesses one, so "
-     "no verdict is issued. <strong>They are not passes.</strong> Their state is "
-     "unknown until the value is sourced from a Microsoft Security Baseline or "
-     "CIS Benchmark."),
+    (SECTION_UNKNOWN, "Unknown — check these by hand",
+     "The scan couldn't confirm these settings. <strong>Treat them as "
+     "unconfirmed, not as passes.</strong> Either a GPO couldn't be read, or "
+     "the setting is normally made directly in the registry, where Group "
+     "Policy can't show it. Each card says which, and how to check."),
+    (SECTION_FAIL, "Failures — fix these",
+     "These settings are weaker than the baseline recommends. <strong>Fix them "
+     "in the order each card shows:</strong> several need an audit step first, "
+     "and skipping it can lock users out."),
+    (SECTION_CONFLICTS, "Conflicts — GPOs disagree",
+     "Two or more GPOs set the same setting to different values, and this scan "
+     "doesn't work out which one wins. <strong>Check the value a machine "
+     "actually gets</strong> with <code>gpresult /h report.html</code> before "
+     "changing any of them. These findings also appear in their own section."),
+    (SECTION_OPPORTUNITIES, "At the Windows default — not locked in",
+     "No GPO sets these. They are judged against the documented Windows "
+     "default, so <strong>nothing in Group Policy holds them there</strong> and "
+     "a future GPO could weaken them. Set each one in a GPO to lock it in."),
+    (SECTION_NOT_JUDGED, "Not checked yet — no target value",
+     "The published guidance doesn't give an exact value to check these "
+     "against, and this tool doesn't guess, so <strong>they were not checked "
+     "and are not passes.</strong> Each row expands to its guidance."),
     (SECTION_PASSES, "Passes",
-     "Evidence retained, kept out of the way. Each row expands to the full "
-     "expected-versus-found evidence. A pass is a statement about the value this "
-     "scan read, not a guarantee that precedence leaves it effective — check the "
-     "conflicts section."),
+     "These meet the baseline. Each row expands to its evidence. If a pass "
+     "also appears under Conflicts, check it there before relying on it."),
     (SECTION_NOT_APPLICABLE, "Not applicable",
-     "The control's own definition puts it out of scope for what this scan "
-     "found. No verdict is claimed either way."),
+     "These didn't apply to what the scan found, so there is no verdict "
+     "either way."),
 )
 
 _SECTION_LEDES = {section_id: lede for section_id, _title, lede in SECTIONS}
@@ -159,14 +157,22 @@ _RESULT_LABELS = {
 }
 _STATE_LABELS = {
     "not_started": "not started",
-    "audit": "audit",
+    "audit": "audit (step 1 of 2)",
     "enforced": "enforced",
 }
 _SOURCE_LABELS = {
-    "gpo": "configured by Group Policy",
-    "os-default": "Windows default (assumed, not enforced by Group Policy)",
-    "not-configured": "no GPO sets this key",
-    "unknown": "not established by this scan",
+    "gpo": "set by Group Policy",
+    "os-default": "Windows default — not set by any GPO",
+    "not-configured": "no GPO sets this",
+    "unknown": "not confirmed by this scan",
+}
+# The catalog's operators, as a reader would say them.
+_OPERATOR_WORDS = {
+    "equals": "exactly",
+    "gte": "at least",
+    "in": "one of",
+    "present": "present",
+    "absent": "absent",
 }
 # How the GPO put the value there. Shown per found value because the mechanism
 # changes what a "pass" is worth: a policy value reverts when the GPO stops
@@ -197,26 +203,19 @@ _SEVERITY_ORDER = SEVERITY_RANK
 # The standing disclaimer. Restated in the document because a saved report gets
 # read without the tool that produced it.
 _PRECEDENCE_DISCLAIMER = (
-    "Policy precedence (RSoP) is <strong>not resolved</strong> by this scan. "
-    "Every GPO that sets a control's key is reported with its link path and "
-    "enforced flag, and disagreements are flagged as conflicts, rather than "
-    "guessing which GPO wins. Where a finding carries a conflict, confirm the "
-    "effective value with <code>gpresult</code> / RSoP before acting on it."
+    "This scan doesn't work out which GPO wins when several set the same "
+    "setting (policy precedence, RSoP). It reports every GPO that sets it, "
+    "with its link path, and flags disagreements as conflicts. For a "
+    "conflict, check the effective value with <code>gpresult /h</code> before "
+    "acting."
 )
 
 _READ_FAILURE_LEDE = (
-    "<strong>This scan is incomplete.</strong> The GPOs listed below could not "
-    "be read, so no statement in this report about a key they might set is "
-    "proven. Where a control's key was not found in any GPO that <em>was</em> "
-    "read, the finding is reported as <em>unknown</em> rather than as a pass — an "
-    "unreadable GPO could set that key to anything. Verdicts for the affected "
-    "controls are <strong>unknown, not clean</strong>. Fix the read failures and "
-    "re-scan."
-)
-
-_NO_READ_FAILURE_NOTE = (
-    "Every GPO in the domain was read successfully, so \"no GPO sets this key\" "
-    "is a statement this scan is entitled to make."
+    "<strong>This scan is incomplete.</strong> The GPOs below couldn't be read, "
+    "and any of them could set any setting in this report. So a setting not "
+    "found in the GPOs that <em>were</em> read is reported as "
+    "<em>unknown</em>, not as a pass. Those verdicts are <strong>unknown, not "
+    "clean</strong>. Fix the read failures and scan again."
 )
 
 # Rendered when a failing control's catalog entry carries no phasing guidance at
@@ -224,11 +223,9 @@ _NO_READ_FAILURE_NOTE = (
 # rollout prose, because advice this tool made up could cause the outage the
 # phasing fields exist to prevent.
 _PHASING_GAP_NOTE = (
-    "<strong>Catalog gap:</strong> this control states no interim step and no "
-    "audit-before-enforce evidence, so this report has no phased-rollout "
-    "guidance to give you for it. That is a gap in the catalog, not a statement "
-    "that the change is safe to apply domain-wide. Pilot it before rolling it "
-    "out, and raise the gap so the catalog can be sourced properly."
+    "<strong>Catalog gap:</strong> the catalog gives no rollout guidance for "
+    "this setting. That doesn't mean it's safe to apply everywhere at once: "
+    "pilot it first, and report the gap so it can be sourced."
 )
 
 
@@ -465,7 +462,7 @@ def _render_provenance(scan: Dict[str, Any], counts: Dict[str, Any]) -> str:
 
     return (
         '<section class="provenance" id="provenance">'
-        '<h2>Provenance</h2>'
+        '<h2>About this scan</h2>'
         f'{_rows(pairs)}'
         f'<p class="disclaimer">{_PRECEDENCE_DISCLAIMER}</p>'
         f'{notes_block}'
@@ -473,52 +470,49 @@ def _render_provenance(scan: Dict[str, Any], counts: Dict[str, Any]) -> str:
     )
 
 
-def _render_counts(counts: Dict[str, Any]) -> str:
-    """The headline numbers, in actionability order.
+def _render_counts(counts: Dict[str, Any],
+                   grouped: Dict[str, List[Dict[str, Any]]]) -> str:
+    """The headline numbers: one tile per section, in document order.
 
-    The "Unknown" tile sums the two results that issued no verdict —
-    ``error`` (the scan could not read what it needed) and ``unknown`` (a
-    control whose key a GPO scan cannot see) — because a reader skimming the
-    tiles is asking "how much of this report is not evidence?", and splitting
-    that number across two tiles invites reading each half as small. The
-    reconciliation line below breaks it back down.
+    Each tile counts the findings in the section it names, so a reader who
+    clicks through finds exactly that many. ``counts`` supplies only the
+    breakdowns a section count cannot show — how the unknowns split, and how
+    many findings the not-applicable filter hid.
+
+    The "Unknown" section, and so its tile, holds both results that issued no
+    verdict — ``error`` (the scan could not read what it needed) and
+    ``unknown`` (a control whose key a GPO scan cannot see) — because a reader
+    skimming the tiles is asking "how much of this report is not evidence?".
     """
-    unread = _as_int(counts.get("error"))
-    unseen = _as_int(counts.get("unknown"))
     tiles = [
-        ("Unknown", unread + unseen, "unknown"),
-        ("Failures", counts.get("fail"), "fail"),
-        ("Conflicts", counts.get("conflicts"), "conflict"),
-        ("At OS default", counts.get("os_default"), "osdefault"),
-        ("Not judged", counts.get("needs_baseline_value"), "notjudged"),
-        ("Passes", counts.get("pass"), "pass"),
+        ("Unknown", SECTION_UNKNOWN, "unknown"),
+        ("Failures", SECTION_FAIL, "fail"),
+        ("Conflicts", SECTION_CONFLICTS, "conflict"),
+        ("At Windows default", SECTION_OPPORTUNITIES, "osdefault"),
+        ("Not checked yet", SECTION_NOT_JUDGED, "notjudged"),
+        ("Passes", SECTION_PASSES, "pass"),
     ]
     cells = "".join(
-        f'<li class="tile tile-{kind}">'
-        f'<span class="tile-n">{_esc(value, "0")}</span>'
-        f'<span class="tile-l">{_esc(label)}</span></li>'
-        for label, value, kind in tiles)
+        f'<li class="tile tile-{kind}"><a href="#{section_id}">'
+        f'<span class="tile-n">{len(grouped.get(section_id, []))}</span>'
+        f'<span class="tile-l">{_esc(label)}</span></a></li>'
+        for label, section_id, kind in tiles)
 
-    unknown_split = (
-        f'Of the {unread + unseen} unknown, {unread} could not be read by this '
-        f'scan and {unseen} name a setting Group Policy does not deliver, so a '
-        f'GPO scan cannot see them at all. Neither is a pass. '
-    )
-    reconcile = (
-        unknown_split +
-        f'{_esc(counts.get("rendered"), "0")} of '
-        f'{_esc(counts.get("total"), "0")} findings rendered; '
-        f'{_esc(counts.get("hidden"), "0")} hidden by the not-applicable filter. '
-        f'Of the passes, {_esc(counts.get("os_default_pass"), "0")} rest on a '
-        f'documented Windows default rather than on any GPO — "at OS default" '
-        f'counts every finding judged against a default, which can also be a '
-        f'failure or an unknown, so it is not a number to subtract from passes.'
-    )
+    notes: List[str] = []
+    unread = _as_int(counts.get("error"))
+    unseen = _as_int(counts.get("unknown"))
+    if unread or unseen:
+        notes.append(f"Of the {unread + unseen} unknown, {unread} couldn't be "
+                     f"read and {unseen} can't be seen in Group Policy at all.")
+    hidden = _as_int(counts.get("hidden"))
+    if hidden:
+        notes.append(f"{hidden} not-applicable finding(s) are hidden.")
+    note = f'<p class="small muted">{_esc(" ".join(notes))}</p>' if notes else ""
     return (
         '<section class="summary" id="summary">'
-        '<h2>Headline counts</h2>'
+        '<h2>Results</h2>'
         f'<ul class="tiles">{cells}</ul>'
-        f'<p class="small muted">{reconcile}</p>'
+        f'{note}'
         '</section>'
     )
 
@@ -527,15 +521,16 @@ def _render_read_failures(scan: Dict[str, Any],
                           read_errors: Sequence[Dict[str, Any]]) -> str:
     """The unmissable read-failure banner, rendered before any verdict.
 
-    Deliberately the first thing after the title — ahead of the provenance
-    table, the counts and every verdict section. A reader who does not see this
+    Deliberately the first thing after the title — ahead of the counts and
+    every verdict section. A reader who does not see this
     reads the rest of the report as a clean bill of health it is not entitled to
     give.
     """
     if not read_errors:
+        scanned = scan.get("gpos_scanned")
+        what = f"All {_esc(scanned)} GPOs" if scanned is not None else "All GPOs"
         return (f'<p class="ok-banner" id="read-failures">'
-                f'<strong>All GPOs read.</strong> {_esc(_NO_READ_FAILURE_NOTE)}'
-                f'</p>')
+                f'<strong>{what} were read.</strong></p>')
 
     rows = "".join(
         '<tr>'
@@ -823,53 +818,51 @@ def _render_phasing(finding: Dict[str, Any]) -> str:
     caveats = [c for c in (finding.get("caveats") or []) if str(c or "").strip()]
     state = finding.get("rollout_state")
 
-    parts: List[str] = []
-    if state:
-        parts.append('<p class="phase-now">Rollout state reported by this scan: '
-                     f'<strong>{_esc(_STATE_LABELS.get(str(state), state))}'
-                     '</strong>.</p>')
+    step1_done = state in ("audit", "enforced")
+    step2_done = state == "enforced"
 
+    def done(flag: bool) -> str:
+        return ' <span class="done">&#10003; Done.</span>' if flag else ""
+
+    parts: List[str] = []
     if interim is not None:
         parts.append(
-            '<p class="phase-step"><strong>Step 1 &mdash; reach the interim '
-            f'value {_esc_value(interim)} first.</strong> This control is '
-            'audit-first-then-enforce: the interim step makes the setting '
-            'observable across the estate without refusing anything yet, which '
-            'is what stops the enforcement step causing an outage.</p>')
+            '<p class="phase-step"><strong>Step 1: set it to '
+            f'{_esc_value(interim)} first</strong> (audit mode). This makes the '
+            'setting visible on every machine without blocking anything yet.'
+            f'{done(step1_done)}</p>')
         parts.append(
-            '<p class="phase-step"><strong>Step 2 &mdash; only then move to the '
-            f'final value {_esc_value(final)}.</strong> Do not skip step 1. '
-            'Enforcing before every device and service account is ready is how '
-            'this class of change produces authentication failures and account '
-            'lockouts instead of hardening.</p>')
+            '<p class="phase-step"><strong>Step 2: only then set it to '
+            f'{_esc_value(final)}.</strong> Don\'t skip step 1: enforcing before '
+            'every device and service account is ready can cause sign-in '
+            f'failures and account lockouts.{done(step2_done)}</p>')
     elif final is not None:
         parts.append(
-            '<p class="phase-step">The catalog states a single target value '
-            f'{_esc_value(final)} and <strong>no interim step</strong> for this '
-            'control. That is the catalog\'s position, not a statement that the '
-            'change is safe to make everywhere at once &mdash; read the caveats '
-            'below.</p>')
+            f'<p class="phase-step"><strong>Set it to {_esc_value(final)}.'
+            '</strong> The catalog gives no audit step for this one. That '
+            'doesn\'t make it safe to apply everywhere at once, so read the '
+            f'warnings below.{done(step2_done)}</p>')
 
     if audit_before:
         parts.append(
-            '<p class="phase-audit"><strong>Gather this evidence before '
-            f'enforcing:</strong> {_esc(audit_before)}</p>')
+            '<p class="phase-audit"><strong>Before enforcing, check:</strong> '
+            f'{_esc(audit_before)}</p>')
     elif interim is not None:
         parts.append(
-            '<p class="phase-audit muted">The catalog states no '
-            'audit-before-enforce evidence for this control, so this report does '
-            'not tell you what to look for. Treat that as a catalog gap.</p>')
+            '<p class="phase-audit muted">The catalog doesn\'t say what to check '
+            'before enforcing. Treat that as a catalog gap, and pilot it '
+            'first.</p>')
 
     caveat_items = _caveat_items(caveats)
     if caveat_items:
-        parts.append('<p class="phase-label"><strong>Caveats from the catalog '
-                     '&mdash; read all of them:</strong></p>' + caveat_items)
+        parts.append('<p class="phase-label"><strong>Watch out for:</strong></p>'
+                     + caveat_items)
 
     if interim is None and not audit_before and not caveats:
         parts.append(f'<p class="warn">{_PHASING_GAP_NOTE}</p>')
 
-    return ('<div class="block phasing"><h4>Rollout order &mdash; read before '
-            f'changing anything</h4>{"".join(parts)}</div>')
+    return ('<div class="block phasing"><h4>How to roll it out safely</h4>'
+            f'{"".join(parts)}</div>')
 
 
 def _render_source(finding: Dict[str, Any]) -> str:
@@ -883,16 +876,19 @@ def _render_source(finding: Dict[str, Any]) -> str:
 
 
 def _render_not_judged(finding: Dict[str, Any]) -> str:
-    """An unscored control, framed so it cannot be read as a pass."""
+    """An unscored control, framed so it cannot be read as a pass.
+
+    Carries the evidence notes (the catalog's reason there is no target
+    value), so the row that holds this block does not print them again.
+    """
     return (
         '<div class="block notjudged">'
-        '<h4>Not judged &mdash; this is not a pass</h4>'
-        '<p><strong>No verdict was issued for this control.</strong> '
-        f'Reason: <code>{_esc(finding.get("unscored_reason"))}</code>. '
-        'The source does not state this control\'s exact expected value, and '
-        'this tool never guesses one, so the setting\'s actual state is '
-        '<strong>unknown</strong>. Source the value from a Microsoft Security '
-        'Baseline or CIS Benchmark to activate the control.</p>'
+        '<h4>Not checked &mdash; this is not a pass</h4>'
+        '<p>The published guidance doesn\'t give an exact value for this '
+        'setting, and this tool doesn\'t guess one, so its state is '
+        '<strong>unknown</strong>. It can be checked once a target value is '
+        'sourced, for example from a Microsoft Security Baseline. Reason code: '
+        f'<code>{_esc(finding.get("unscored_reason"))}</code>.</p>'
         + _notes_list((finding.get("evidence") or {}).get("notes"),
                       "notes gap")
         + '</div>'
@@ -911,10 +907,8 @@ def _render_unknown_reason(finding: Dict[str, Any]) -> str:
     return (
         '<div class="block err-block">'
         '<h4>Why this is unknown &mdash; this is not a pass</h4>'
-        '<p><strong>No verdict was issued for this control.</strong> This scan '
-        'reads Group Policy, and what Group Policy shows does not settle this '
-        'setting\'s state, so it is reported as neither compliant nor '
-        'non-compliant. Run the check named below to turn it into a fact.</p>'
+        '<p>Group Policy doesn\'t show this setting\'s value, so the scan '
+        'can\'t confirm it either way. Use the check below to settle it.</p>'
         + _notes_list(notes, "notes")
         + '</div>'
     )
@@ -928,31 +922,76 @@ def _card_badges(finding: Dict[str, Any], section_id: str) -> str:
     badges = [_badge(_esc(str(finding.get("severity") or "").upper()),
                      f"sev-{str(finding.get('severity') or 'none').lower()}")]
     if section_id == SECTION_NOT_JUDGED:
-        badges.append(_badge("NOT JUDGED", "notjudged"))
+        badges.append(_badge("NOT CHECKED &mdash; NOT A PASS", "notjudged"))
     else:
         badges.append(_badge(_esc(_RESULT_LABELS.get(result, result or "?")),
                              f"result-{result or 'none'}"))
     if state:
-        badges.append(_badge(f'rollout: {_esc(_STATE_LABELS.get(str(state), state))}',
+        badges.append(_badge(f'stage: {_esc(_STATE_LABELS.get(str(state), state))}',
                              f"state-{state}"))
-    badges.append(_badge(_esc(_SOURCE_LABELS.get(str(evidence.get("source")),
-                                                 str(evidence.get("source")))),
-                         f"src-{str(evidence.get('source') or 'none').replace('-', '')}"))
+    source = evidence.get("source")
+    # "Set by Group Policy" is the normal case; badge only the exceptions. A
+    # not-checked row already says it has no verdict.
+    if source != "gpo" and section_id != SECTION_NOT_JUDGED:
+        badges.append(_badge(_esc(_SOURCE_LABELS.get(str(source), str(source))),
+                             f"src-{str(source or 'none').replace('-', '')}"))
     if finding.get("conflict"):
         badges.append(_badge("CONFLICT", "conflict"))
     return f'<p class="badges">{"".join(badges)}</p>'
 
 
-def _render_card(finding: Dict[str, Any], section_id: str) -> str:
-    """One finding, rendered for the section it is in."""
-    evidence = finding.get("evidence") or {}
-    control_id = str(finding.get("control_id") or "")
-    # Anchor on the control id alone: a card's anchor must NOT move when its
-    # verdict changes, or a link from a ticket breaks exactly when the finding
-    # changes — which is the moment someone follows it. The section survives as
-    # the card's class.
-    anchor = control_id.lower().replace(" ", "-")
+def _target_text(expected: Any) -> str:
+    """The baseline, in words: "at least 5 (step 1: at least 3)"."""
+    if not isinstance(expected, dict):
+        return "no target value"
+    operator = expected.get("operator")
+    words = _OPERATOR_WORDS.get(str(operator), str(operator or ""))
+    if operator in ("present", "absent"):
+        return f"setting {_esc(words)}"
+    text = f"{_esc(words)} {_esc_value(expected.get('final'))}"
+    if expected.get("interim") is not None:
+        text += f" (step 1: {_esc(words)} {_esc_value(expected.get('interim'))})"
+    return text
 
+
+def _render_glance(finding: Dict[str, Any]) -> str:
+    """Found versus target in two lines — the card's always-visible verdict.
+
+    Built only from the scan's own ``found`` and ``expected``; the full tables
+    sit in the evidence block below.
+    """
+    evidence = finding.get("evidence") or {}
+    found = [m for m in (evidence.get("found") or []) if isinstance(m, dict)]
+    if found:
+        shown = [f'<code>{_esc_value(m.get("value"))}</code> in '
+                 f'{_esc(m.get("gpo_display_name"))}' for m in found[:3]]
+        if len(found) > 3:
+            shown.append(f"and {len(found) - 3} more")
+        found_text = "; ".join(shown)
+    else:
+        os_default = evidence.get("os_default") or {}
+        if evidence.get("source") == "os-default" and os_default.get("applied"):
+            found_text = ("no GPO sets it; the Windows default is "
+                          f'<code>{_esc_value(os_default.get("value"))}</code>')
+        else:
+            found_text = _esc(_SOURCE_LABELS.get(str(evidence.get("source")),
+                                                 "no value found"))
+    return (
+        '<p class="glance">'
+        f'<span><strong>Found:</strong> {found_text}</span>'
+        f'<span><strong>Target:</strong> {_target_text(evidence.get("expected"))}'
+        '</span></p>')
+
+
+def _render_evidence(finding: Dict[str, Any], notes_shown: bool) -> str:
+    """Everything the verdict rests on, collapsed: a first-time reader needs
+    the verdict and the fix, an auditor needs this.
+
+    Nothing safety-related lives here. Rollout steps, caveats, conflicts and
+    the reason an unknown is unknown stay open on the card, because most
+    browsers print a closed ``<details>`` closed.
+    """
+    evidence = finding.get("evidence") or {}
     identity = _rows([
         ("Policy", _esc(finding.get("friendly_policy"))),
         ("Registry key",
@@ -962,39 +1001,45 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
         ("Check type", _esc(finding.get("check_type"))),
         ("GPOs searched", _esc(evidence.get("gpos_searched"))),
     ])
-
-    body: List[str] = [identity]
-    # True when the evidence notes are already rendered open somewhere in the
-    # card, so the collapsed copy at the bottom is suppressed rather than
-    # repeating them.
-    notes_shown = False
-
-    if section_id == SECTION_NOT_JUDGED:
-        body.append(_render_not_judged(finding))
-        body.append(_render_remediation(finding))
-        body.append(_render_phasing(finding))
-    else:
-        body.append('<div class="block"><h4>Expected (baseline)</h4>'
-                    + _render_expected(finding) + '</div>')
-        body.append('<div class="block"><h4>Found (this scan)</h4>'
-                    + _render_found(finding) + '</div>')
-        if finding.get("error"):
-            body.append('<div class="block err-block"><h4>Why this is '
-                        'unknown</h4><p>'
-                        + _esc(finding.get("error")) + '</p></div>')
-        elif finding.get("result") == "unknown":
-            body.append(_render_unknown_reason(finding))
-            notes_shown = True
-        body.append(_render_conflict(finding))
-        if section_id in (SECTION_FAIL, SECTION_UNKNOWN, SECTION_OPPORTUNITIES):
-            body.append(_render_remediation(finding))
-            body.append(_render_phasing(finding))
-
+    parts = [identity,
+             '<div class="block"><h4>Expected (baseline)</h4>'
+             + _render_expected(finding) + '</div>',
+             '<div class="block"><h4>Found (this scan)</h4>'
+             + _render_found(finding) + '</div>']
     notes = "" if notes_shown else _notes_list(evidence.get("notes"), "notes")
     if notes:
-        body.append('<details class="block scan-notes"><summary>Scan notes '
-                    f'({len((evidence.get("notes") or []))})</summary>{notes}'
-                    '</details>')
+        parts.append('<div class="block scan-notes"><h4>Scan notes</h4>'
+                     f'{notes}</div>')
+    return ('<details class="block evidence"><summary>Evidence and technical '
+            f'detail</summary>{"".join(parts)}</details>')
+
+
+def _render_card(finding: Dict[str, Any], section_id: str) -> str:
+    """One finding: verdict, then what to do, then the evidence (collapsed)."""
+    control_id = str(finding.get("control_id") or "")
+    # Anchor on the control id alone: a card's anchor must NOT move when its
+    # verdict changes, or a link from a ticket breaks exactly when the finding
+    # changes — which is the moment someone follows it. The section survives as
+    # the card's class.
+    anchor = control_id.lower().replace(" ", "-")
+
+    body: List[str] = [_render_glance(finding)]
+    # True when the evidence notes are already rendered open on the card, so
+    # the evidence block does not repeat them.
+    notes_shown = False
+
+    if finding.get("error"):
+        body.append('<div class="block err-block"><h4>Why this is '
+                    'unknown</h4><p>'
+                    + _esc(finding.get("error")) + '</p></div>')
+    elif finding.get("result") == "unknown":
+        body.append(_render_unknown_reason(finding))
+        notes_shown = True
+    body.append(_render_conflict(finding))
+    if section_id in (SECTION_FAIL, SECTION_UNKNOWN, SECTION_OPPORTUNITIES):
+        body.append(_render_remediation(finding))
+        body.append(_render_phasing(finding))
+    body.append(_render_evidence(finding, notes_shown))
     body.append(_render_source(finding))
 
     return (
@@ -1004,6 +1049,32 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
         f'{_card_badges(finding, section_id)}'
         f'{"".join(body)}'
         '</article>'
+    )
+
+
+def _render_not_judged_row(finding: Dict[str, Any]) -> str:
+    """An unscored control, compact: one line that says it is not a pass,
+    expanding to its reason and rollout guidance.
+
+    The "not a pass" badge is on the summary line, so it stays visible when
+    the row is collapsed and when the page is printed.
+    """
+    control_id = str(finding.get("control_id") or "")
+    anchor = control_id.lower().replace(" ", "-")
+    return (
+        f'<details class="pass-row notjudged-row card-{SECTION_NOT_JUDGED}" '
+        f'id="{_esc(anchor)}">'
+        '<summary>'
+        f'<span class="cid">{_esc(control_id)}</span> '
+        f'<span class="pass-title">{_esc(finding.get("title"))}</span> '
+        f'{_card_badges(finding, SECTION_NOT_JUDGED)}'
+        '</summary>'
+        '<div class="pass-detail">'
+        + _render_not_judged(finding)
+        + _render_remediation(finding)
+        + _render_phasing(finding)
+        + _render_source(finding)
+        + '</div></details>'
     )
 
 
@@ -1069,7 +1140,7 @@ def _render_pass_row(finding: Dict[str, Any]) -> str:
         '<summary>'
         f'<span class="cid">{_esc(finding.get("control_id"))}</span> '
         f'<span class="pass-title">{_esc(finding.get("title"))}</span> '
-        f'<span class="badge badge-state-{_esc(state, "none")}">rollout: '
+        f'<span class="badge badge-state-{_esc(state, "none")}">stage: '
         f'{_esc(_STATE_LABELS.get(str(state), state))}</span> '
         f'<span class="pass-val">found {_esc(values, "no value (see evidence)")}'
         f'</span>{preference}{conflict}'
@@ -1090,6 +1161,8 @@ def _render_section(section_id: str, findings: Sequence[Dict[str, Any]],
         body = '<p class="muted empty">None.</p>'
     elif section_id == SECTION_PASSES:
         body = extra + "".join(_render_pass_row(f) for f in findings)
+    elif section_id == SECTION_NOT_JUDGED:
+        body = extra + "".join(_render_not_judged_row(f) for f in findings)
     else:
         body = extra + "".join(_render_card(f, section_id) for f in findings)
 
@@ -1111,7 +1184,7 @@ def _render_toc(grouped: Dict[str, List[Dict[str, Any]]],
     for section_id, title, _lede in SECTIONS:
         items.append(f'<li><a href="#{section_id}">{title}</a> '
                      f'<span class="count">({len(grouped[section_id])})</span></li>')
-    items.append('<li><a href="#provenance">Provenance</a></li>')
+    items.append('<li><a href="#provenance">About this scan</a></li>')
     return f'<nav class="toc"><h2>Contents</h2><ol>{"".join(items)}</ol></nav>'
 
 
@@ -1141,18 +1214,14 @@ $css
 <p class="sub">$subtitle</p>
 </header>
 $read_failures
-$provenance
 $counts
 $toc
 $sections
+$provenance
 <footer class="doc-foot">
 <p>Generated by ADitor &mdash; scan engine $engine_version, report format
 $report_version, catalog $catalog_version. This scan is read-only and changed
 nothing.</p>
-<p>$precedence</p>
-<p class="small muted">This file is self-contained: it loads no stylesheet,
-script, font or image, and needs no network access to read. The JSON scan output
-is the source of truth; this document renders it and adds nothing to it.</p>
 </footer>
 </main>
 </body>
@@ -1226,6 +1295,7 @@ padding:.35rem .5rem}
 margin:.6rem 0}
 .tile{flex:1 1 8rem;border:1px solid var(--line);border-radius:6px;
 padding:.55rem .7rem;background:var(--panel)}
+.tile a{display:block;color:inherit;text-decoration:none}
 .tile-n{display:block;font-size:1.5rem;font-weight:700;line-height:1.1}
 .tile-l{display:block;font-size:.78rem;text-transform:uppercase;
 letter-spacing:.04em;color:var(--muted)}
@@ -1265,6 +1335,13 @@ color:var(--ok)}
 .badge-preference{
 background:var(--warn-bg);border-color:var(--warn);color:var(--warn)}
 .block{margin:.8rem 0}
+/* The card's always-visible verdict: found versus target. */
+.glance{background:var(--panel);border-radius:4px;padding:.5rem .7rem;
+margin:.5rem 0 .8rem}
+.glance span{display:block}
+.done{color:var(--ok);font-weight:700}
+.evidence>summary{font-size:.9rem;font-weight:600;color:var(--muted)}
+.notjudged-row .badges{display:inline;margin:0}
 .remediation p,.phasing p{margin:.35rem 0}
 .remediation{background:var(--info-bg);border-left:4px solid var(--info);
 padding:.6rem .8rem}
@@ -1319,9 +1396,24 @@ def _as_int(value: Any) -> int:
         return 0
 
 
+def _friendly_time(timestamp: Any) -> str:
+    """``2026-08-24T18:40:04.123+00:00`` as ``2026-08-24 18:40 UTC``.
+
+    Falls back to the raw value, so an unexpected timestamp is still shown.
+    """
+    try:
+        moment = datetime.fromisoformat(str(timestamp))
+    except ValueError:
+        return str(timestamp)
+    if moment.utcoffset() is not None:
+        moment = moment.astimezone(timezone.utc)
+    return moment.strftime("%Y-%m-%d %H:%M UTC")
+
+
 def _subtitle(scan: Dict[str, Any], counts: Dict[str, Any]) -> str:
     domain = _esc(scan.get("domain"), "unknown domain")
-    timestamp = _esc(scan.get("timestamp"), "unknown time")
+    timestamp = (_esc(_friendly_time(scan.get("timestamp")))
+                 if scan.get("timestamp") else "unknown time")
     return (f"{domain} &middot; scanned {timestamp} &middot; "
             f"catalog {_esc(scan.get('catalog_version'))} &middot; "
             f"{_esc(counts.get('total'), '0')} controls evaluated")
@@ -1383,13 +1475,12 @@ def render_report(scan_result: Dict[str, Any]) -> str:
         subtitle=_subtitle(scan, counts),
         read_failures=_render_read_failures(scan, read_errors),
         provenance=_render_provenance(scan, counts),
-        counts=_render_counts(counts),
+        counts=_render_counts(counts, grouped),
         toc=_render_toc(grouped, read_errors),
         sections=sections,
         engine_version=_esc(scan.get("tool_version") or SCAN_ENGINE_VERSION),
         report_version=_esc(REPORT_FORMAT_VERSION),
         catalog_version=_esc(scan.get("catalog_version")),
-        precedence=_PRECEDENCE_DISCLAIMER,
     )
 
 
