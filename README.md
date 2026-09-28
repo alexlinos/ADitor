@@ -101,10 +101,12 @@ conflicts. Controls whose exact expected value the source does not state are
 reported but never scored or guessed.
 
 The report is one self-contained HTML file (inline CSS, no scripts, no network)
-that opens from a `file://` path and prints to PDF from a browser. It is ordered
-by what needs action: unreadable GPOs and unknown verdicts first, then failures,
-conflicts, settings resting on a Windows default, unscored controls, and passes
-last. See [`examples/hardening-report-sample.html`](examples/hardening-report-sample.html),
+that opens from a `file://` path and prints to PDF from a browser. It opens with
+a "Start here" box (where you stand, and the first few things to do) and groups
+findings by what you do with them: **Fix**, **Check by hand**, **Not covered
+yet** and **Good**. Each finding shows found versus target, the fix and the safe
+rollout order up front, with the evidence one click away. A warning about
+unreadable GPOs always comes first. See [`examples/hardening-report-sample.html`](examples/hardening-report-sample.html),
 rendered from synthetic data.
 
 **Both files contain directory content** — GPO display names, registry values
