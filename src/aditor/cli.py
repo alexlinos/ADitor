@@ -114,10 +114,13 @@ def cmd_diff(args: argparse.Namespace) -> int:
     attribution = diff["attribution"]
     # Attribution first: every number below depends on it.
     if attribution["verdict"] == ATTRIBUTION_AMBIGUOUS:
-        print("WARNING: attribution is AMBIGUOUS. These scans ran different "
-              "tool versions, so the changes below may be the scanner, not the "
+        print("Different ADitor versions: a difference below may come from the "
+              "tool rather than the domain. Treat this as a new starting "
+              "point, not as progress.")
+        print(f"What changed: {attribution.get('reason')}")
+    else:
+        print("Same ADitor version: the differences below are changes in the "
               "domain.")
-    print(attribution["summary"])
 
     totals = diff["totals"]
     print(f"\n{totals['controls_compared']} controls compared: "
@@ -129,6 +132,14 @@ def cmd_diff(args: argparse.Namespace) -> int:
     if totals["catalog_added"] or totals["catalog_removed"]:
         print(f"Catalog: {totals['catalog_added']} added, "
               f"{totals['catalog_removed']} removed")
+    added = diff["catalog_changes"]["added"]
+    if added:
+        print("\nNew checks (first result, not a regression):")
+        order = {"fail": 0, "error": 1, "unknown": 2, "pass": 3}
+        for entry in sorted(added, key=lambda e: (order.get(e.get("result"), 9),
+                                                  str(e.get("control_id")))):
+            print(f"  {entry.get('result')}: {entry.get('control_id')} "
+                  f"({entry.get('severity')})")
 
     for label in ("regressions", "improvements", "other_changes"):
         if diff[label]:
