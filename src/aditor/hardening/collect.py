@@ -323,12 +323,34 @@ class Scanner:
     def _search(self, search_filter: str, attributes: List[str],
                 base: Optional[str] = None, scope: Any = ldap3.SUBTREE
                 ) -> List[Dict[str, Any]]:
-        return list(self.ldap.search(
-            search_base=base or self.ldap.ad_config.base_dn,
+        """Search this domain. A result whose DN is outside ``base_dn`` (a
+        referral followed into a child domain) is dropped, so another domain's
+        accounts are never reported as this one's."""
+        root = self.ldap.ad_config.base_dn
+        results = self.ldap.search(
+            search_base=base or root,
             search_filter=search_filter,
             attributes=attributes,
             search_scope=scope,
-        ) or [])
+        ) or []
+        return [r for r in results
+                if not isinstance(r, dict) or _within(r.get("dn"), root)]
+
+    def _forest_root_dn(self) -> Optional[str]:
+        """The forest root domain's DN, from the RootDSE ldap3 read on bind.
+
+        ``None`` when it can't be read; callers then assume this *is* the
+        forest root, so a forest-root group that can't be found is an error
+        rather than a quiet pass.
+        """
+        try:
+            info = self.ldap.connect().server.info
+            value = (info.other or {}).get("rootDomainNamingContext")
+        except Exception:
+            return None
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else None
+        return value if isinstance(value, str) and value.strip() else None
 
     def _spn_accounts_without_aes(self, _control: Control) -> Dict[str, Any]:
         """Enabled service accounts with an SPN whose encryption types lack AES.
@@ -386,16 +408,29 @@ class Scanner:
         """The control's target groups that have any member.
 
         Each group is found by its well-known SID, not its name (names are
-        localized and can be renamed). Members are the group's ``member``
-        values **plus** every account whose ``primaryGroupID`` is the group,
-        because AD leaves an account out of its primary group's ``member``.
-        A group that should always exist but isn't found is an error, not an
-        empty group: the bind account may simply not be able to see it.
+        localized and can be renamed). Its members are the union of:
+
+        * its ``member`` values;
+        * every account whose ``memberOf`` names it. AD returns no ``member``
+          attribute for an empty group *and* for one the bind account may not
+          read, so an empty ``member`` is never taken on its own word;
+        * for domain groups, every account whose ``primaryGroupID`` is the
+          group, because AD leaves an account out of its primary group's
+          ``member``.
+
+        A group that should exist but isn't found is an error, not an empty
+        group: the bind account may simply not be able to see it. A query
+        that fails is an error for the whole control, never a listed group.
         """
         objects, notes, missing = [], [], []
         domain_sid = None
+        forest_root = self._forest_root_dn()
+        in_forest_root = forest_root is None or _same_dn(
+            forest_root, self.ldap.ad_config.base_dn)
         for name in control.directory_targets:
-            scope, ident, always_exists = WELL_KNOWN_GROUPS[name]
+            scope, ident, exists = WELL_KNOWN_GROUPS[name]
+            required = exists is True or (exists == "forest-root"
+                                          and in_forest_root)
             if scope == "domain":
                 domain_sid = domain_sid or self._domain_sid()
                 sid, rid = f"{domain_sid}-{ident}", ident
@@ -405,22 +440,33 @@ class Scanner:
                 f"(&(objectClass=group)(objectSid={escape_filter_chars(sid)}))",
                 ["sAMAccountName", "member"])
             if not entries:
-                if always_exists:
+                if required:
                     missing.append(f"{name} ({sid})")
+                elif exists == "forest-root":
+                    notes.append(f"{name} ({sid}) was not found. It exists only "
+                                 f"in the forest root domain, and this domain "
+                                 f"is not the forest root ({forest_root}), so "
+                                 f"its members were not checked here.")
                 else:
                     notes.append(f"{name} ({sid}) was not found. That is "
-                                 f"normal for this group in some domains "
-                                 f"(it exists only in the forest root, or "
-                                 f"only with a newer schema or role).")
+                                 f"normal for this group where the schema or "
+                                 f"role that adds it isn't present.")
                 continue
             entry = entries[0]
+            group_dn = _text(entry.get("dn"))
+            # The member queries run outside the per-entry guard: if one
+            # fails, the whole control is an error, not a listed group.
+            extra = [str(e.get("dn") or "") for e in self._search(
+                f"(memberOf={escape_filter_chars(group_dn)})",
+                ["sAMAccountName"])] if group_dn else []
+            if rid is not None:
+                extra += [str(e.get("dn") or "") for e in self._search(
+                    f"(primaryGroupID={rid})", ["sAMAccountName"])]
             try:
                 attributes = entry.get("attributes", {}) or {}
                 members = [_text(m) for m in _as_list(attributes.get("member"))]
-                if rid is not None:
-                    members += [str(e.get("dn") or "") for e in self._search(
-                        f"(primaryGroupID={rid})", ["sAMAccountName"])]
-                members = sorted({m for m in members if m}, key=str.lower)
+                members = sorted({m for m in members + extra if m},
+                                 key=str.lower)
                 if not members:
                     continue
                 shown = ", ".join(_rdn(m) for m in members[:5])
@@ -429,7 +475,7 @@ class Scanner:
                 local = _text(_attr(attributes, "sAMAccountName")) or name
                 label = name if local == name else f"{name} ({local})"
                 objects.append({
-                    "value": label, "dn": _text(entry.get("dn")),
+                    "value": label, "dn": group_dn,
                     "object_class": "group",
                     "detail": f"{len(members)} member(s): {shown}{more}",
                     "members": members,
@@ -438,7 +484,7 @@ class Scanner:
                 objects.append(_unreadable(entry, exc, name))
         if missing:
             raise RuntimeError(
-                "these groups should exist in every domain but were not found, "
+                "these groups should exist in this domain but were not found, "
                 "so their members could not be checked (the bind account may "
                 f"not be able to read them): {', '.join(missing)}")
         return {"objects": _sorted(objects), "notes": notes, "error": None}
@@ -613,6 +659,30 @@ def _sid_text(value: Any) -> str:
                 for i in range(count)]
         return "-".join(["S", str(revision), str(authority)] + [str(x) for x in subs])
     return ""
+
+
+def _norm_dn(dn: Any) -> str:
+    return ",".join(part.strip() for part in _text(dn).lower().split(","))
+
+
+def _same_dn(a: Any, b: Any) -> bool:
+    return _norm_dn(a) == _norm_dn(b)
+
+
+def _within(dn: Any, root: Any) -> bool:
+    """Whether ``dn`` is in the same domain as ``root``, at or under it.
+
+    Textually under isn't enough: a child domain's objects
+    (``...,DC=child,DC=test,DC=local``) end with the parent's DN too. An AD
+    object's ``DC=`` components are exactly its own domain's, so they must
+    match ``root``'s as well.
+    """
+    dn, root = _norm_dn(dn), _norm_dn(root)
+    if not root or not (dn == root or dn.endswith("," + root)):
+        return False
+    def dcs(text: str) -> List[str]:
+        return [part for part in text.split(",") if part.startswith("dc=")]
+    return dcs(dn) == dcs(root)
 
 
 def _sorted(objects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

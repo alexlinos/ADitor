@@ -217,7 +217,8 @@
         "An account whose password was set before the domain supported AES may have no AES keys yet; resetting its password generates them. Accounts migrated with ADMT are the usual case. On domain controllers with the 2026 Kerberos updates enforced, a blank account without AES keys can fail to authenticate rather than fall back to RC4.",
         "An account listed as 'RC4 and no AES' keeps using RC4 even after the 2026 updates, because its explicit setting overrides the new AES-only default.",
         "User accounts and managed service accounts (sMSA, gMSA) with an SPN are checked. Computer accounts are skipped: Windows computers maintain this attribute themselves. Non-Windows devices with an SPN (a NAS, a Linux host) don't, and are not checked here.",
-        "Disabled accounts and krbtgt are not listed."
+        "Disabled accounts and krbtgt are not listed.",
+        "A pass means nothing the bind account can read matched. AD silently leaves out objects and attributes an account isn't allowed to read, so run the scan with an account that can read the whole domain (an ordinary domain user can by default); a domain whose permissions were tightened can hide findings from a weaker account."
       ],
       "audit_before_enforce": "Event 4769 (and 4768) with Ticket Encryption Type 0x17 (RC4) shows which accounts and services still get RC4 tickets."
     },
@@ -398,8 +399,9 @@
       "remediation": "Remove the members of each listed group. Where someone needs the rights a group carries, delegate the specific rights instead, or add them only for the duration of the task.",
       "caveats": [
         "Schema Admins and Group Policy Creator Owners contain the built-in Administrator account by default, so they are often listed on a domain nobody has changed. Emptying them is the recommendation; add a member back only while a change needs it.",
-        "Members are the group's direct members plus any account that uses the group as its primary group (AD leaves those out of the member list). A nested group counts as one member and is not expanded.",
-        "Schema Admins and Incoming Forest Trust Builders exist only in the forest root domain, and Storage Replica Administrators only with a newer schema; if missing they are noted, not reported. A group that should exist in every domain but can't be found makes this control an error, never a pass."
+        "Members are the group's direct members, any account whose memberOf names the group (a cross-check, since AD returns no member list for an empty group or one the bind account can't read), and any account that uses the group as its primary group (AD leaves those out of the member list). A nested group counts as one member and is not expanded.",
+        "Schema Admins and Incoming Forest Trust Builders exist only in the forest root domain: in a child domain they are noted and not checked, and in the forest root a missing one is an error. Storage Replica Administrators exists only with a newer schema and is noted if missing. Any other group that can't be found makes this control an error, never a pass.",
+        "A pass means nothing the bind account can read matched. AD silently leaves out objects and attributes an account isn't allowed to read, so run the scan with an account that can read the whole domain (an ordinary domain user can by default); a domain whose permissions were tightened can hide findings from a weaker account."
       ],
       "audit_before_enforce": null
     },
@@ -429,7 +431,8 @@
       "caveats": [
         "Changing delegation can break the services that depend on it. Find out what each listed account delegates to before changing it, and change one at a time.",
         "Only writable domain controllers are excluded. Read-only domain controllers don't carry this flag by design, so one that has it is listed, as is any user account, whatever its primary group.",
-        "Disabled accounts are listed and marked: re-enabling one brings the exposure back."
+        "Disabled accounts are listed and marked: re-enabling one brings the exposure back.",
+        "A pass means nothing the bind account can read matched. AD silently leaves out objects and attributes an account isn't allowed to read, so run the scan with an account that can read the whole domain (an ordinary domain user can by default); a domain whose permissions were tightened can hide findings from a weaker account."
       ],
       "audit_before_enforce": null
     },

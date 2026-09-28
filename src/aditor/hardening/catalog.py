@@ -106,19 +106,21 @@ DIRECTORY_CHECKS_WITH_TARGETS = frozenset({DIRECTORY_CHECK_NON_EMPTY_GROUPS})
 # names are localized when a domain is created and can be renamed, and a
 # name lookup that finds nothing would read as an empty group.
 #
-# name: (scope, id, always_exists). ``builtin`` ids are full SIDs; ``domain``
-# ids are RIDs relative to the domain SID. ``always_exists`` is False for
-# groups a domain can legitimately lack (forest-root-only groups, and groups a
-# newer schema or role adds); a missing one that should exist is an error.
-WELL_KNOWN_GROUPS: Dict[str, Tuple[str, Any, bool]] = {
+# name: (scope, id, exists). ``builtin`` ids are full SIDs; ``domain`` ids are
+# RIDs relative to the domain SID. ``exists`` is True for groups every domain
+# has, "forest-root" for groups only the forest root domain has, and False for
+# groups a newer schema or role adds. A missing group that should exist is an
+# error.
+WELL_KNOWN_GROUPS: Dict[str, Tuple[str, Any, Any]] = {
     "Account Operators": ("builtin", "S-1-5-32-548", True),
     "Server Operators": ("builtin", "S-1-5-32-549", True),
     "Print Operators": ("builtin", "S-1-5-32-550", True),
     "Backup Operators": ("builtin", "S-1-5-32-551", True),
     "Replicator": ("builtin", "S-1-5-32-552", True),
-    "Incoming Forest Trust Builders": ("builtin", "S-1-5-32-557", False),
+    "Incoming Forest Trust Builders": ("builtin", "S-1-5-32-557",
+                                       "forest-root"),
     "Storage Replica Administrators": ("builtin", "S-1-5-32-582", False),
-    "Schema Admins": ("domain", 518, False),
+    "Schema Admins": ("domain", 518, "forest-root"),
     "Group Policy Creator Owners": ("domain", 520, True),
 }
 

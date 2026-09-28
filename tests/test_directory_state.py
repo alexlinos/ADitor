@@ -91,9 +91,13 @@ class FakeDirectory:
     """
 
     def __init__(self, groups=None, primary=None, spn=(), delegation=(),
-                 fail_on=None):
+                 fail_on=None, forest_root=BASE_DN, member_of=None):
         self.groups = groups if groups is not None else {}
         self.primary = primary or {}
+        # group DN -> accounts whose memberOf names it
+        self.member_of = member_of or {}
+        # the RootDSE's rootDomainNamingContext; None = can't be read
+        self.forest_root = forest_root
         self.spn, self.delegation = list(spn), list(delegation)
         self.fail_on = fail_on
         self.filters = []
@@ -102,6 +106,11 @@ class FakeDirectory:
         manager = Mock()
         manager.ad_config.base_dn = BASE_DN
         manager.search.side_effect = self.search
+        if self.forest_root is None:
+            manager.connect.side_effect = RuntimeError("no RootDSE")
+        else:
+            manager.connect.return_value.server.info.other = {
+                "rootDomainNamingContext": [self.forest_root]}
         return manager
 
     def search(self, search_base=None, search_filter=None, **_kwargs):
@@ -117,6 +126,10 @@ class FakeDirectory:
             name, members = self.groups[sid]
             return [entry(f"CN={name},{BASE_DN}", sAMAccountName=name,
                           member=members)]
+        if search_filter.startswith("(memberOf="):
+            group_dn = search_filter[len("(memberOf="):-1]
+            return [entry(dn, sAMAccountName=dn) for dn in
+                    self.member_of.get(group_dn, [])]
         if search_filter.startswith("(primaryGroupID="):
             rid = int(search_filter[len("(primaryGroupID="):-1])
             return [entry(dn, sAMAccountName=dn) for dn in
@@ -361,12 +374,50 @@ class TestPrivilegedGroups:
         result = self.result(FakeDirectory(groups=groups))
         assert result["error"] and "Account Operators" in result["error"]
 
-    def test_a_forest_root_only_group_that_is_missing_is_only_noted(self):
+    def test_a_forest_root_only_group_missing_in_a_child_domain_is_noted(self):
         groups = every_group_empty()
-        del groups[f"{DOMAIN_SID}-518"]  # Schema Admins, in a child domain
-        result = self.result(FakeDirectory(groups=groups))
+        del groups[f"{DOMAIN_SID}-518"]  # Schema Admins
+        result = self.result(FakeDirectory(groups=groups,
+                                           forest_root="DC=local"))
         assert result["error"] is None
-        assert any("Schema Admins" in note for note in result["notes"])
+        assert any("Schema Admins" in note and "not the forest root" in note
+                   for note in result["notes"])
+
+    @pytest.mark.parametrize("forest_root", [BASE_DN, None])
+    def test_a_forest_root_only_group_missing_in_the_root_is_an_error(
+            self, forest_root):
+        """Final QA: in the forest root Schema Admins always exists, so not
+        seeing it (hidden by ACL, say) passed quietly. An unreadable RootDSE
+        is treated as the root: an error, never a quiet pass."""
+        groups = every_group_empty()
+        del groups[f"{DOMAIN_SID}-518"]
+        result = self.result(FakeDirectory(groups=groups,
+                                           forest_root=forest_root))
+        assert result["error"] and "Schema Admins" in result["error"]
+
+    def test_a_failed_member_query_is_an_error_not_a_listed_group(self):
+        """Final QA: the primaryGroupID search failing listed every domain
+        group as an offender ("fix the 2 listed") instead of erroring."""
+        directory = FakeDirectory(groups=every_group_empty(),
+                                  fail_on="(primaryGroupID=")
+        result = self.result(directory)
+        assert result["objects"] == [] or result.get("error")
+        findings, _ = evaluate_controls(
+            [load_catalog().by_id(GROUPS_CONTROL)], [],
+            directory=read(directory, GROUPS_CONTROL))
+        assert findings[0]["result"] == RESULT_ERROR
+
+    def test_members_are_cross_checked_through_member_of(self):
+        """Final QA: AD omits ``member`` when the bind account can't read it,
+        which looked like an empty group. The memberOf back-link catches the
+        member anyway."""
+        groups = every_group_empty()
+        groups["S-1-5-32-548"] = ("Account Operators", [])
+        directory = FakeDirectory(groups=groups, member_of={
+            f"CN=Account Operators,{BASE_DN}": [f"CN=hidden,{BASE_DN}"]})
+        result = self.result(directory)
+        assert [o["value"] for o in result["objects"]] == ["Account Operators"]
+        assert "hidden" in result["objects"][0]["detail"]
 
     def test_member_names_with_escaped_commas_display_properly(self):
         groups = every_group_empty()
@@ -415,6 +466,20 @@ class TestUnconstrainedDelegation:
                   objectClass=["top", "user"], userAccountControl=0x80200))
         assert [(o["value"], o["object_class"]) for o in result["objects"]] == [
             ("backdoor", "user"), ("SRV01$", "computer")]
+
+    def test_results_outside_this_domain_are_ignored(self):
+        """A referral followed into a child domain must not report that
+        domain's accounts as this one's."""
+        result, _ = self.result(
+            entry(f"CN=local,{BASE_DN}", sAMAccountName="local$",
+                  objectClass=["computer"], userAccountControl=0x81000),
+            entry("CN=child,DC=child,DC=test,DC=local", sAMAccountName="child$",
+                  objectClass=["computer"], userAccountControl=0x81000),
+            entry("CN=other,DC=other,DC=local", sAMAccountName="other$",
+                  objectClass=["computer"], userAccountControl=0x81000))
+        # The child domain's DN ends with this domain's DN too; it is dropped
+        # because its DC= components are the child's, not this domain's.
+        assert [o["value"] for o in result["objects"]] == ["local$"]
 
     def test_disabled_accounts_are_listed_and_marked(self):
         result, directory = self.result(entry(
