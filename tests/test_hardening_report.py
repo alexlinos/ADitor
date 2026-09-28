@@ -26,6 +26,7 @@ The load-bearing tests, in the order the review cares about:
   be mistakable for a pass.
 """
 
+import html
 import re
 
 import pytest
@@ -178,8 +179,12 @@ def card_of(document, section_id, control_id):
     """
     anchor = f'id="{control_id}"'.lower()
     start = document.lower().index(anchor)
-    start = document.rindex("<article", 0, start)
-    return document[start:document.index("</article>", start)]
+    # A card is an <article>; a not-checked finding is a compact <details> row.
+    start = max(document.rfind("<article", 0, start),
+                document.rfind("<details", 0, start))
+    closing = ("</article>" if document.startswith("<article", start)
+               else "</details>")
+    return document[start:document.index(closing, start)]
 
 
 def pass_row_of(document, control_id):
@@ -425,10 +430,9 @@ class TestEscaping:
 
         # Never an href...
         assert 'href="javascript' not in document
-        # The only anchors in the document are the in-page contents links.
-        assert re.findall(r'<a href="([^"]*)"', document) == [
-            f"#{section_id}" for section_id, _t, _l in SECTIONS] + \
-            ["#provenance"]
+        # The only anchors in the document are in-page links (tiles, contents).
+        hrefs = re.findall(r'<a href="([^"]*)"', document)
+        assert hrefs and all(href.startswith("#") for href in hrefs), hrefs
         # ...but shown as inert text, because silently dropping a citation hides
         # a broken catalog entry.
         assert "citation URL not linked" in document
@@ -531,14 +535,14 @@ class TestUnreadableGpos:
     def test_provenance_highlights_the_unreadable_count(self, unreadable_scan):
         document = render_report(unreadable_scan)
         provenance_block = document[document.index('id="provenance"'):
-                                    document.index('id="summary"')]
+                                    document.index('<footer')]
         assert "GPOs unreadable" in provenance_block
         assert '<strong class="bad">1</strong>' in provenance_block
 
     def test_clean_scan_says_so_instead(self, mixed_scan):
         document = render_report(mixed_scan)
         assert '<section class="alert"' not in document
-        assert "All GPOs read." in document
+        assert "GPOs were read." in document
 
 
 # --------------------------------------------------------------------------- #
@@ -576,17 +580,16 @@ class TestFailureCard:
 
     def test_carries_the_phasing_caveat_interim_first(self, card):
         """Advising a jump straight to enforcement is the dangerous failure mode."""
-        assert "Rollout order" in card
+        assert "How to roll it out safely" in card
         step_one = card.index("Step 1")
         step_two = card.index("Step 2")
         assert step_one < step_two
-        assert "reach the interim value 3 first" in card
-        assert "only then move to the\nfinal value 5" in card or \
-            "only then move to the final value 5" in card.replace("\n", " ")
-        assert "Do not skip step 1" in card
+        assert "Step 1: set it to 3 first" in card
+        assert "Step 2: only then set it to 5." in card
+        assert "Don&#x27;t skip step 1" in card or "Don't skip step 1" in card
 
     def test_carries_the_catalogs_audit_before_enforce_evidence(self, card):
-        assert "Gather this evidence before" in card
+        assert "Before enforcing, check:" in card
         assert "LmPackageName=&#x27;NTLM V1&#x27;" in card
 
     def test_carries_every_catalog_caveat_including_unprefixed_ones(
@@ -614,7 +617,7 @@ class TestFailureCard:
         document = render_report(payload)
         assert KDC_CONTROL in sections_of(document)[SECTION_FAIL]
         card = card_of(document, SECTION_FAIL, KDC_CONTROL)
-        assert "Rollout order" in card
+        assert "How to roll it out safely" in card
         assert "too aggressive for most" in card
 
     def test_missing_note_from_the_catalog_is_shown(self, catalog):
@@ -647,8 +650,8 @@ class TestFailureCard:
         payload = scan_payload([], catalog=build_catalog(raw, "<test>"))
         card = card_of(render_report(payload), SECTION_FAIL, "TEST-NO-GUIDANCE")
         assert "Catalog gap:" in card
-        assert "raise the gap" in card
-        assert "no phased-rollout" in card
+        assert "report the gap" in card
+        assert "no rollout guidance" in card
 
     def test_missing_remediation_is_a_reported_gap(self, monkeypatch,
                                                   mixed_scan):
@@ -720,7 +723,7 @@ class TestOsDefaultFraming:
 
     def test_section_frames_it_as_an_opportunity(self, mixed_scan):
         section = sections_of(render_report(mixed_scan))[SECTION_OPPORTUNITIES]
-        assert "Hardening opportunities" in section
+        assert "At the Windows default" in section
         assert "Nothing in Group Policy holds it there" in section
         assert "assumed" in section
 
@@ -740,8 +743,8 @@ class TestOsDefaultFraming:
             assert "Nothing in " in preceding, preceding
 
     def test_rollout_state_is_never_enforced(self, card):
-        assert "rollout: audit" in card
-        assert "rollout: enforced" not in card
+        assert "stage: audit" in card
+        assert "stage: enforced" not in card
         assert "badge-state-enforced" not in card
 
     def test_cites_the_document_that_states_the_default(self, card):
@@ -798,14 +801,14 @@ class TestNotJudged:
         assert UNSCORED_CONTROL not in rendered[SECTION_NOT_APPLICABLE]
 
     def test_badge_says_not_judged_and_never_pass(self, card):
-        assert ">NOT JUDGED<" in card
+        assert ">NOT CHECKED &mdash; NOT A PASS<" in card
         assert ">Pass<" not in card
         assert "badge-result-pass" not in card
 
     def test_states_plainly_that_it_is_not_a_pass(self, card):
         assert "this is not a pass" in card
-        assert "No verdict was issued" in card
-        assert "never guesses" in card
+        assert "its state is <strong>unknown</strong>" in card
+        assert "doesn&#x27;t guess" in card or "doesn't guess" in card
 
     def test_shows_the_baseline_gap_reason(self, card, catalog):
         """The catalog's baseline_gap, reaching the report via evidence.notes."""
@@ -815,8 +818,8 @@ class TestNotJudged:
 
     def test_section_lede_forbids_reading_them_as_passes(self, mixed_scan):
         section = sections_of(render_report(mixed_scan))[SECTION_NOT_JUDGED]
-        assert "not evaluated at all" in section
-        assert "They are not passes." in section
+        assert "they were not checked" in section
+        assert "are not passes." in section
 
 
 # --------------------------------------------------------------------------- #
@@ -834,7 +837,7 @@ class TestPasses:
         # Visible without expanding: id, title, rollout state, found value.
         summary = row[:row.index("</summary>")]
         assert LM_CONTROL in summary
-        assert "rollout: enforced" in summary
+        assert "stage: enforced" in summary
         assert "found 5" in summary
         # Retained behind the disclosure: the full evidence.
         assert "Expected (baseline)" in row
@@ -861,7 +864,7 @@ class TestProvenance:
             self, mixed_scan):
         document = render_report(mixed_scan)
         block = document[document.index('id="provenance"'):
-                         document.index('id="summary"')]
+                         document.index('<footer')]
 
         for label in ("Scan engine version", "Catalog version",
                       "Report format version", "Scan timestamp (UTC)",
@@ -876,16 +879,27 @@ class TestProvenance:
 
     def test_standing_precedence_disclaimer_is_in_the_document(self, mixed_scan):
         document = render_report(mixed_scan)
-        assert document.count("Policy precedence (RSoP) is <strong>not "
-                              "resolved</strong>") == 2  # header and footer
+        provenance = document[document.index('id="provenance"'):]
+        assert "doesn't work out which GPO wins" in provenance.replace(
+            "&#x27;", "'")
         assert "gpresult" in document
 
-    def test_counts_reconcile_and_explain_os_default(self, mixed_scan):
-        document = render_report(mixed_scan)
-        summary = document[document.index('id="summary"'):
-                           document.index('<nav class="toc"')]
-        assert "findings rendered" in summary
-        assert "not a number to subtract from passes" in summary
+    def test_each_tile_counts_what_its_section_lists(self, mixed_scan,
+                                                     all_pass_scan):
+        """A tile that disagreed with its section is how "12 passes" sat over
+        a list of 11: an os-default pass is listed under "At the Windows
+        default", not under Passes."""
+        for payload in (mixed_scan, all_pass_scan):
+            document = render_report(payload)
+            summary = document[document.index('id="summary"'):
+                               document.index('<nav class="toc"')]
+            for section_id, findings in group_findings(
+                    payload["findings"]).items():
+                tile = re.search(
+                    rf'href="#{section_id}"><span class="tile-n">(\d+)<',
+                    summary)
+                if tile:
+                    assert int(tile.group(1)) == len(findings), section_id
 
     def test_unknown_control_ids_are_reported_not_dropped(self, catalog):
         payload = scan_payload([], catalog=catalog,
@@ -916,7 +930,7 @@ class TestWriteReport:
         text = target.read_text(encoding="utf-8")
         assert text.startswith("<!DOCTYPE html>")
         assert REPORT_MARKER in text
-        assert "Provenance" in text
+        assert "About this scan" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -1340,7 +1354,7 @@ class TestUnknownVerdictThatIsNotAReadFailure:
         assert "badge-result-unknown" in card
         assert "Unknown" in text
         assert "this is not a pass" in text
-        assert "No verdict was issued for this control." in text
+        assert "can't confirm it either way" in text
         assert "Pass" not in text
 
     def test_the_card_carries_the_reg_query_command_in_the_open(self, document):
@@ -1363,20 +1377,20 @@ class TestUnknownVerdictThatIsNotAReadFailure:
         card = card_of(document, SECTION_UNKNOWN, DIAG_CONTROL)
 
         assert "Remediation" in card
-        assert "Rollout order" in card
+        assert "How to roll it out safely" in card
         assert "NOT GPO-DELIVERED" in card  # the catalog's own caveat
 
     def test_it_is_not_reported_as_a_read_failure(self, document):
         """The distinction acceptance 7 asks for: nothing failed to read."""
-        assert "All GPOs read." in document
+        assert "GPOs were read." in document
         assert '<section class="alert"' not in document
 
     def test_the_section_lede_explains_both_kinds_of_unknown(self, document):
         lede = visible_text(sections_of(document)[SECTION_UNKNOWN])
 
-        assert "could not read what it needed" in lede
-        assert "leaves no trace in Group Policy" in lede
-        assert "unknown, not clean, and not passes" in lede
+        assert "a GPO couldn't be read" in lede
+        assert "Group Policy can't show it" in lede
+        assert "unconfirmed, not as passes" in lede
 
     def test_the_headline_tile_counts_it_as_unknown(self, document):
         summary = document[document.index('id="summary"'):
@@ -1389,8 +1403,8 @@ class TestUnknownVerdictThatIsNotAReadFailure:
     def test_the_tile_breakdown_separates_unread_from_unseeable(self, document):
         text = re.sub(r"\s+", " ", visible_text(document))
 
-        assert ("Of the 1 unknown, 0 could not be read by this scan and 1 name "
-                "a setting Group Policy does not deliver") in text
+        assert ("Of the 1 unknown, 0 couldn't be read and 1 can't be seen in "
+                "Group Policy at all") in html.unescape(text)
 
     def test_the_table_of_contents_counts_it(self, document):
         toc = document[document.index('<nav class="toc"'):
