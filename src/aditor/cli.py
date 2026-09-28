@@ -61,6 +61,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
             return EXIT_ERROR
         ad.password = getpass.getpass(f"Password for {ad.bind_dn}: ")
 
+    for url in ad.cleartext_servers:
+        print(f"WARNING: {url} is plain LDAP. The bind password is sent to it "
+              f"in clear text; anyone on the network path can read it. Use "
+              f"ldaps://<host>:636 instead.", file=sys.stderr)
     print(f"Scanning {ad.domain} via {ad.server} (read-only)...", file=sys.stderr)
     try:
         manager = LDAPManager(ad, config.security, config.performance)

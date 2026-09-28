@@ -364,6 +364,11 @@ def run_connection_test(settings: ConnectionSettings, password: str,
                                     error=error, fix=fix)
 
     warnings: List[str] = []
+    if str(settings.server or "").strip().lower().startswith("ldap://"):
+        warnings.append(
+            "This connection uses plain LDAP (ldap://), so the bind password is "
+            "sent in clear text and anyone on the network path can read it. "
+            "Use ldaps://<host>:636 instead.")
     if not settings.validate_certificate:
         warnings.append(
             "Certificate validation is switched off for this connection. The "

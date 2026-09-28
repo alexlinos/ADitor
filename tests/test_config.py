@@ -96,3 +96,17 @@ def test_default_values(tmp_path):
     assert config.security.validate_certificate is True
     assert config.performance.max_retries == 3
     assert config.active_directory.timeout == 30
+
+
+def test_the_password_is_not_in_the_config_repr(tmp_path):
+    config = load_config(write(tmp_path, {"active_directory": AD}))
+    assert "password123" not in repr(config)
+    assert "password123" not in repr(config.active_directory)
+
+
+def test_plain_ldap_servers_are_named_for_a_warning(tmp_path):
+    config = load_config(write(tmp_path, {"active_directory": dict(
+        AD, server="ldap://dc1:389",
+        server_pool=["ldaps://dc2:636", "LDAP://dc3"])}))
+    assert config.active_directory.cleartext_servers == ["ldap://dc1:389",
+                                                         "LDAP://dc3"]

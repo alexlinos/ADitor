@@ -14,14 +14,17 @@ from aditor.hardening.scanfile import write_scan
 from tests.test_hardening_diff import SIGNING_CONTROL, finding, later, scan
 
 
-def _config(password="secret"):
+def _config(password="secret", cleartext=()):
     ad = SimpleNamespace(password=password, bind_dn="CN=svc,DC=test,DC=local",
-                         domain="test.local", server="ldaps://dc.test.local")
+                         domain="test.local", server="ldaps://dc.test.local",
+                         cleartext_servers=list(cleartext))
     return SimpleNamespace(active_directory=ad, security=None, performance=None)
 
 
-def _run_scan(tmp_path, payload=None, error=None, password="secret", tty=True):
-    with patch("aditor.config.loader.load_config", return_value=_config(password)), \
+def _run_scan(tmp_path, payload=None, error=None, password="secret", tty=True,
+              cleartext=()):
+    with patch("aditor.config.loader.load_config",
+               return_value=_config(password, cleartext)), \
          patch("aditor.core.ldap_manager.LDAPManager"), \
          patch("aditor.hardening.collect.Scanner.scan",
                return_value=payload, side_effect=error), \
@@ -63,3 +66,12 @@ def test_diff_exits_one_on_a_regression_and_zero_otherwise(tmp_path):
     assert main(["diff", str(old), str(same)]) == EXIT_OK
     assert main(["diff", str(old), str(bad)]) == EXIT_ATTENTION
     assert main(["diff", str(old), str(tmp_path / "missing.json")]) == EXIT_ERROR
+
+
+def test_a_plain_ldap_server_is_warned_about(tmp_path, capsys):
+    """Plain ldap:// is allowed, but the password crosses the wire in clear."""
+    _run_scan(tmp_path, scan([finding(SIGNING_CONTROL)]),
+              cleartext=["ldap://dc.test.local:389"])
+    err = capsys.readouterr().err
+    assert "ldap://dc.test.local:389 is plain LDAP" in err
+    assert "clear text" in err

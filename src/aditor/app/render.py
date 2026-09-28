@@ -426,11 +426,13 @@ def _download_issuer_prompt(report: Any) -> str:
     """
     return _banner(
         "info", "ADitor can fetch the issuing CA certificate for you.",
-        "<p>The controller did not send it, but Active Directory publishes it, "
-        "and the certificate the controller <em>did</em> send names the "
-        "directory object it lives in. ADitor will read it and save it as a "
-        "<code>.crt</code> file here — that is all: it does not add it to any "
-        "trust store, and the commands below stay yours to run.</p>"
+        "<p>The controller did not send it. ADitor will look for it in this "
+        "computer&rsquo;s own certificate stores (a domain-joined Windows PC "
+        "usually has it already) and at the web address the controller&rsquo;s "
+        "certificate names, if it names one, and save it as a <code>.crt</code> "
+        "file here — that is all: it does not add it to any trust store, and "
+        "the commands below stay yours to run. <strong>It sends no password or "
+        "other credential to do this.</strong></p>"
         "<p><strong>What makes the file the right one.</strong> More than one "
         "CA certificate is normally published, including retired ones, and "
         "installing the wrong one leaves the same error behind while looking "
@@ -438,11 +440,9 @@ def _download_issuer_prompt(report: Any) -> str:
         "only if that certificate&rsquo;s key <em>signed the one the "
         "controller presented</em>. Anything else is discarded and counted "
         "below.</p>"
-        "<p class=\"muted\">The read is made with certificate validation off, "
-        "because the certificate needed to validate it is the one being "
-        "fetched. That is why the signature check exists, and why the "
-        "fingerprint still has to be confirmed out of band before you install "
-        "anything.</p>"
+        "<p class=\"muted\">Where a certificate came from proves nothing on its "
+        "own, which is why the signature check exists, and why the fingerprint "
+        "still has to be confirmed out of band before you install anything.</p>"
         f'<div class="actions actions-left">'
         f'<button type="button" class="primary" data-download-issuer="1">'
         f"{esc(DOWNLOAD_ISSUER_LABEL)}</button></div>")
@@ -470,7 +470,7 @@ def _issuer_panel(fetch: Any) -> str:
             "<th>SHA-256 fingerprint</th><th>Why</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>")
     if getattr(fetch, "error", ""):
-        body.append('<p class="label">What the directory said</p>'
+        body.append('<p class="label">What went wrong</p>'
                     + _code_block(fetch.error))
     if getattr(fetch, "unchecked", 0):
         body.append(
@@ -480,10 +480,9 @@ def _issuer_panel(fetch: Any) -> str:
     if outcome == "found":
         body.append(
             '<p class="fix">This proves the two certificates belong together. '
-            "It does not prove either is legitimate — the connection it came "
-            "over was not authenticated. Confirm the fingerprint above with "
-            "whoever runs the certification authority before you install "
-            "it.</p>")
+            "It does not prove either is legitimate. Confirm the fingerprint "
+            "above with whoever runs the certification authority before you "
+            "install it.</p>")
     return _banner(kind, fetch.headline, "".join(body))
 
 
