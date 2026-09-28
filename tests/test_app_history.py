@@ -321,11 +321,11 @@ class TestAmbiguousAttribution:
 
     def test_it_renders_as_a_warning_not_a_count(self, diff):
         html = render_diff(diff)
-        assert "Attribution: ambiguous" in html
+        assert "Different ADitor versions" in html
         assert "banner-bad" in html
         # The banner comes before the numbers, because every number below it
         # depends on it.
-        assert html.index("Attribution: ambiguous") < html.index("Improvements")
+        assert html.index("Different ADitor versions") < html.index("Improvements")
 
     def test_it_repeats_why_rather_than_only_labelling_it(self, diff):
         html = render_diff(diff)
@@ -333,7 +333,7 @@ class TestAmbiguousAttribution:
         # the operator nothing they can act on.
         assert "engine_version 1.2.0" in html
         assert "1.3.0" in html
-        assert "may be the scanner or the control catalog" in html
+        assert "may come from the tool rather than" in html
 
     def test_the_counts_carry_the_qualifier(self, diff):
         html = render_diff(diff)
@@ -350,7 +350,7 @@ class TestAmbiguousAttribution:
         diff = diff_snapshots(archive, "2026-08-18T101500Z-aaaaaaaa",
                               "2026-08-19T101500Z-bbbbbbbb")
         html = render_diff(diff)
-        assert "Attribution: the domain" in html
+        assert "Same ADitor version" in html
         assert "banner-ok" in html
         assert "not attributable to the domain" not in html
 
@@ -366,7 +366,7 @@ class TestAmbiguousAttribution:
                       unreadable=1))
         html = render_diff(diff_snapshots(root, "2026-08-18T101500Z-aaaaaaaa",
                                           "2026-08-19T101500Z-bbbbbbbb"))
-        assert "Caveats" in html
+        assert "Read these anyway" in html
         assert "could not be read" in html
 
     def test_a_catalog_version_change_is_also_ambiguous(self, tmp_path):
@@ -382,7 +382,7 @@ class TestAmbiguousAttribution:
                       rollout_state="enforced"))
         html = render_diff(diff_snapshots(root, "2026-08-18T101500Z-aaaaaaaa",
                                           "2026-08-19T101500Z-bbbbbbbb"))
-        assert "Attribution: ambiguous" in html
+        assert "Different ADitor versions" in html
         assert "catalog_version 1.0.0" in html
 
 

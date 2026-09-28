@@ -1630,7 +1630,7 @@ def _as_int(value: Any) -> int:
         return 0
 
 
-def _friendly_time(timestamp: Any) -> str:
+def friendly_time(timestamp: Any) -> str:
     """``2026-08-24T18:40:04.123+00:00`` as ``2026-08-24 18:40 UTC``.
 
     Falls back to the raw value, so an unexpected timestamp is still shown.
@@ -1646,7 +1646,7 @@ def _friendly_time(timestamp: Any) -> str:
 
 def _subtitle(scan: Dict[str, Any], counts: Dict[str, Any]) -> str:
     domain = _esc(scan.get("domain"), "unknown domain")
-    timestamp = (_esc(_friendly_time(scan.get("timestamp")))
+    timestamp = (_esc(friendly_time(scan.get("timestamp")))
                  if scan.get("timestamp") else "unknown time")
     return (f"{domain} &middot; scanned {timestamp} &middot; "
             f"catalog {_esc(scan.get('catalog_version'))} &middot; "
