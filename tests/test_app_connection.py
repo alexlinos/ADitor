@@ -276,6 +276,15 @@ class TestSuccess:
         assert result.ok is True
         assert any("intercepted" in warning for warning in result.warnings)
 
+    def test_plain_ldap_is_warned_about_on_success(self):
+        manager = StubManager({"connected": True, "server": "dc01",
+                               "port": 389, "ssl": False, "bound": True,
+                               "search_test": True, "user": "svc"})
+        result = run_connection_test(a_connection(server="ldap://dc01:389"),
+                                     PASSWORD, factory_for(manager))
+        assert result.ok is True
+        assert any("clear text" in warning for warning in result.warnings)
+
 
 # --------------------------------------------------------------------------- #
 # Incomplete input

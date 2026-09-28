@@ -1,6 +1,6 @@
 """Configuration models for ADitor."""
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Type, TypeVar
 
 T = TypeVar("T")
@@ -27,7 +27,8 @@ class ActiveDirectoryConfig:
     domain: str
     base_dn: str
     bind_dn: str
-    password: str
+    # Kept out of repr(), so logging or printing a config never shows it.
+    password: str = field(repr=False)
     server_pool: Optional[List[str]] = None
     timeout: int = 30
     auto_bind: bool = True
@@ -36,6 +37,16 @@ class ActiveDirectoryConfig:
     def __post_init__(self) -> None:
         if not self.server.startswith(("ldap://", "ldaps://")):
             raise ValueError("Server must start with ldap:// or ldaps://")
+
+    @property
+    def cleartext_servers(self) -> List[str]:
+        """The configured servers reached over plain ``ldap://``.
+
+        ADitor binds with a simple bind and never issues STARTTLS, so the bind
+        password crosses the network in clear text to every one of these.
+        """
+        return [url for url in [self.server] + list(self.server_pool or [])
+                if str(url).lower().startswith("ldap://")]
 
 
 @dataclass

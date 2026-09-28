@@ -1,10 +1,13 @@
-"""The download-the-issuing-CA button, and the one check that makes it safe.
+"""The download-the-issuing-CA button, and the checks that make it safe.
 
-The button reads a certificate over a connection whose own certificate is *not*
-validated — unavoidably, because the certificate that would validate it is the
-one being fetched. So the security argument does not rest on the transport. It
-rests on :func:`aditor.app.issuer.signed_the_leaf`: a candidate is offered only
-if its key signed the certificate the controller presented.
+The button sends **no credential**: it looks in this computer's Windows
+certificate stores and at the certificate's own http(s) AIA address, never in
+the directory. (An earlier version bound to the directory with the operator's
+password over an unvalidated TLS session; the tests in ``TestItSendsNoCredential``
+pin that it cannot again.) Where a candidate came from proves nothing, so the
+security argument rests on :func:`aditor.app.issuer.signed_the_leaf`: a
+candidate is offered only if its key signed the certificate the controller
+presented.
 
 That makes the discrimination test below the most important one in this file. It
 is not hypothetical. On the domain this was built against, the AIA container
@@ -18,20 +21,21 @@ import datetime
 
 from aditor.app.certificates import CA_CERTIFICATE_ATTRIBUTE, certificate_facts
 from aditor.app.issuer import (
-    AIA_CONTAINER_RDN,
     FETCH_FOUND,
     FETCH_NO_MATCH,
     FETCH_UNAVAILABLE,
-    aia_dns_from_certificate,
+    MAX_AIA_BYTES,
+    certificates_in,
+    download_aia,
     fetch_issuing_ca,
-    search_targets,
+    http_aia_urls,
     signed_the_leaf,
+    windows_store_certificates,
 )
 from aditor.app.settings import ConnectionSettings
 from aditor.app.trust import PATH_PLACEHOLDER, detect_machine, install_commands
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import rsa
-from ldap3.core.exceptions import LDAPBindError, LDAPException, LDAPSocketOpenError
 
 from .synthetic_certificates import chain, der, issue, new_key
 
@@ -91,6 +95,11 @@ def leaf_facts(certificate=None):
 
 def with_aia(url, *, cn="dc01.test.local"):
     """A leaf certificate carrying one ``caIssuers`` AIA URL."""
+    return leaf_and_issuer(url, cn=cn)[0]
+
+
+def leaf_and_issuer(url, *, cn="dc01.test.local"):
+    """``(leaf, issuer)``: a leaf with one AIA URL, and the CA that signed it."""
     key = new_key()
     root, root_key = issue("aia-test-CA",
                            not_before=datetime.datetime.now(datetime.timezone.utc)
@@ -115,7 +124,36 @@ def with_aia(url, *, cn="dc01.test.local"):
                        x509.UniformResourceIdentifier(url))]),
                    critical=False))
     from cryptography.hazmat.primitives import hashes
-    return builder.sign(root_key, hashes.SHA256())
+    return builder.sign(root_key, hashes.SHA256()), root
+
+
+def store(*certificates, name="ROOT"):
+    """A Windows-store reader holding ``certificates``."""
+    return lambda: [(f"This computer's Windows certificate store ({name})",
+                     der(c)) for c in certificates]
+
+
+def empty_store():
+    return []
+
+
+def downloads(mapping):
+    """A downloader serving ``{url: bytes or Exception}``; records calls."""
+    calls = []
+
+    def download(url):
+        calls.append(url)
+        value = mapping.get(url, OSError(f"no such address: {url}"))
+        if isinstance(value, Exception):
+            raise value
+        return value
+    download.calls = calls
+    return download
+
+
+def fetch(store_reader=empty_store, downloader=None, leaf=None):
+    return fetch_issuing_ca(leaf or leaf_facts(), store_reader=store_reader,
+                            downloader=downloader or downloads({}))
 
 
 # --------------------------------------------------------------------------- #
@@ -159,42 +197,21 @@ class TestSignedTheLeaf:
 # Where it looks — and where it refuses to
 # --------------------------------------------------------------------------- #
 
-class TestSearchTargets:
-    def test_an_ldap_aia_url_contributes_its_dn(self):
-        dn = f"CN=test-CA,{AIA_CONTAINER_RDN},{CONFIG_DN}"
-        certificate = with_aia(
-            f"ldap:///{dn.replace(' ', '%20')}?cACertificate?base")
-        assert aia_dns_from_certificate(certificate) == (dn,)
-        assert search_targets(certificate, BASE_DN)[0] == dn
+class TestHttpAiaUrls:
+    def test_an_http_aia_url_is_returned(self):
+        assert http_aia_urls(with_aia("http://pki.example/ca.crt")) == (
+            "http://pki.example/ca.crt",)
 
-    def test_a_dn_outside_the_configuration_context_is_refused(self):
-        """The URL is chosen by whoever holds the certificate, and at this point
-        that is exactly who is in question."""
-        certificate = with_aia(
-            "ldap:///CN=Evil,DC=attacker,DC=example?cACertificate?base")
-        targets = search_targets(certificate, BASE_DN)
-        assert not any("attacker" in dn for dn in targets)
-        # ...and the well-known containers are still searched, so refusing the
-        # hostile DN does not cost the operator the answer.
-        assert any(AIA_CONTAINER_RDN.lower() in dn.lower() for dn in targets)
+    def test_an_ldap_aia_url_is_not_followed(self):
+        """Reading one means binding, which the fetch never does."""
+        dn = "CN=test-CA,CN=AIA,CN=Public Key Services,CN=Services," + CONFIG_DN
+        assert http_aia_urls(with_aia(
+            f"ldap:///{dn.replace(' ', '%20')}?cACertificate?base")) == ()
+        assert http_aia_urls(with_aia(
+            f"ldap://elsewhere.example:389/{dn}?cACertificate")) == ()
 
-    def test_an_aia_url_naming_a_host_is_refused(self):
-        """A host would mean binding this app's credentials somewhere the
-        certificate chose."""
-        certificate = with_aia(
-            f"ldap://elsewhere.example:389/CN=x,{CONFIG_DN}?cACertificate")
-        assert aia_dns_from_certificate(certificate) == ()
-
-    def test_an_http_aia_url_is_not_followed(self):
-        certificate = with_aia("http://pki.example/ca.crt")
-        assert aia_dns_from_certificate(certificate) == ()
-
-    def test_a_certificate_with_no_aia_still_has_targets(self):
-        targets = search_targets(chain().leaf, BASE_DN)
-        assert any(AIA_CONTAINER_RDN.lower() in dn.lower() for dn in targets)
-
-    def test_no_base_dn_means_nowhere_to_look(self):
-        assert search_targets(chain().leaf, "") == ()
+    def test_a_certificate_with_no_aia_has_no_urls(self):
+        assert http_aia_urls(chain().leaf) == ()
 
 
 # --------------------------------------------------------------------------- #
@@ -205,7 +222,7 @@ class TestFetchIssuingCa:
     def test_it_picks_the_one_certificate_that_signed_the_leaf(self):
         """Four candidates, one right answer, and the right one is not first.
 
-        This is the live case reproduced: a container holding the real issuer
+        This is the live case reproduced: a store holding the real issuer
         alongside a root, an unrelated CA and a decoy. Taking the first, or the
         one whose subject matches the leaf's issuer name, gets it wrong.
         """
@@ -214,123 +231,150 @@ class TestFetchIssuingCa:
                          not_before=now - datetime.timedelta(days=100),
                          not_after=now + datetime.timedelta(days=100),
                          is_ca=True)
-        directory = FakeDirectory({
-            f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [
-                chain().root, chain().rogue_root, decoy, chain().issuing]})
-        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                                  factory=factory(directory))
+        result = fetch(store(chain().root, chain().rogue_root, decoy,
+                             chain().issuing))
 
         assert result.outcome == FETCH_FOUND
         assert result.ok is True
         expected = certificate_facts(der(chain().issuing)).fingerprint_hex
         assert result.match.fingerprint_hex == expected
         assert result.rejected == 3, "the three decoys must be counted, not hidden"
-        assert len(result.candidates) == 4
+        assert "Windows certificate store" in result.detail
 
     def test_the_decoy_with_the_issuers_name_is_still_rejected(self):
-        """Named identically to the real issuer, so only the signature separates
-        them. Offered alone, it must not be accepted."""
         now = datetime.datetime.now(datetime.timezone.utc)
         decoy, _ = issue("test-CA-Issuing",
                          not_before=now - datetime.timedelta(days=100),
                          not_after=now + datetime.timedelta(days=100),
                          is_ca=True)
-        directory = FakeDirectory({f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [decoy]})
-        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                                  factory=factory(directory))
+        result = fetch(store(decoy))
+        assert result.ok is False and result.match is None
 
-        assert result.outcome == FETCH_NO_MATCH
-        assert result.ok is False
-        assert result.match is None
+    def test_an_unrelated_store_is_unavailable_with_manual_steps(self):
+        """A store full of other roots is normal, not a warning."""
+        result = fetch(store(chain().rogue_root))
+        assert result.outcome == FETCH_UNAVAILABLE
+        assert "certlm.msc" in result.detail
+        assert "doesn't read it from Active Directory" in result.detail
 
-    def test_no_match_says_it_could_also_be_an_interception(self):
-        directory = FakeDirectory(
-            {f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [chain().rogue_root]})
-        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                                  factory=factory(directory))
+    def test_the_aia_address_is_downloaded_when_the_store_lacks_it(self):
+        leaf, issuer = leaf_and_issuer("http://pki.example/ca.crt")
+        download = downloads({"http://pki.example/ca.crt": der(issuer)})
+        result = fetch(downloader=download,
+                       leaf=certificate_facts(der(leaf)))
+        assert result.outcome == FETCH_FOUND
+        assert result.match.source == "aia-download"
+        assert download.calls == ["http://pki.example/ca.crt"]
+
+    def test_a_downloaded_certificate_that_did_not_sign_it_is_a_no_match(self):
+        leaf, _issuer = leaf_and_issuer("http://pki.example/ca.crt")
+        result = fetch(downloader=downloads(
+            {"http://pki.example/ca.crt": der(chain().rogue_root)}),
+            leaf=certificate_facts(der(leaf)))
         assert result.outcome == FETCH_NO_MATCH
         assert "interception" in result.detail
 
-    def test_an_empty_directory_is_unavailable_not_a_denial(self):
-        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                                  factory=factory(FakeDirectory({})))
+    def test_a_failed_download_is_unavailable_and_says_why(self):
+        leaf, _issuer = leaf_and_issuer("http://pki.example/ca.crt")
+        result = fetch(leaf=certificate_facts(der(leaf)))
         assert result.outcome == FETCH_UNAVAILABLE
-        assert result.match is None
+        assert "pki.example" in result.error
 
-    def test_it_stops_searching_once_the_proof_is_in(self):
-        directory = FakeDirectory({
-            f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [chain().issuing]})
-        fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                         factory=factory(directory))
-        assert len(directory.searched) == 1
+    def test_it_stops_once_the_store_proves_it(self):
+        leaf, issuer = leaf_and_issuer("http://pki.example/ca.crt")
+        download = downloads({})
+        fetch(store(issuer), download, leaf=certificate_facts(der(leaf)))
+        assert download.calls == []
 
-    def test_a_dead_connection_stops_the_search(self):
-        """Same reasoning as the published-roots read: after a TLS failure
-        ldap3's Server reports a downstream symptom, not the cause."""
-        directory = FakeDirectory(
-            error=LDAPSocketOpenError("socket ssl wrapping error: [SSL: "
-                                      "CERTIFICATE_VERIFY_FAILED]"))
-        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                                  factory=factory(directory))
-        assert len(directory.searched) == 1
+    def test_a_store_that_cannot_be_read_is_reported_not_raised(self):
+        def broken():
+            raise PermissionError("access denied")
+        result = fetch(broken)
         assert result.outcome == FETCH_UNAVAILABLE
-        assert "invalid server address" not in result.error.lower()
-
-    def test_a_bind_failure_stops_the_search(self):
-        directory = FakeDirectory(error=LDAPBindError("invalidCredentials"))
-        fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                         factory=factory(directory))
-        assert len(directory.searched) == 1
-
-    def test_a_per_container_permission_error_tries_the_others(self):
-        directory = FakeDirectory(error=LDAPException("insufficientAccessRights"))
-        fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                         factory=factory(directory))
-        assert len(directory.searched) > 1
-
-    def test_it_always_disconnects(self):
-        directory = FakeDirectory(error=LDAPException("boom"))
-        fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                         factory=factory(directory))
-        assert directory.disconnected is True
-
-    def test_a_missing_base_dn_is_reported_not_guessed(self):
-        result = fetch_issuing_ca(settings(base_dn=""), "pw", leaf_facts(),
-                                  factory=factory(FakeDirectory()))
-        assert result.outcome == FETCH_UNAVAILABLE
-        assert "Base DN" in result.headline or "Base DN" in result.detail
+        assert "access denied" in result.error
 
 
-class TestItDoesNotWeakenTheOperatorsSettings:
-    """Validation is turned off on a copy, for one call, and reported."""
+class TestDownloadsAndStores:
+    def test_der_pem_and_pkcs7_are_all_read(self):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.serialization import pkcs7
+        issuing = chain().issuing
+        pem = issuing.public_bytes(serialization.Encoding.PEM)
+        bundle = pkcs7.serialize_certificates([issuing],
+                                              serialization.Encoding.DER)
+        for data in (der(issuing), pem, bundle):
+            assert certificates_in(data) == [der(issuing)]
+        assert certificates_in(b"not a certificate") == []
 
-    def test_the_settings_object_is_unchanged(self):
-        original = settings(validate_certificate=True)
-        directory = FakeDirectory({
-            f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [chain().issuing]})
-        fetch_issuing_ca(original, "pw", leaf_facts(),
-                         factory=factory(directory))
-        assert original.validate_certificate is True
+    def test_only_http_addresses_are_downloaded(self):
+        import pytest
+        for url in ("file:///etc/passwd", "ldap:///CN=x", "ftp://x/ca.crt"):
+            with pytest.raises(ValueError):
+                download_aia(url)
 
-    def test_the_connection_actually_used_had_validation_off(self):
-        """Otherwise the fetch would fail for the very reason it exists."""
-        directory = FakeDirectory({
-            f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [chain().issuing]})
-        fetch_issuing_ca(settings(validate_certificate=True), "pw",
-                         leaf_facts(), factory=factory(directory))
-        security = directory.security_config
-        validate = getattr(security, "validate_certificate", None)
-        assert validate is False, security
+    def test_a_download_is_capped_in_size(self, monkeypatch):
+        import io
 
-    def test_the_result_says_the_transport_was_not_validated(self):
-        directory = FakeDirectory({
-            f"{AIA_CONTAINER_RDN},{CONFIG_DN}": [chain().issuing]})
-        result = fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                                  factory=factory(directory))
+        import pytest
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+        monkeypatch.setattr("urllib.request.urlopen",
+                            lambda request, timeout: Response(
+                                b"x" * (MAX_AIA_BYTES + 10)))
+        with pytest.raises(ValueError, match="more than"):
+            download_aia("http://pki.example/huge.crt")
+
+    def test_the_windows_stores_are_read_only_on_windows(self, monkeypatch):
+        import ssl
+        monkeypatch.setattr("sys.platform", "darwin")
+        assert windows_store_certificates() == []
+        monkeypatch.setattr("sys.platform", "win32")
+        monkeypatch.setattr(ssl, "enum_certificates", lambda name: [
+            (der(chain().issuing), "x509_asn", True),
+            (b"pkcs7", "pkcs_7_asn", True)], raising=False)
+        found = windows_store_certificates()
+        assert [where for where, _der in found] == [
+            "This computer's Windows certificate store (CA)",
+            "This computer's Windows certificate store (ROOT)"]
+
+
+class TestItSendsNoCredential:
+    """The HIGH finding: the fetch used to bind with the operator's password
+    over a session whose certificate was deliberately not validated."""
+
+    def test_the_fetch_takes_no_password_or_settings(self):
+        import inspect
+        parameters = set(inspect.signature(fetch_issuing_ca).parameters)
+        assert not parameters & {"password", "settings", "factory"}
+
+    def test_the_download_button_never_touches_the_directory(self, tmp_path):
+        from aditor.app.api import AditorApi
+
+        from .test_app_certificate_panel import a_report
+        from .test_app_password_never_leaks import MemoryStore
+
+        def no_directory(*_args, **_kwargs):
+            raise AssertionError("the issuer fetch must not build an LDAP "
+                                 "connection")
+        api = AditorApi(directory=tmp_path, store=MemoryStore(),
+                        ldap_factory=no_directory)
+        api._trust_report = a_report(presented=[der(chain().leaf)])
+        api._password = "hunter2"
+        result = api.download_issuing_ca()
+        # Found or not, it answered (an outcome, not an exception) without
+        # building a directory connection.
+        assert result.get("outcome") in (FETCH_FOUND, FETCH_NO_MATCH,
+                                         FETCH_UNAVAILABLE)
+
+    def test_the_result_says_no_credential_was_sent(self):
+        result = fetch(store(chain().issuing))
         assert result.ok is True
-        assert result.validated_transport is False
-        # and the wording does not let that pass as corroboration
-        assert "not validated" in result.detail
+        assert "No password or other credential was sent" in result.detail
         assert "out of band" in result.detail
 
 
@@ -410,9 +454,9 @@ class TestTheButtonAppearsWhereItIsNeeded:
         # ...and no longer just tells the operator to go and get it themselves
         assert "Get the CA certificate from the CA server itself" not in panel
 
-    def test_the_offer_states_the_read_is_unvalidated(self):
+    def test_the_offer_says_no_credential_is_sent(self):
         panel = self._panel(presented=[der(chain().leaf)])
-        assert "validation off" in panel
+        assert "sends no password or other credential" in panel
         assert "confirmed out of band" in panel
 
     def test_the_offer_explains_why_the_right_file_is_the_right_one(self):
@@ -435,10 +479,13 @@ class TestTheResultPanel:
             a_report(presented=[der(chain().leaf)]), fetch=fetch)
 
     def _fetch(self, published):
-        directory = FakeDirectory(
-            {f"{AIA_CONTAINER_RDN},{CONFIG_DN}": published})
-        return fetch_issuing_ca(settings(), "pw", leaf_facts(),
-                                factory=factory(directory))
+        return fetch(store(*published))
+
+    def _no_match(self):
+        leaf, _issuer = leaf_and_issuer("http://pki.example/ca.crt")
+        return fetch(downloader=downloads(
+            {"http://pki.example/ca.crt": der(chain().rogue_root)}),
+            leaf=certificate_facts(der(leaf)))
 
     def test_every_rejected_candidate_is_shown_not_hidden(self):
         """An operator who is told "here is the CA" deserves to see that three
@@ -452,14 +499,13 @@ class TestTheResultPanel:
     def test_a_found_result_still_demands_out_of_band_confirmation(self):
         html = self._render(self._fetch([chain().issuing]))
         assert "Confirm the fingerprint" in html
-        assert "was not authenticated" in html
         assert "does not prove either is legitimate" in html
 
     def test_no_match_is_rendered_as_bad_not_as_a_shrug(self):
-        html = self._render(self._fetch([chain().rogue_root]))
-        assert "None of the published CA certificates signed this one." in html
+        html = self._render(self._no_match())
+        assert "None of the CA certificates found signed this one." in html
         # The banner carrying that headline must be the bad one, not a warning.
-        headline = "None of the published CA certificates signed this one."
+        headline = "None of the CA certificates found signed this one."
         before = html[:html.index(headline)]
         assert before.rfind("banner-bad") > before.rfind("banner-warn"), (
             "a controller whose certificate no published CA signed is not a "
@@ -534,21 +580,9 @@ class TestOneClickIsOneFailedLogon:
         assert is_terminal_connection_error(Raw(
             "socket connection error while opening: serial 49493849")) is False
 
-    def test_the_issuer_fetch_binds_once_not_once_per_container(self):
-        """The whole point. Five containers, one rejected credential, one bind."""
-        from ldap3.core.exceptions import LDAPException as Raw
-
-        directory = FakeDirectory(error=Raw(self.WRAPPED))
-        result = fetch_issuing_ca(settings(), "wrong-password", leaf_facts(),
-                                  factory=factory(directory))
-
-        assert len(directory.searched) == 1, (
-            f"{len(directory.searched)} failed logons from one button press; "
-            f"a domain with lockoutThreshold=5 locks the bind account")
-        assert result.outcome == FETCH_UNAVAILABLE
-
-    def test_the_published_roots_read_binds_once_too(self):
-        """Same wrapper, same hazard, three containers instead of five."""
+    def test_the_published_roots_read_binds_once(self):
+        """Three containers, one rejected credential, one bind. (The issuer
+        fetch no longer binds at all.)"""
         from aditor.app.certificates import ca_certificates_from_directory
         from ldap3.core.exceptions import LDAPException as Raw
 
