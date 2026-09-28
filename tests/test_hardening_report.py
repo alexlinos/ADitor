@@ -33,6 +33,7 @@ import pytest
 from aditor.hardening.catalog import build_catalog, load_catalog
 from aditor.hardening.evaluator import GpoLink, GpoSnapshot, evaluate_controls
 from aditor.hardening.report import (
+    GROUPS,
     REPORT_FORMAT_VERSION,
     REPORT_MARKER,
     SECTION_CONFLICTS,
@@ -43,6 +44,7 @@ from aditor.hardening.report import (
     SECTION_PASSES,
     SECTION_UNKNOWN,
     SECTIONS,
+    START_HERE_LIMIT,
     _delivered_by_preference,
     group_findings,
     headline_counts,
@@ -445,9 +447,10 @@ class TestEscaping:
 
 class TestOrdering:
 
-    EXPECTED_ORDER = [SECTION_UNKNOWN, SECTION_FAIL, SECTION_CONFLICTS,
-                      SECTION_OPPORTUNITIES, SECTION_NOT_JUDGED,
-                      SECTION_PASSES, SECTION_NOT_APPLICABLE]
+    # Group order: Fix, Check by hand, Not covered yet, Good.
+    EXPECTED_ORDER = [SECTION_FAIL, SECTION_OPPORTUNITIES, SECTION_UNKNOWN,
+                      SECTION_CONFLICTS, SECTION_NOT_JUDGED,
+                      SECTION_NOT_APPLICABLE, SECTION_PASSES]
 
     def test_sections_appear_in_actionability_order(self, mixed_scan):
         document = render_report(mixed_scan)
@@ -884,22 +887,27 @@ class TestProvenance:
             "&#x27;", "'")
         assert "gpresult" in document
 
-    def test_each_tile_counts_what_its_section_lists(self, mixed_scan,
-                                                     all_pass_scan):
+    def test_each_tile_counts_what_its_group_lists(self, mixed_scan,
+                                                   all_pass_scan):
         """A tile that disagreed with its section is how "12 passes" sat over
         a list of 11: an os-default pass is listed under "At the Windows
-        default", not under Passes."""
+        default", not under Passes. Every tile, and every per-section number
+        under it, counts what the document lists."""
         for payload in (mixed_scan, all_pass_scan):
             document = render_report(payload)
             summary = document[document.index('id="summary"'):
-                               document.index('<nav class="toc"')]
-            for section_id, findings in group_findings(
-                    payload["findings"]).items():
-                tile = re.search(
-                    rf'href="#{section_id}"><span class="tile-n">(\d+)<',
-                    summary)
-                if tile:
-                    assert int(tile.group(1)) == len(findings), section_id
+                               document.index('id="start-here"')]
+            grouped = group_findings(payload["findings"])
+            for group_id, _h, _i, sections in GROUPS:
+                distinct = {id(f) for s in sections for f in grouped[s]}
+                tile = re.search(rf'href="#group-{group_id}"><span '
+                                 rf'class="tile-n">(\d+)<', summary)
+                assert tile, group_id
+                assert int(tile.group(1)) == len(distinct), group_id
+                cell = summary[tile.start():summary.index("</li>", tile.start())]
+                for section_id in sections:
+                    assert f">{len(grouped[section_id])} " in cell.replace(
+                        "&middot; ", ">"), section_id
 
     def test_unknown_control_ids_are_reported_not_dropped(self, catalog):
         payload = scan_payload([], catalog=catalog,
@@ -1397,8 +1405,9 @@ class TestUnknownVerdictThatIsNotAReadFailure:
                            document.index('<nav class="toc"')]
         text = visible_text(summary)
 
-        assert re.search(r"1\s+Unknown", text), text
-        assert "0 Passes" in re.sub(r"\s+", " ", text)
+        flat = re.sub(r"\s+", " ", html.unescape(text))
+        assert "1 Check by hand 1 unknown" in flat, flat
+        assert "0 Good 0 passes" in flat, flat
 
     def test_the_tile_breakdown_separates_unread_from_unseeable(self, document):
         text = re.sub(r"\s+", " ", visible_text(document))
@@ -1591,3 +1600,105 @@ class TestKeyScopedDeleteIsVisibleInTheReport:
         row = pass_row_of(document, KDC_CONTROL)
 
         assert "Kdc" in row
+
+
+# --------------------------------------------------------------------------- #
+# Start here, and the four reader groups
+# --------------------------------------------------------------------------- #
+
+def start_here_of(document):
+    return document[document.index('id="start-here"'):
+                    document.index('<nav class="toc"')]
+
+
+class TestStartHere:
+
+    def test_it_sits_between_the_results_and_the_contents(self, mixed_scan):
+        document = render_report(mixed_scan)
+        assert (document.index('id="summary"') < document.index('id="start-here"')
+                < document.index('<nav class="toc"'))
+
+    def test_the_read_failure_banner_still_comes_first(self, unreadable_scan):
+        document = render_report(unreadable_scan)
+        assert document.index('id="read-failures"') < document.index(
+            'id="start-here"')
+        assert "This scan is incomplete" in start_here_of(document)
+
+    def test_it_leads_with_the_failure_and_its_step_one(self, mixed_scan):
+        box = start_here_of(render_report(mixed_scan))
+        first = box[box.index("<li>"):box.index("</li>")]
+        # The only failure in mixed_scan: LmCompatibilityLevel at 1, target 5
+        # with an audit step at 3.
+        assert 'href="#devore-01-ntlm-lmcompatibilitylevel"' in first
+        assert "Next: step 1: set it to 3 (audit mode)" in first
+
+    def test_it_warns_about_the_audit_step_when_an_item_has_one(self,
+                                                                mixed_scan):
+        box = start_here_of(render_report(mixed_scan))
+        assert "some of these need an audit step first" in box
+        assert "skip step 1" in box
+
+    def test_every_item_links_to_a_card_in_the_document(self, mixed_scan):
+        document = render_report(mixed_scan)
+        for anchor in re.findall(r'<li>.*?href="#([^"]+)"',
+                                 start_here_of(document)):
+            assert f'id="{anchor}"' in document, anchor
+
+    def test_it_lists_at_most_the_limit_and_says_how_many_more(self, catalog):
+        """Every scored control failing: far more than the box should list."""
+        entries, pol_entries = [], []
+        for control in catalog.controls:
+            if not control.scored or not control.registry_key:
+                continue
+            if control.check_type == "gpo-security-template":
+                entries.append(template_entry(control.registry_key, 0,
+                                              control.registry_type
+                                              or "REG_DWORD"))
+            else:
+                pol_entries.append({"key": control.registry_key_path,
+                                    "value": control.registry_value_name,
+                                    "type": 4, "data": 0})
+        payload = scan_payload([
+            snapshot(GUID_A, "Everything Wrong", entries=entries,
+                     pol_entries=pol_entries,
+                     links=[GpoLink(target_dn=BASE_DN)]),
+        ], catalog=catalog)
+        box = start_here_of(render_report(payload))
+        listed = box.count("<li>")
+        assert listed == START_HERE_LIMIT
+        assert "more below." in box
+
+    def test_an_all_pass_scan_has_nothing_to_do(self, all_pass_scan):
+        box = start_here_of(render_report(all_pass_scan))
+        assert "Nothing to fix or check." in box
+        assert "<li>" not in box
+
+
+class TestGroups:
+
+    def test_the_groups_cover_every_section_once_in_document_order(self):
+        in_groups = [s for _g, _h, _i, sections in GROUPS for s in sections]
+        assert in_groups == [section_id for section_id, _t, _l in SECTIONS]
+
+    def test_each_group_wraps_its_own_sections(self, mixed_scan):
+        document = render_report(mixed_scan)
+        positions = {section_id: document.index(f'id="{section_id}"')
+                     for section_id, _t, _l in SECTIONS}
+        starts = [document.index(f'id="group-{g}"') for g, _h, _i, _s in GROUPS]
+        for index, (_g, _h, _i, sections) in enumerate(GROUPS):
+            end = starts[index + 1] if index + 1 < len(starts) else len(document)
+            for section_id in sections:
+                assert starts[index] < positions[section_id] < end, section_id
+
+    def test_a_conflict_is_counted_once_in_its_group(self, mixed_scan):
+        """It is listed under Failures and under Conflicts; the Fix and Check
+        tiles each count it, but neither counts it twice."""
+        summary = render_report(mixed_scan)
+        summary = summary[summary.index('id="summary"'):
+                          summary.index('id="start-here"')]
+        grouped = group_findings(mixed_scan["findings"])
+        check = {id(f) for s in (SECTION_UNKNOWN, SECTION_CONFLICTS)
+                 for f in grouped[s]}
+        tile = re.search(r'href="#group-check"><span class="tile-n">(\d+)<',
+                         summary)
+        assert int(tile.group(1)) == len(check)

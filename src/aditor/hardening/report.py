@@ -43,31 +43,32 @@ renderer and its native dependencies into the packaging.
 Ordering is by **actionability, not catalog order**, because the report's job is
 to drive action rather than to be admired. See :data:`SECTIONS`:
 
-The document leads with the read-failure banner and one results tile per
-section, then the sections below, and ends with "About this scan" (the
-provenance). Each card shows its verdict (found versus target), the fix, the
-rollout steps and every caveat in the open, and collapses the evidence tables:
-a first-time reader needs what to do, an auditor needs the evidence, and
-nothing safety-related is ever collapsed, because a closed ``<details>`` also
-prints closed.
+The document leads with the read-failure banner, one results tile per reader
+group, and a "Start here" box: a one-line status and the first few things to
+do, each linking to its card. It ends with "About this scan" (the provenance).
+Each card shows its verdict (found versus target), the fix, the rollout steps
+and every caveat in the open, and collapses the evidence tables: a first-time
+reader needs what to do, an auditor needs the evidence, and nothing
+safety-related is ever collapsed, because a closed ``<details>`` also prints
+closed.
 
-1. Read failures, ``error`` findings and ``unknown`` findings — first, and before
-   any verdict section. Per the evaluator, one unreadable GPO turns an unset key
-   into an ``error``, and a control whose remediation writes the registry
-   directly on the DCs returns ``unknown`` because a GPO scan cannot see it at
-   all. Both mean *unknown, not clean*, and a reader who misses that misreads the
-   whole report — so an ``unknown`` card states its reason and the command that
-   settles it in the open, not folded into the collapsed notes.
-2. ``fail`` findings, with expected versus every found value, its source GPO, the
-   catalog's remediation, and the phasing caveat.
-3. Conflicts — cross-referenced rather than owned, because a conflict on a
-   *passing* control is the dangerous one. A ``policy-preference-disagreement``
-   is rendered with each side's delivery mechanism, because that conflict is the
-   one a reader must *not* try to settle by comparing link precedence.
-4. ``os-default`` findings as hardening *opportunities* — never as enforcement.
-5. Unscored (``needs_baseline_value``) controls, as compact rows badged
-   "not checked — not a pass".
-6. Passes last, compact.
+The findings are grouped by what the reader does with them (:data:`GROUPS`),
+each group holding sections (:data:`SECTIONS`):
+
+1. **Fix** — ``fail`` findings, with expected versus every found value, its
+   source GPO, the catalog's remediation and the phasing caveat; then
+   ``os-default`` findings as settings to lock in, never as enforcement.
+2. **Check by hand** — ``error`` and ``unknown`` findings, then conflicts. An
+   ``unknown`` card states its reason and the command that settles it in the
+   open. Conflicts are cross-referenced rather than owned, because a conflict
+   on a *passing* control is the dangerous one; a
+   ``policy-preference-disagreement`` is rendered with each side's delivery
+   mechanism, because that conflict must *not* be settled by comparing link
+   precedence. The read-failure banner, above everything, is what says a scan
+   is incomplete.
+3. **Not covered yet** — unscored (``needs_baseline_value``) controls, as
+   compact rows badged "not checked — not a pass", then not-applicable ones.
+4. **Good** — passes, compact.
 """
 
 from __future__ import annotations
@@ -84,7 +85,7 @@ from .catalog import SEVERITY_RANK
 # Version of the *report layout*. Bumped when the rendered structure changes, so
 # a stored report can say which renderer produced it alongside which engine and
 # which catalog scored it.
-REPORT_FORMAT_VERSION = "1.4.0"
+REPORT_FORMAT_VERSION = "1.5.0"
 
 # The string that identifies a file as one of our reports.
 REPORT_MARKER = "aditor-hardening-report"
@@ -111,34 +112,54 @@ SECTION_NOT_APPLICABLE = "not-applicable"
 # are written for a first-time reader: what the section means and what to do,
 # in two or three sentences. Detail lives on the cards.
 SECTIONS: Tuple[Tuple[str, str, str], ...] = (
-    (SECTION_UNKNOWN, "Unknown — check these by hand",
+    (SECTION_FAIL, "Failures",
+     "These settings are weaker than the baseline recommends. <strong>Fix them "
+     "in the order each card shows:</strong> several need an audit step first, "
+     "and skipping it can lock users out."),
+    (SECTION_OPPORTUNITIES, "At the Windows default — not locked in",
+     "No GPO sets these. They are judged against the documented Windows "
+     "default, so <strong>nothing in Group Policy holds them there</strong> and "
+     "a future GPO could weaken them. Set each one in a GPO to lock it in."),
+    (SECTION_UNKNOWN, "Unknown",
      "The scan couldn't confirm these settings. <strong>Treat them as "
      "unconfirmed, not as passes.</strong> Either a GPO couldn't be read, or "
      "the setting is normally made directly in the registry, where Group "
      "Policy can't show it. Each card says which, and how to check."),
-    (SECTION_FAIL, "Failures — fix these",
-     "These settings are weaker than the baseline recommends. <strong>Fix them "
-     "in the order each card shows:</strong> several need an audit step first, "
-     "and skipping it can lock users out."),
     (SECTION_CONFLICTS, "Conflicts — GPOs disagree",
      "Two or more GPOs set the same setting to different values, and this scan "
      "doesn't work out which one wins. <strong>Check the value a machine "
      "actually gets</strong> with <code>gpresult /h report.html</code> before "
      "changing any of them. These findings also appear in their own section."),
-    (SECTION_OPPORTUNITIES, "At the Windows default — not locked in",
-     "No GPO sets these. They are judged against the documented Windows "
-     "default, so <strong>nothing in Group Policy holds them there</strong> and "
-     "a future GPO could weaken them. Set each one in a GPO to lock it in."),
     (SECTION_NOT_JUDGED, "Not checked yet — no target value",
      "The published guidance doesn't give an exact value to check these "
      "against, and this tool doesn't guess, so <strong>they were not checked "
      "and are not passes.</strong> Each row expands to its guidance."),
-    (SECTION_PASSES, "Passes",
-     "These meet the baseline. Each row expands to its evidence. If a pass "
-     "also appears under Conflicts, check it there before relying on it."),
     (SECTION_NOT_APPLICABLE, "Not applicable",
      "These didn't apply to what the scan found, so there is no verdict "
      "either way."),
+    (SECTION_PASSES, "Passes",
+     "These meet the baseline. Each row expands to its evidence. If a pass "
+     "also appears under Conflicts, check it there before relying on it."),
+)
+
+# The four groups a reader works through, each holding one or more sections.
+# id, heading, intro, section ids. The document follows this order, and
+# SECTIONS is listed in the same order.
+GROUPS: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...] = (
+    ("fix", "Fix",
+     "Settings to change: they are weaker than the baseline, or only hold "
+     "because of a Windows default.",
+     (SECTION_FAIL, SECTION_OPPORTUNITIES)),
+    ("check", "Check by hand",
+     "The scan couldn't settle these. They are not passes.",
+     (SECTION_UNKNOWN, SECTION_CONFLICTS)),
+    ("not-covered", "Not covered yet",
+     "Settings this scan doesn't check yet. They are not passes, and there is "
+     "nothing to change from this report.",
+     (SECTION_NOT_JUDGED, SECTION_NOT_APPLICABLE)),
+    ("good", "Good",
+     "Settings that meet the baseline.",
+     (SECTION_PASSES,)),
 )
 
 _SECTION_LEDES = {section_id: lede for section_id, _title, lede in SECTIONS}
@@ -470,33 +491,46 @@ def _render_provenance(scan: Dict[str, Any], counts: Dict[str, Any]) -> str:
     )
 
 
+def _group_findings(grouped: Dict[str, List[Dict[str, Any]]],
+                    section_ids: Sequence[str]) -> List[Dict[str, Any]]:
+    """The distinct findings across ``section_ids``, in section order.
+
+    Distinct because a conflict is listed in its verdict section and in the
+    conflicts section, and a group should count it once.
+    """
+    seen, out = set(), []
+    for section_id in section_ids:
+        for finding in grouped.get(section_id, []):
+            if id(finding) not in seen:
+                seen.add(id(finding))
+                out.append(finding)
+    return out
+
+
 def _render_counts(counts: Dict[str, Any],
                    grouped: Dict[str, List[Dict[str, Any]]]) -> str:
-    """The headline numbers: one tile per section, in document order.
+    """The headline numbers: one tile per group, broken down by section.
 
-    Each tile counts the findings in the section it names, so a reader who
+    Every number counts what the named group or section lists, so a reader who
     clicks through finds exactly that many. ``counts`` supplies only the
     breakdowns a section count cannot show — how the unknowns split, and how
     many findings the not-applicable filter hid.
-
-    The "Unknown" section, and so its tile, holds both results that issued no
-    verdict — ``error`` (the scan could not read what it needed) and
-    ``unknown`` (a control whose key a GPO scan cannot see) — because a reader
-    skimming the tiles is asking "how much of this report is not evidence?".
     """
-    tiles = [
-        ("Unknown", SECTION_UNKNOWN, "unknown"),
-        ("Failures", SECTION_FAIL, "fail"),
-        ("Conflicts", SECTION_CONFLICTS, "conflict"),
-        ("At Windows default", SECTION_OPPORTUNITIES, "osdefault"),
-        ("Not checked yet", SECTION_NOT_JUDGED, "notjudged"),
-        ("Passes", SECTION_PASSES, "pass"),
-    ]
-    cells = "".join(
-        f'<li class="tile tile-{kind}"><a href="#{section_id}">'
-        f'<span class="tile-n">{len(grouped.get(section_id, []))}</span>'
-        f'<span class="tile-l">{_esc(label)}</span></a></li>'
-        for label, section_id, kind in tiles)
+    kinds = {"fix": "fail", "check": "unknown", "not-covered": "notjudged",
+             "good": "pass"}
+    cells = []
+    for group_id, heading, _intro, section_ids in GROUPS:
+        total = len(_group_findings(grouped, section_ids))
+        parts = " &middot; ".join(
+            f"{len(grouped.get(section_id, []))} "
+            f"{_esc(_TILE_PARTS[section_id][len(grouped.get(section_id, [])) != 1])}"
+            for section_id in section_ids)
+        cells.append(
+            f'<li class="tile tile-{kinds[group_id]}">'
+            f'<a href="#group-{group_id}">'
+            f'<span class="tile-n">{total}</span>'
+            f'<span class="tile-l">{_esc(heading)}</span>'
+            f'<span class="tile-s">{parts}</span></a></li>')
 
     notes: List[str] = []
     unread = _as_int(counts.get("error"))
@@ -511,10 +545,112 @@ def _render_counts(counts: Dict[str, Any],
     return (
         '<section class="summary" id="summary">'
         '<h2>Results</h2>'
-        f'<ul class="tiles">{cells}</ul>'
+        f'<ul class="tiles">{"".join(cells)}</ul>'
         f'{note}'
         '</section>'
     )
+
+
+# The per-section breakdown under each group tile.
+# (one, many)
+_TILE_PARTS = {
+    SECTION_FAIL: ("failure", "failures"),
+    SECTION_OPPORTUNITIES: ("at Windows default", "at Windows default"),
+    SECTION_UNKNOWN: ("unknown", "unknown"),
+    SECTION_CONFLICTS: ("conflict", "conflicts"),
+    SECTION_NOT_JUDGED: ("not checked", "not checked"),
+    SECTION_NOT_APPLICABLE: ("not applicable", "not applicable"),
+    SECTION_PASSES: ("pass", "passes"),
+}
+
+# How many items "Start here" lists before pointing at the rest.
+START_HERE_LIMIT = 5
+
+
+def _next_step(finding: Dict[str, Any], section_id: str) -> str:
+    """The one next action for a finding, from the scan's own fields.
+
+    Never new advice: it names a value the catalog already states (the step 1
+    or target value) or points at the card, where the full guidance is.
+    """
+    if section_id == SECTION_UNKNOWN:
+        if finding.get("error"):
+            return "fix the read failure above, then scan again"
+        return "check it by hand; the card gives the command"
+    if section_id == SECTION_CONFLICTS:
+        return ("GPOs disagree; check which one wins with "
+                "<code>gpresult /h</code>")
+    if section_id == SECTION_OPPORTUNITIES:
+        return "set it in a GPO to lock it in"
+    expected = (finding.get("evidence") or {}).get("expected") or {}
+    if not isinstance(expected, dict) or expected.get("operator") in (
+            "present", "absent"):
+        return "see the card"
+    interim, final = expected.get("interim"), expected.get("final")
+    state = finding.get("rollout_state")
+    if interim is not None and state not in ("audit", "enforced"):
+        return f"step 1: set it to {_esc_value(interim)} (audit mode)"
+    if interim is not None and state == "audit":
+        return f"step 2: set it to {_esc_value(final)}"
+    return f"set it to {_esc_value(final)}"
+
+
+def _render_start_here(grouped: Dict[str, List[Dict[str, Any]]],
+                       read_errors: Sequence[Any]) -> str:
+    """Where you stand in one line, then the first few things to do.
+
+    Failures first, worst severity first, then settings resting on a Windows
+    default, then the ones to check by hand. Each item links to its card,
+    where the full guidance is. Every value comes from the scan.
+    """
+    totals = {group_id: len(_group_findings(grouped, section_ids))
+              for group_id, _h, _i, section_ids in GROUPS}
+    lines: List[str] = []
+    if read_errors:
+        lines.append(
+            '<p class="warn"><strong>This scan is incomplete:</strong> '
+            f'{len(read_errors)} GPO(s) couldn\'t be read (see above). Fix '
+            'that and scan again before relying on the rest.</p>')
+    lines.append(
+        f'<p class="stand">{totals["fix"]} to fix &middot; {totals["check"]} '
+        f'to check by hand &middot; {totals["not-covered"]} not covered yet '
+        f'&middot; {totals["good"]} good</p>')
+
+    todo: List[Tuple[Dict[str, Any], str]] = []
+    listed = set()
+    for section_id in (SECTION_FAIL, SECTION_OPPORTUNITIES, SECTION_UNKNOWN,
+                       SECTION_CONFLICTS):
+        for finding in grouped.get(section_id, []):
+            if id(finding) not in listed:
+                listed.add(id(finding))
+                todo.append((finding, section_id))
+
+    if not todo:
+        lines.append('<p><strong>Nothing to fix or check.</strong></p>')
+    else:
+        shown = todo[:START_HERE_LIMIT]
+        items = []
+        for finding, section_id in shown:
+            anchor = str(finding.get("control_id") or "").lower().replace(" ", "-")
+            severity = str(finding.get("severity") or "none").lower()
+            items.append(
+                f'<li>{_badge(_esc(severity.upper()), f"sev-{severity}")}'
+                f'<a href="#{_esc(anchor)}">{_esc(finding.get("title"))}</a>'
+                f'<br><span class="next">Next: '
+                f'{_next_step(finding, section_id)}</span></li>')
+        lines.append(f'<ol class="start-list">{"".join(items)}</ol>')
+        more = len(todo) - len(shown)
+        if more > 0:
+            lines.append(f'<p class="small muted">and {more} more below.</p>')
+        if any(((f.get("evidence") or {}).get("expected") or {}).get("interim")
+               is not None for f, _s in shown):
+            lines.append(
+                '<p class="small"><strong>Before changing anything:</strong> '
+                'some of these need an audit step first. Each card shows the '
+                'order. Don\'t skip step 1.</p>')
+
+    return ('<section class="start" id="start-here"><h2>Start here</h2>'
+            f'{"".join(lines)}</section>')
 
 
 def _render_read_failures(scan: Dict[str, Any],
@@ -725,7 +861,7 @@ def _render_conflict(finding: Dict[str, Any]) -> str:
 
     return (
         '<div class="block conflict">'
-        f'<h4>Conflict &mdash; {_esc(conflict.get("kind"))}</h4>'
+        f'<h5>Conflict &mdash; {_esc(conflict.get("kind"))}</h5>'
         f'<p>{_esc(conflict.get("detail"))}</p>'
         + _scrollable(
             '<table class="grid"><thead><tr>'
@@ -750,11 +886,11 @@ def _render_remediation(finding: Dict[str, Any]) -> str:
     """
     remediation = finding.get("remediation")
     if not remediation:
-        return ('<div class="block remediation gap"><h4>Remediation</h4>'
+        return ('<div class="block remediation gap"><h5>Remediation</h5>'
                 '<p class="warn"><strong>Catalog gap:</strong> this control '
                 'carries no remediation text. Nothing is improvised here — raise '
                 'the gap so the catalog can state the fix.</p></div>')
-    return ('<div class="block remediation"><h4>Remediation</h4>'
+    return ('<div class="block remediation"><h5>Remediation</h5>'
             f'<p>{_esc(remediation)}</p></div>')
 
 
@@ -861,7 +997,7 @@ def _render_phasing(finding: Dict[str, Any]) -> str:
     if interim is None and not audit_before and not caveats:
         parts.append(f'<p class="warn">{_PHASING_GAP_NOTE}</p>')
 
-    return ('<div class="block phasing"><h4>How to roll it out safely</h4>'
+    return ('<div class="block phasing"><h5>How to roll it out safely</h5>'
             f'{"".join(parts)}</div>')
 
 
@@ -883,7 +1019,7 @@ def _render_not_judged(finding: Dict[str, Any]) -> str:
     """
     return (
         '<div class="block notjudged">'
-        '<h4>Not checked &mdash; this is not a pass</h4>'
+        '<h5>Not checked &mdash; this is not a pass</h5>'
         '<p>The published guidance doesn\'t give an exact value for this '
         'setting, and this tool doesn\'t guess one, so its state is '
         '<strong>unknown</strong>. It can be checked once a target value is '
@@ -906,7 +1042,7 @@ def _render_unknown_reason(finding: Dict[str, Any]) -> str:
     notes = (finding.get("evidence") or {}).get("notes")
     return (
         '<div class="block err-block">'
-        '<h4>Why this is unknown &mdash; this is not a pass</h4>'
+        '<h5>Why this is unknown &mdash; this is not a pass</h5>'
         '<p>Group Policy doesn\'t show this setting\'s value, so the scan '
         'can\'t confirm it either way. Use the check below to settle it.</p>'
         + _notes_list(notes, "notes")
@@ -1002,13 +1138,13 @@ def _render_evidence(finding: Dict[str, Any], notes_shown: bool) -> str:
         ("GPOs searched", _esc(evidence.get("gpos_searched"))),
     ])
     parts = [identity,
-             '<div class="block"><h4>Expected (baseline)</h4>'
+             '<div class="block"><h5>Expected (baseline)</h5>'
              + _render_expected(finding) + '</div>',
-             '<div class="block"><h4>Found (this scan)</h4>'
+             '<div class="block"><h5>Found (this scan)</h5>'
              + _render_found(finding) + '</div>']
     notes = "" if notes_shown else _notes_list(evidence.get("notes"), "notes")
     if notes:
-        parts.append('<div class="block scan-notes"><h4>Scan notes</h4>'
+        parts.append('<div class="block scan-notes"><h5>Scan notes</h5>'
                      f'{notes}</div>')
     return ('<details class="block evidence"><summary>Evidence and technical '
             f'detail</summary>{"".join(parts)}</details>')
@@ -1029,8 +1165,8 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
     notes_shown = False
 
     if finding.get("error"):
-        body.append('<div class="block err-block"><h4>Why this is '
-                    'unknown</h4><p>'
+        body.append('<div class="block err-block"><h5>Why this is '
+                    'unknown</h5><p>'
                     + _esc(finding.get("error")) + '</p></div>')
     elif finding.get("result") == "unknown":
         body.append(_render_unknown_reason(finding))
@@ -1044,8 +1180,8 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
 
     return (
         f'<article class="card card-{_esc(section_id, "none")}" id="{_esc(anchor)}">'
-        f'<h3><span class="cid">{_esc(control_id)}</span> '
-        f'{_esc(finding.get("title"))}</h3>'
+        f'<h4 class="card-title"><span class="cid">{_esc(control_id)}</span> '
+        f'{_esc(finding.get("title"))}</h4>'
         f'{_card_badges(finding, section_id)}'
         f'{"".join(body)}'
         '</article>'
@@ -1126,9 +1262,9 @@ def _render_pass_row(finding: Dict[str, Any]) -> str:
 
     detail_body = (
         '<div class="pass-detail">'
-        '<div class="block"><h4>Expected (baseline)</h4>'
+        '<div class="block"><h5>Expected (baseline)</h5>'
         + _render_expected(finding) + '</div>'
-        '<div class="block"><h4>Found (this scan)</h4>'
+        '<div class="block"><h5>Found (this scan)</h5>'
         + _render_found(finding) + '</div>'
         + _render_conflict(finding)
         + _notes_list(evidence.get("notes"), "notes small")
@@ -1152,14 +1288,16 @@ def _render_pass_row(finding: Dict[str, Any]) -> str:
 
 def _render_section(section_id: str, findings: Sequence[Dict[str, Any]],
                     extra: str = "") -> str:
-    """One document section. Rendered even when empty, so absence is explicit."""
+    """One section inside a group. Rendered even when empty, so absence is
+    explicit — but an empty section skips its intro."""
     title = _SECTION_TITLES[section_id]
-    lede = _SECTION_LEDES[section_id]
     count = len(findings)
 
     if not findings and not extra:
-        body = '<p class="muted empty">None.</p>'
-    elif section_id == SECTION_PASSES:
+        return (f'<section class="section section-{section_id}" '
+                f'id="{section_id}"><h3>{title} <span class="count">(0)</span>'
+                '</h3><p class="muted empty">None.</p></section>')
+    if section_id == SECTION_PASSES:
         body = extra + "".join(_render_pass_row(f) for f in findings)
     elif section_id == SECTION_NOT_JUDGED:
         body = extra + "".join(_render_not_judged_row(f) for f in findings)
@@ -1168,11 +1306,19 @@ def _render_section(section_id: str, findings: Sequence[Dict[str, Any]],
 
     return (
         f'<section class="section section-{section_id}" id="{section_id}">'
-        f'<h2>{title} <span class="count">({count})</span></h2>'
-        f'<p class="lede">{lede}</p>'
+        f'<h3>{title} <span class="count">({count})</span></h3>'
+        f'<p class="lede">{_SECTION_LEDES[section_id]}</p>'
         f'{body}'
         '</section>'
     )
+
+
+def _render_group(group_id: str, heading: str, intro: str, sections: str,
+                  total: int) -> str:
+    """A reader group: its heading and intro, then its sections."""
+    return (f'<div class="group group-{group_id}" id="group-{group_id}">'
+            f'<h2>{_esc(heading)} <span class="count">({total})</span></h2>'
+            f'<p class="group-intro">{_esc(intro)}</p>{sections}</div>')
 
 
 def _render_toc(grouped: Dict[str, List[Dict[str, Any]]],
@@ -1181,9 +1327,15 @@ def _render_toc(grouped: Dict[str, List[Dict[str, Any]]],
     if read_errors:
         items.append('<li><a href="#read-failures"><strong>GPO read failures '
                      '&mdash; scan incomplete</strong></a></li>')
-    for section_id, title, _lede in SECTIONS:
-        items.append(f'<li><a href="#{section_id}">{title}</a> '
-                     f'<span class="count">({len(grouped[section_id])})</span></li>')
+    items.append('<li><a href="#start-here">Start here</a></li>')
+    for group_id, heading, _intro, section_ids in GROUPS:
+        subs = "".join(
+            f'<li><a href="#{section_id}">{_SECTION_TITLES[section_id]}</a> '
+            f'<span class="count">({len(grouped[section_id])})</span></li>'
+            for section_id in section_ids)
+        total = len(_group_findings(grouped, section_ids))
+        items.append(f'<li><a href="#group-{group_id}">{_esc(heading)}</a> '
+                     f'<span class="count">({total})</span><ol>{subs}</ol></li>')
     items.append('<li><a href="#provenance">About this scan</a></li>')
     return f'<nav class="toc"><h2>Contents</h2><ol>{"".join(items)}</ol></nav>'
 
@@ -1215,6 +1367,7 @@ $css
 </header>
 $read_failures
 $counts
+$start_here
 $toc
 $sections
 $provenance
@@ -1242,9 +1395,22 @@ main{max-width:64rem;margin:0 auto;padding:1.5rem 1.25rem 4rem}
 h1{font-size:1.85rem;margin:.2rem 0 .3rem}
 h2{font-size:1.3rem;margin:2rem 0 .5rem;padding-bottom:.3rem;
 border-bottom:2px solid var(--line)}
-h3{font-size:1.08rem;margin:0 0 .5rem}
-h4{font-size:.9rem;text-transform:uppercase;letter-spacing:.04em;
+h3{font-size:1.15rem;margin:1.6rem 0 .5rem}
+h4{font-size:1.08rem;margin:0 0 .5rem}
+h5{font-size:.9rem;text-transform:uppercase;letter-spacing:.04em;
 color:var(--muted);margin:0 0 .4rem}
+.group>h2{font-size:1.5rem;margin-top:2.6rem;border-bottom-width:3px}
+.group-intro{color:var(--muted);margin:.3rem 0 1rem}
+.start{border:2px solid var(--info);border-radius:6px;padding:.8rem 1.1rem;
+margin:1.2rem 0;background:var(--info-bg)}
+.start h2{border:0;margin:0 0 .4rem}
+.stand{font-weight:600;margin:.2rem 0 .6rem}
+.start-list{margin:.4rem 0;padding-left:1.4rem}
+.start-list li{margin:.45rem 0}
+.start-list .badge{margin-right:.4rem}
+.next{font-size:.92rem;color:var(--muted)}
+.tile-s{display:block;font-size:.75rem;color:var(--muted);margin-top:.2rem}
+.toc ol ol{margin:.1rem 0 .3rem;font-size:.92rem}
 p{margin:.5rem 0}
 code{font:.86em/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 background:var(--panel);border:1px solid var(--line);border-radius:3px;
@@ -1459,10 +1625,14 @@ def render_report(scan_result: Dict[str, Any]) -> str:
             + '. They are reported rather than silently dropped.</p>')
 
     sections = "".join(
-        _render_section(section_id, grouped[section_id],
-                        extra=unknown_extra if section_id == SECTION_UNKNOWN
-                        else "")
-        for section_id, _title, _lede in SECTIONS)
+        _render_group(
+            group_id, heading, intro,
+            "".join(_render_section(section_id, grouped[section_id],
+                                    extra=unknown_extra
+                                    if section_id == SECTION_UNKNOWN else "")
+                    for section_id in section_ids),
+            len(_group_findings(grouped, section_ids)))
+        for group_id, heading, intro, section_ids in GROUPS)
 
     title = ("AD hardening report — "
              f"{str(scan.get('domain') or 'unknown domain')} — "
@@ -1476,6 +1646,7 @@ def render_report(scan_result: Dict[str, Any]) -> str:
         read_failures=_render_read_failures(scan, read_errors),
         provenance=_render_provenance(scan, counts),
         counts=_render_counts(counts, grouped),
+        start_here=_render_start_here(grouped, read_errors),
         toc=_render_toc(grouped, read_errors),
         sections=sections,
         engine_version=_esc(scan.get("tool_version") or SCAN_ENGINE_VERSION),
