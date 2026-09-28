@@ -195,7 +195,7 @@ def _validate_output_dir(output_dir: Any) -> Path:
 
     if path.exists() and not path.is_dir():
         raise SnapshotError(
-            f"output_dir {str(path)!r} exists and is not a directory; the "
+            f"output_dir '{path}' exists and is not a directory; the "
             f"snapshot needs a directory to create its own folder inside")
     return path
 
@@ -248,14 +248,14 @@ def write_snapshot(scan_result: Dict[str, Any], output_dir: Any) -> Snapshot:
         folder.mkdir(parents=True)
     except FileExistsError as exc:
         raise SnapshotError(
-            f"the snapshot folder {str(folder)!r} already exists; refusing to "
+            f"the snapshot folder '{folder}' already exists; refusing to "
             f"overwrite or merge into it. A snapshot is one scan's evidence, so "
             f"mixing two into a folder would leave no way to tell which file "
             f"came from which run. Move or delete that folder if you meant to "
             f"replace it.") from exc
     except OSError as exc:
         raise SnapshotError(
-            f"could not create the snapshot folder {str(folder)!r}: "
+            f"could not create the snapshot folder '{folder}': "
             f"{exc}") from exc
 
     try:
