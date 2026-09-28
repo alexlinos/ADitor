@@ -26,6 +26,7 @@ import html
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Sequence
 
 from ..hardening.diff import ATTRIBUTION_AMBIGUOUS
+from ..hardening.report import friendly_time
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # Imported for annotations only. This module is a *renderer*: it consumes
@@ -692,7 +693,9 @@ def render_history(entries: Sequence["SnapshotEntry"],
                 f'<span class="pill pill-bad">{esc(counts.get("fail"), "0")}'
                 f' fail</span>'
                 f'<span class="pill pill-warn">'
-                f'{esc(counts.get("conflicts"), "0")} conflict</span>'
+                f'{esc(counts.get("conflicts"), "0")} '
+                f'{"conflict" if counts.get("conflicts") == 1 else "conflicts"}'
+                f'</span>'
                 f'<span class="pill pill-ok">{esc(counts.get("pass"), "0")}'
                 f' pass</span>')
             meta = (f'{esc(entry.gpos_scanned, "0")} GPOs'
@@ -717,7 +720,8 @@ def render_history(entries: Sequence["SnapshotEntry"],
             f'<td class="pick"><input type="radio" name="diff-after" '
             f'value="{esc(entry.name, "")}" aria-label="Use '
             f'{esc(entry.name, "")} as the later scan"></td>'
-            f"<td><div class=\"snap-name\">{esc(entry.timestamp or entry.name)}"
+            f"<td><div class=\"snap-name\">"
+            f"{esc(friendly_time(entry.timestamp) if entry.timestamp else entry.name)}"
             f'</div><div class="muted mono">{esc(entry.name)}</div></td>'
             f"<td>{summary}</td>"
             f'<td class="muted">{meta}</td>'
@@ -730,7 +734,7 @@ def render_history(entries: Sequence["SnapshotEntry"],
         '<table class="history">'
         '<thead><tr><th title="The earlier scan">Before</th>'
         '<th title="The later scan">After</th>'
-        "<th>Scan time (UTC)</th><th>Result</th><th>Coverage</th>"
+        "<th>Scan time</th><th>Result</th><th>Coverage</th>"
         "<th>Catalog / engine</th><th></th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>")
 
@@ -797,27 +801,26 @@ def _render_attribution(attribution: Dict[str, Any], ambiguous: bool) -> str:
     caveats = attribution.get("caveats")
     caveats = caveats if isinstance(caveats, list) else []
 
+    why = (f'<details class="notes"><summary>Why this matters</summary>'
+           f'<p>{esc(summary)}</p></details>' if summary else "")
     if ambiguous:
         body = [
-            '<p class="banner-lede">These two scans were not produced by the '
-            "same version of ADitor, so the differences below may be the "
-            "scanner or the control catalog rather than the domain. None of "
-            "this can be reported as progress.</p>",
-            f'<p class="reason">What moved: {esc(reason)}</p>',
-            f"<p>{esc(summary)}</p>",
+            '<p class="banner-lede">These scans were made by different versions '
+            "of ADitor, so a difference below may come from the tool rather than "
+            "the domain. Treat this comparison as a new starting point, not as "
+            "progress.</p>",
+            f'<p class="reason">What changed: {esc(reason)}</p>',
         ]
         if caveats:
             body.append('<p class="label">Also worth knowing</p>'
                         + _list(caveats))
-        return _banner("bad", "Attribution: ambiguous", "".join(body))
+        return _banner("bad", "Different ADitor versions", "".join(body) + why)
 
-    body = [f"<p>{esc(summary)}</p>"]
+    body = ['<p class="banner-lede">Both scans used the same ADitor version, '
+            "so the differences below are changes in the domain.</p>"]
     if caveats:
-        body.append('<p class="label">Caveats — read these anyway</p>'
-                    + _list(caveats))
-    return _banner(
-        "ok", "Attribution: the domain",
-        f'<p class="reason">{esc(reason)}</p>' + "".join(body))
+        body.append('<p class="label">Read these anyway</p>' + _list(caveats))
+    return _banner("ok", "Same ADitor version", "".join(body) + why)
 
 
 def _render_scan_pair(scans: Dict[str, Any]) -> str:
@@ -828,9 +831,9 @@ def _render_scan_pair(scans: Dict[str, Any]) -> str:
     return _rows([
         ("Domain", esc(scans.get("domain"))),
         ("Base DN", f'<code>{esc(scans.get("base_dn"))}</code>'),
-        ("Earlier scan", f'{esc(before.get("timestamp"))} '
+        ("Earlier scan", f'{esc(friendly_time(before.get("timestamp")))} '
                          f'<code>{esc(before.get("scan_id"))}</code>'),
-        ("Later scan", f'{esc(after.get("timestamp"))} '
+        ("Later scan", f'{esc(friendly_time(after.get("timestamp")))} '
                        f'<code>{esc(after.get("scan_id"))}</code>'),
         ("Catalog version", f'{esc(before.get("catalog_version"))} &rarr; '
                             f'{esc(after.get("catalog_version"))}'),
@@ -901,27 +904,53 @@ def _render_catalog_changes(catalog: Dict[str, Any]) -> str:
     removed = removed if isinstance(removed, list) else []
     if not added and not removed:
         return ""
-    def ids(entries: Sequence[Any]) -> List[str]:
-        out = []
-        for entry in entries:
-            if isinstance(entry, dict):
-                out.append(str(entry.get("control_id") or entry))
-            else:
-                out.append(str(entry))
-        return out
     body = []
     if added:
-        body.append('<p class="label">Added to the catalog</p>'
-                    + _list(ids(added)))
+        entries = sorted((e for e in added if isinstance(e, dict)),
+                         key=lambda e: (_ADDED_ORDER.get(str(e.get("result")), 9),
+                                        str(e.get("control_id") or "")))
+        tally = ", ".join(
+            f"{n} {label}" for label, n in _tally(entries) if n)
+        body.append(f'<p class="label">Added to the catalog: {len(added)}'
+                    + (f" ({esc(tally)})" if tally else "") + "</p>"
+                    + '<ul class="added">' + "".join(
+                        f'<li><span class="pill pill-{_ADDED_PILL.get(str(e.get("result")), "muted")}">'
+                        f'{esc(_ADDED_LABEL.get(str(e.get("result")), e.get("result")))}'
+                        f'</span> <code>{esc(e.get("control_id"))}</code> '
+                        f'{esc(e.get("title"))}</li>' for e in entries)
+                    + "</ul>"
+                    + "<p>These are new checks, so they have no earlier result to "
+                      "compare with. A failure here is a first finding, not a "
+                      "regression &mdash; open the later scan's report for "
+                      "what to do.</p>")
     if removed:
+        ids = [str(e.get("control_id") if isinstance(e, dict) else e)
+               for e in removed]
         body.append('<p class="label">Removed from the catalog</p>'
-                    + _list(ids(removed)))
+                    + _list(ids))
     note = str(catalog.get("note") or
                "A control present in one scan and not the other has no "
                "before-and-after verdict, so it is never counted as an "
                "improvement or a regression.")
     return _banner("info", "Catalog changes",
                    "".join(body) + f"<p>{esc(note)}</p>")
+
+
+#: How an added control's first result is shown, worst first.
+_ADDED_ORDER = {"fail": 0, "error": 1, "unknown": 2, "pass": 3,
+                "not_applicable": 4}
+_ADDED_LABEL = {"fail": "fail", "error": "unknown", "unknown": "unknown",
+                "pass": "pass", "not_applicable": "not checked"}
+_ADDED_PILL = {"fail": "bad", "error": "warn", "unknown": "warn", "pass": "ok"}
+
+
+def _tally(entries: Sequence[Dict[str, Any]]) -> List[Any]:
+    counts: Dict[str, int] = {}
+    for entry in entries:
+        label = _ADDED_LABEL.get(str(entry.get("result")), "other")
+        counts[label] = counts.get(label, 0) + 1
+    return [(label, counts.get(label, 0))
+            for label in ("fail", "unknown", "pass", "not checked", "other")]
 
 
 def render_credential_store(store_name: str, available: bool,
