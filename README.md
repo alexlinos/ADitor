@@ -55,6 +55,10 @@ chmod 600 ad-config/config.json
 }
 ```
 
+Use `ldaps://` (port 636). ADitor binds with a simple bind and doesn't use
+STARTTLS, so with plain `ldap://` the bind password crosses the network in clear
+text; ADitor allows it but warns every time.
+
 The `password` field supports `${ENV_VAR}` expansion, so the secret can be supplied
 at runtime rather than stored on disk. If it is unset and you run `aditor scan`
 from a terminal, you are prompted for it. `config.json` is gitignored.
@@ -153,6 +157,22 @@ says so and refuses to save.
 
 `pywebview` is an optional extra (`gui`); the `aditor` command installs and runs
 without it.
+
+## Running it on a domain controller
+
+It works, but run it from an admin workstation where you can. A DC is a Tier 0
+host, and ADitor is an unsigned new executable that only needs a read-only
+account and network access to a DC. If you do run it on one:
+
+- Server Core has no WebView2, so the desktop app won't open; use
+  `aditor-cli.exe`.
+- Saving a connection in the desktop app stores the bind password in that
+  machine's Credential Manager. On a DC, prefer `aditor-cli.exe` with the
+  password supplied at run time.
+
+The certificate helper's **Download the issuing CA certificate** works well on a
+DC: it looks in the machine's own certificate stores first, and it never sends
+a credential to find the file.
 
 ## Development
 

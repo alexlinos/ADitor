@@ -106,11 +106,7 @@ class AditorApi:
         self._ldap_factory = ldap_factory
         self._trust_report: Any = None
         self._export_path: str = ""
-        # The connection the certificate panel on screen was built from, and
-        # the result of the last issuer fetch. Both exist so the download
-        # button acts on what the operator is looking at.
-        self._cert_settings: Any = None
-        self._cert_password: str = ""
+        # The result of the last issuer fetch, so the panel can show it.
         self._issuer_fetch: Any = None
         self._load_saved_password()
 
@@ -273,11 +269,6 @@ class AditorApi:
                                     fetch=self._chain_fetch,
                                     export_path=self._export_path)
         self._trust_report = report
-        # Kept so :meth:`download_issuing_ca` fetches against the connection the
-        # panel on screen was built from, rather than the saved settings, which
-        # may differ from the form the operator is looking at.
-        self._cert_settings = candidate
-        self._cert_password = password
         return _ok(
             corroboration=report.corroboration.outcome,
             chain_read=report.chain.ok,
@@ -332,42 +323,30 @@ class AditorApi:
         """Fetch the CA certificate that issued the controller's, and save it.
 
         The step every platform's instructions used to begin by assuming. It
-        does two things and no more: reads a certificate from the directory and
-        writes it to a file. It does not install it, does not ask the OS to
-        trust it, and does not run the command that would — the command is
-        rendered with the saved path filled in, for the operator to run.
+        does two things and no more: finds a certificate and writes it to a
+        file. It does not install it, does not ask the OS to trust it, and does
+        not run the command that would — the command is rendered with the saved
+        path filled in, for the operator to run.
 
-        Two properties of the fetch are worth stating here because they are the
-        reason this is safe rather than convenient. First, the certificate is
-        only offered if **its key signed the certificate the controller
-        presented**, which is a signature check and not a name comparison; see
-        :mod:`aditor.app.issuer`. Second, the read is made with certificate
-        validation off, which is unavoidable — the certificate needed to
-        validate it is the one being fetched — and is therefore reported rather
-        than hidden, and the panel still requires the fingerprint to be
-        confirmed out of band before anything is installed.
-
-        The operator's saved ``validate_certificate`` setting is not touched.
-        :func:`aditor.app.issuer.fetch_issuing_ca` overrides it on a *copy*.
+        **It sends no credential.** It looks in this computer's certificate
+        stores and at the certificate's own http(s) AIA address, never in the
+        directory: reading the directory would mean binding with the password
+        over a connection whose certificate can't be validated yet. A
+        certificate is only offered if **its key signed the certificate the
+        controller presented** (a signature check, not a name comparison; see
+        :mod:`aditor.app.issuer`), and the panel still asks for the fingerprint
+        to be confirmed out of band before anything is installed.
         """
         report = self._trust_report
         if report is None or not report.chain.certificates:
             return _fail("Inspect the certificate chain first — there is no "
                          "presented certificate to find the issuer of.")
-        settings = getattr(self, "_cert_settings", None) or self._connection
-        password = getattr(self, "_cert_password", "") or self._password
-        if not password:
-            return _fail("Enter the bind password first. Reading the published "
-                         "CA certificate needs an authenticated connection; "
-                         "Active Directory does not serve it anonymously.")
-
         # The leaf as it is on screen, not a fresh handshake: this proves an
         # issuer for the certificate the operator is looking at, and a second
         # handshake could return a different one.
         leaf = report.chain.certificates[0]
         try:
-            fetch = fetch_issuing_ca(settings, password, leaf,
-                                     factory=self._ldap_factory)
+            fetch = fetch_issuing_ca(leaf)
         except Exception as exc:  # pragma: no cover - defensive
             return _fail(exc)
 

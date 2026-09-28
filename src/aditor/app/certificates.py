@@ -109,10 +109,14 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 SOURCE_PRESENTED = "presented"
 SOURCE_DIRECTORY = "directory"
+SOURCE_WINDOWS_STORE = "windows-store"
+SOURCE_AIA_DOWNLOAD = "aia-download"
 
 SOURCE_LABELS = {
     SOURCE_PRESENTED: "Presented by the server during the TLS handshake",
     SOURCE_DIRECTORY: "Published in Active Directory",
+    SOURCE_WINDOWS_STORE: "In this computer's Windows certificate store",
+    SOURCE_AIA_DOWNLOAD: "Downloaded from the certificate's AIA address",
 }
 
 #: A certificate this close to its notAfter is reported as a problem in its own
