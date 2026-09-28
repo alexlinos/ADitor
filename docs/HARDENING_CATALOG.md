@@ -87,7 +87,11 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
    and asserts that it finds nothing: none is a pass, any is a fail listing the
    objects, and a failed query is an error, never a pass. Queries are named,
    not written as LDAP filters in the catalog, so a catalog edit cannot become
-   an arbitrary directory query. Originally:
+   an arbitrary directory query. Results are kept per control. Groups are
+   found by well-known SID (never by their localizable name) and include
+   primary-group members; a group that must exist but can't be found is an
+   error. Writable DCs are excluded from the delegation check by account type
+   (SERVER_TRUST_ACCOUNT), not by primaryGroupID. Originally:
    **Three engines, two already exist.** `gpo-security-template` and
    `gpo-registry-pol` are served by the SYSVOL reader (GptTmpl.inf `[Registry Values]`
    + Registry.pol + Group Policy Preferences `Registry.xml`). `directory-state`

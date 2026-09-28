@@ -656,8 +656,7 @@ def evaluate_control(control: Control,
             f"check type {control.check_type!r} has no evaluator in this release",
             gpos)
     if control.check_type == "directory-state":
-        return _directory_finding(
-            control, (directory or {}).get(control.directory_check))
+        return _directory_finding(control, (directory or {}).get(control.id))
 
     try:
         matches = find_matches(control, gpos)
@@ -716,7 +715,7 @@ def evaluate_controls(controls: Iterable[Control],
         controls: The controls to evaluate, in report order.
         gpos: The GPO snapshots to evaluate them against.
         directory: The results of the directory queries directory-state
-            controls name, keyed by ``directory_check`` — see
+            controls name, keyed by control id — see
             :func:`_directory_finding` for the shape.
         include_not_applicable: Include findings that came back
             ``not_applicable`` because the control did not apply (an unset

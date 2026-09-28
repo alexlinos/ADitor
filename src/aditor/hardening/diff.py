@@ -67,6 +67,7 @@ report anchors control-id-only for exactly this reason.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .catalog import SEVERITY_RANK
@@ -303,8 +304,28 @@ def _values(finding: Dict[str, Any]) -> List[Any]:
     a different situation from one GPO doing so, and a diff should not flatten
     the difference away.
     """
-    return sorted((match.get("value") for match in _found(finding)),
+    return sorted((_directory_value(match) if not match.get("gpo_dn")
+                   and "detail" in match else match.get("value")
+                   for match in _found(finding)),
                   key=lambda value: (str(type(value)), str(value)))
+
+
+def _directory_value(match: Dict[str, Any]) -> str:
+    """A directory-state object as one comparable value.
+
+    The name alone isn't enough: a privileged group keeps its name while
+    members join it, and an account keeps its name while its encryption types
+    change. So the value carries the detail, and a group also carries a short
+    digest of its full member list, which catches a member swapped for another
+    without putting the whole list into the diff.
+    """
+    text = f"{match.get('value')}: {match.get('detail')}"
+    members = match.get("members")
+    if isinstance(members, list) and members:
+        digest = hashlib.sha256("\n".join(
+            sorted(str(m).lower() for m in members)).encode("utf-8"))
+        text += f" [members {digest.hexdigest()[:10]}]"
+    return text
 
 
 def _gpos(finding: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -406,7 +427,8 @@ def evidence_changes(before: Dict[str, Any],
             f"{right['source']!r}. 'gpo' means a GPO sets the key; 'os-default' "
             f"means nothing does and the verdict rests on a documented Windows "
             f"default, which Group Policy is not holding in place; "
-            f"'not-configured' means the key was found nowhere; 'unknown' means "
+            f"'not-configured' means the key was found nowhere; 'directory' "
+            f"means a directory query decided it; 'unknown' means "
             f"the scan did not establish the state at all.")
 
     if [str(value) for value in left["values"]] != \

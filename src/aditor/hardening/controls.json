@@ -204,19 +204,20 @@
       "missing_result": null,
       "missing_note": null,
       "id": "DEVORE-04-SPN-ACCOUNTS-AES",
-      "title": "Service accounts with an SPN support AES (msDS-SupportedEncryptionTypes)",
+      "title": "Service accounts with an SPN state AES in msDS-SupportedEncryptionTypes",
       "source": {
         "part": 4,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-4-%E2%80%93-enforcing-aes-for-kerberos/4114965"
       },
       "severity": "high",
       "directory_check": "spn-accounts-without-aes",
-      "value_source": "Devore Part 4: service accounts with an SPN should carry the AES bits in msDS-SupportedEncryptionTypes; when the attribute is blank the KDC defaults to RC4 for that account. AES bits per Microsoft: 0x8 (AES128) and 0x10 (AES256).",
-      "remediation": "For each listed service account, add the AES bits to msDS-SupportedEncryptionTypes (0x8 for AES128, 0x10 for AES256). Do this before disabling RC4 at the domain level, which is the last step of the Part 4 rollout.",
+      "value_source": "Devore Part 4: service accounts with an SPN should carry the AES bits in msDS-SupportedEncryptionTypes. AES bits per Microsoft: 0x8 (AES128) and 0x10 (AES256). A blank value makes the account use the domain default, which depends on patch level: before the 2026 Kerberos updates the domain controllers assume 0x27 (RC4 tickets); from April 2026 (enforcement enabled) and July 2026 (automatic) they assume AES only (0x18), per Microsoft's CVE-2026-20833 guidance: https://support.microsoft.com/en-gb/topic/how-to-manage-kerberos-kdc-usage-of-rc4-for-service-account-ticket-issuance-changes-related-to-cve-2026-20833-1ebcda33-720a-4da8-93c1-b0496e1910dc. An account that explicitly lists RC4 without AES keeps getting RC4 tickets after those updates.",
+      "remediation": "For each listed service account, add the AES bits to msDS-SupportedEncryptionTypes (0x8 for AES128, 0x10 for AES256). Setting it explicitly makes the account's behaviour the same whatever the domain controllers' patch level. Do this before disabling RC4 at the domain level, which is the last step of the Part 4 rollout.",
       "caveats": [
-        "An account whose password was set before the domain supported AES may have no AES keys yet; resetting its password generates them. Accounts migrated with ADMT are the usual case.",
-        "Only user accounts with an SPN are checked. Computer accounts maintain this attribute themselves and should not be set by hand, and krbtgt is skipped.",
-        "Disabled accounts are not listed."
+        "An account whose password was set before the domain supported AES may have no AES keys yet; resetting its password generates them. Accounts migrated with ADMT are the usual case. On domain controllers with the 2026 Kerberos updates enforced, a blank account without AES keys can fail to authenticate rather than fall back to RC4.",
+        "An account listed as 'RC4 and no AES' keeps using RC4 even after the 2026 updates, because its explicit setting overrides the new AES-only default.",
+        "User accounts and managed service accounts (sMSA, gMSA) with an SPN are checked. Computer accounts are skipped: Windows computers maintain this attribute themselves. Non-Windows devices with an SPN (a NAS, a Linux host) don't, and are not checked here.",
+        "Disabled accounts and krbtgt are not listed."
       ],
       "audit_before_enforce": "Event 4769 (and 4768) with Ticket Encryption Type 0x17 (RC4) shows which accounts and services still get RC4 tickets."
     },
@@ -393,12 +394,12 @@
         "Storage Replica Administrators",
         "Incoming Forest Trust Builders"
       ],
-      "value_source": "Devore Part 7 lists these built-in groups as ones that should normally have no members. Only direct members are checked.",
+      "value_source": "Devore Part 7 lists these built-in groups as ones that should normally have no members. Each group is found by its well-known SID, not its name, so a localized or renamed group is still checked.",
       "remediation": "Remove the members of each listed group. Where someone needs the rights a group carries, delegate the specific rights instead, or add them only for the duration of the task.",
       "caveats": [
         "Schema Admins and Group Policy Creator Owners contain the built-in Administrator account by default, so they are often listed on a domain nobody has changed. Emptying them is the recommendation; add a member back only while a change needs it.",
-        "Only direct members are listed. A nested group counts as one member.",
-        "A group that doesn't exist in this domain is skipped; the scan notes lists it."
+        "Members are the group's direct members plus any account that uses the group as its primary group (AD leaves those out of the member list). A nested group counts as one member and is not expanded.",
+        "Schema Admins and Incoming Forest Trust Builders exist only in the forest root domain, and Storage Replica Administrators only with a newer schema; if missing they are noted, not reported. A group that should exist in every domain but can't be found makes this control an error, never a pass."
       ],
       "audit_before_enforce": null
     },
@@ -423,11 +424,12 @@
       },
       "severity": "high",
       "directory_check": "unconstrained-delegation",
-      "value_source": "Devore Part 7: accounts trusted for delegation to any service (userAccountControl TRUSTED_FOR_DELEGATION, 0x80000) should be moved to constrained or resource-based constrained delegation. Domain controllers carry this flag by design and are excluded.",
+      "value_source": "Devore Part 7: accounts trusted for delegation to any service (userAccountControl TRUSTED_FOR_DELEGATION, 0x80000) should be moved to constrained or resource-based constrained delegation. Writable domain controllers carry this flag by design and are excluded, recognised by their account type (a computer account with SERVER_TRUST_ACCOUNT, 0x2000), not by primary group.",
       "remediation": "For each listed account, switch to constrained delegation or resource-based constrained delegation (RBCD) for only the services it needs, then turn off 'Trust this computer/user for delegation to any service'.",
       "caveats": [
         "Changing delegation can break the services that depend on it. Find out what each listed account delegates to before changing it, and change one at a time.",
-        "Domain controllers and read-only domain controllers are excluded. Disabled accounts are not listed."
+        "Only writable domain controllers are excluded. Read-only domain controllers don't carry this flag by design, so one that has it is listed, as is any user account, whatever its primary group.",
+        "Disabled accounts are listed and marked: re-enabling one brings the exposure back."
       ],
       "audit_before_enforce": null
     },
