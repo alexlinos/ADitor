@@ -129,12 +129,19 @@ def tools(mock_ldap_manager):
 
 
 def wire_ldap(manager, gpo_entries, link_entries):
-    """Route the two searches scan_hardening makes to the right fixtures."""
+    """Route the GPO searches to the fixtures, and answer the directory
+    queries with a clean domain: its SID, and every group present but empty."""
     def search(search_base=None, search_filter=None, **_kwargs):
         if "gPLink" in (search_filter or ""):
             return link_entries
         if search_base == POLICIES_DN:
             return gpo_entries
+        if search_filter == "(objectClass=*)":
+            return [{"dn": BASE_DN,
+                     "attributes": {"objectSid": "S-1-5-21-1-2-3"}}]
+        if "objectSid=" in (search_filter or ""):
+            return [{"dn": f"CN=Group,{BASE_DN}",
+                     "attributes": {"sAMAccountName": "Group", "member": []}}]
         return []
     manager.search.side_effect = search
 

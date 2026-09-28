@@ -96,7 +96,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
     print(f"Report: {snapshot.report_path}")
     print(f"Scan:   {snapshot.scan_path}")
     print("Both files contain directory content (GPO names, DNs, registry "
-          "values). Share them accordingly.", file=sys.stderr)
+          "values, account and group member names). Share them accordingly.",
+          file=sys.stderr)
     return EXIT_ATTENTION if counts["fail"] or counts["error"] else EXIT_OK
 
 

@@ -122,9 +122,10 @@ SECTIONS: Tuple[Tuple[str, str, str], ...] = (
      "a future GPO could weaken them. Set each one in a GPO to lock it in."),
     (SECTION_UNKNOWN, "Unknown",
      "The scan couldn't confirm these settings. <strong>Treat them as "
-     "unconfirmed, not as passes.</strong> Either a GPO couldn't be read, or "
-     "the setting is normally made directly in the registry, where Group "
-     "Policy can't show it. Each card says which, and how to check."),
+     "unconfirmed, not as passes.</strong> A GPO couldn't be read, a "
+     "directory query failed, or the setting is normally made directly in the "
+     "registry, where Group Policy can't show it. Each card says which, and "
+     "how to check."),
     (SECTION_CONFLICTS, "Conflicts — GPOs disagree",
      "Two or more GPOs set the same setting to different values, and this scan "
      "doesn't work out which one wins. <strong>Check the value a machine "
@@ -186,6 +187,7 @@ _SOURCE_LABELS = {
     "os-default": "Windows default — not set by any GPO",
     "not-configured": "no GPO sets this",
     "unknown": "not confirmed by this scan",
+    "directory": "read from the directory",
 }
 # The catalog's operators, as a reader would say them.
 _OPERATOR_WORDS = {
@@ -574,6 +576,8 @@ def _next_step(finding: Dict[str, Any], section_id: str) -> str:
     or target value) or points at the card, where the full guidance is.
     """
     if section_id == SECTION_UNKNOWN:
+        if finding.get("error") and _is_directory(finding):
+            return "the directory query failed; the card says why"
         if finding.get("error"):
             return "fix the read failure above, then scan again"
         return "check it by hand; the card gives the command"
@@ -582,6 +586,9 @@ def _next_step(finding: Dict[str, Any], section_id: str) -> str:
                 "<code>gpresult /h</code>")
     if section_id == SECTION_OPPORTUNITIES:
         return "set it in a GPO to lock it in"
+    if _is_directory(finding):
+        count = len((finding.get("evidence") or {}).get("found") or [])
+        return f"fix the {count} listed on the card"
     expected = (finding.get("evidence") or {}).get("expected") or {}
     if not isinstance(expected, dict) or expected.get("operator") in (
             "present", "absent"):
@@ -695,10 +702,19 @@ def _render_read_failures(scan: Dict[str, Any],
 # Finding cards
 # --------------------------------------------------------------------------- #
 
+def _is_directory(finding: Dict[str, Any]) -> bool:
+    return finding.get("check_type") == "directory-state"
+
+
 def _render_expected(finding: Dict[str, Any]) -> str:
     """The baseline side of the evidence: what the control asserts."""
     evidence = finding.get("evidence") or {}
     expected = evidence.get("expected")
+    if _is_directory(finding) and isinstance(expected, dict):
+        return _rows([
+            ("Expected", "nothing found by the directory query"),
+            ("Where the rule comes from", _esc(expected.get("value_source"))),
+        ])
     if not isinstance(expected, dict):
         return ('<p class="muted">This control asserts no expected value — see '
                 '"not judged" below.</p>')
@@ -749,8 +765,35 @@ def _render_delivery(match: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _render_directory_found(finding: Dict[str, Any]) -> str:
+    """The objects a directory query found: name, kind, why, and DN."""
+    found = [m for m in ((finding.get("evidence") or {}).get("found") or [])
+             if isinstance(m, dict)]
+    if finding.get("result") == "error":
+        return ('<p class="found-none bad"><strong>Not read</strong> &mdash; '
+                'the directory query failed, so this setting is unconfirmed. '
+                f'{_esc(finding.get("error"))}</p>')
+    if not found:
+        return ('<p class="found-none">Nothing found &mdash; the directory '
+                'query returned no matching objects that the bind account can '
+                'read.</p>')
+    rows = "".join(
+        '<tr>'
+        f'<td>{_esc(m.get("value"))}</td>'
+        f'<td>{_esc(m.get("object_class"))}</td>'
+        f'<td>{_esc(m.get("detail"))}</td>'
+        f'<td><code class="dn">{_esc(m.get("dn"))}</code></td>'
+        '</tr>' for m in found)
+    return _scrollable(
+        '<table class="grid found"><thead><tr><th>Name</th><th>Type</th>'
+        f'<th>Why it is listed</th><th>DN</th></tr></thead><tbody>{rows}'
+        '</tbody></table>')
+
+
 def _render_found(finding: Dict[str, Any]) -> str:
     """Every value found, with the GPO that set it and that GPO's link path."""
+    if _is_directory(finding):
+        return _render_directory_found(finding)
     evidence = finding.get("evidence") or {}
     found = evidence.get("found") or []
     source = evidence.get("source")
@@ -1098,6 +1141,18 @@ def _render_glance(finding: Dict[str, Any]) -> str:
     """
     evidence = finding.get("evidence") or {}
     found = [m for m in (evidence.get("found") or []) if isinstance(m, dict)]
+    if _is_directory(finding):
+        if finding.get("result") == "error":
+            found_text = "not confirmed &mdash; the directory query failed"
+        elif found:
+            names = ", ".join(_esc(m.get("value")) for m in found[:5])
+            more = f" and {len(found) - 5} more" if len(found) > 5 else ""
+            found_text = f"{len(found)} listed: {names}{more}"
+        else:
+            found_text = "none"
+        return ('<p class="glance">'
+                f'<span><strong>Found:</strong> {found_text}</span>'
+                '<span><strong>Target:</strong> none</span></p>')
     if found:
         shown = [f'<code>{_esc_value(m.get("value"))}</code> in '
                  f'{_esc(m.get("gpo_display_name"))}' for m in found[:3]]
@@ -1128,7 +1183,18 @@ def _render_evidence(finding: Dict[str, Any], notes_shown: bool) -> str:
     browsers print a closed ``<details>`` closed.
     """
     evidence = finding.get("evidence") or {}
-    identity = _rows([
+    if _is_directory(finding):
+        targets = evidence.get("directory_targets") or []
+        identity = _rows([
+            ("Directory check",
+             f'<code>{_esc(evidence.get("directory_check"))}</code>'),
+            ("Checked", _esc(", ".join(targets)) if targets else None),
+            ("Scope", _esc(finding.get("scope"))),
+            ("Check type", _esc(finding.get("check_type"))),
+        ])
+    else:
+        identity = None
+    identity = identity or _rows([
         ("Policy", _esc(finding.get("friendly_policy"))),
         ("Registry key",
          f'<code>{_esc(evidence.get("registry_key"))}</code>'),
@@ -1271,6 +1337,8 @@ def _render_pass_row(finding: Dict[str, Any]) -> str:
         + _render_source(finding)
         + '</div>')
 
+    found_text = ("none" if _is_directory(finding)
+                  else _esc(values, "no value (see evidence)"))
     return (
         '<details class="pass-row">'
         '<summary>'
@@ -1278,7 +1346,7 @@ def _render_pass_row(finding: Dict[str, Any]) -> str:
         f'<span class="pass-title">{_esc(finding.get("title"))}</span> '
         f'<span class="badge badge-state-{_esc(state, "none")}">stage: '
         f'{_esc(_STATE_LABELS.get(str(state), state))}</span> '
-        f'<span class="pass-val">found {_esc(values, "no value (see evidence)")}'
+        f'<span class="pass-val">found {found_text}'
         f'</span>{preference}{conflict}'
         '</summary>'
         f'{detail_body}'

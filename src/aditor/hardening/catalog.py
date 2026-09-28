@@ -70,9 +70,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 # The catalog file shipped inside the package.
 DEFAULT_CATALOG_PATH = Path(__file__).with_name("controls.json")
 
-# Check types the catalog may declare. ``directory-state`` is a defined check
-# type of the spec but has no evaluator yet (its controls arrive with their own
-# engine), so no control in this release uses it.
+# Check types the catalog may declare.
 CHECK_TYPES = frozenset({
     "gpo-security-template",
     "gpo-registry-pol",
@@ -83,7 +81,48 @@ CHECK_TYPES = frozenset({
 EVALUABLE_CHECK_TYPES = frozenset({
     "gpo-security-template",
     "gpo-registry-pol",
+    "directory-state",
 })
+
+# The directory queries a ``directory-state`` control can name in
+# ``directory_check``. Each is a fixed, read-only LDAP query in
+# :mod:`aditor.hardening.collect` that returns the objects breaking the rule;
+# the control passes when it returns none. Named rather than written as LDAP
+# filters in the catalog, so a catalog edit can never become an arbitrary
+# directory query.
+DIRECTORY_CHECK_SPN_WITHOUT_AES = "spn-accounts-without-aes"
+DIRECTORY_CHECK_NON_EMPTY_GROUPS = "non-empty-groups"
+DIRECTORY_CHECK_UNCONSTRAINED_DELEGATION = "unconstrained-delegation"
+DIRECTORY_CHECKS = frozenset({
+    DIRECTORY_CHECK_SPN_WITHOUT_AES,
+    DIRECTORY_CHECK_NON_EMPTY_GROUPS,
+    DIRECTORY_CHECK_UNCONSTRAINED_DELEGATION,
+})
+# Checks that need ``directory_targets`` (the group names to inspect).
+DIRECTORY_CHECKS_WITH_TARGETS = frozenset({DIRECTORY_CHECK_NON_EMPTY_GROUPS})
+
+# The groups ``non-empty-groups`` can inspect, by the English name the catalog
+# uses. They are looked up by well-known SID, never by name: built-in group
+# names are localized when a domain is created and can be renamed, and a
+# name lookup that finds nothing would read as an empty group.
+#
+# name: (scope, id, exists). ``builtin`` ids are full SIDs; ``domain`` ids are
+# RIDs relative to the domain SID. ``exists`` is True for groups every domain
+# has, "forest-root" for groups only the forest root domain has, and False for
+# groups a newer schema or role adds. A missing group that should exist is an
+# error.
+WELL_KNOWN_GROUPS: Dict[str, Tuple[str, Any, Any]] = {
+    "Account Operators": ("builtin", "S-1-5-32-548", True),
+    "Server Operators": ("builtin", "S-1-5-32-549", True),
+    "Print Operators": ("builtin", "S-1-5-32-550", True),
+    "Backup Operators": ("builtin", "S-1-5-32-551", True),
+    "Replicator": ("builtin", "S-1-5-32-552", True),
+    "Incoming Forest Trust Builders": ("builtin", "S-1-5-32-557",
+                                       "forest-root"),
+    "Storage Replica Administrators": ("builtin", "S-1-5-32-582", False),
+    "Schema Admins": ("domain", 518, "forest-root"),
+    "Group Policy Creator Owners": ("domain", 520, True),
+}
 
 OPERATORS = frozenset({"equals", "gte", "in", "present", "absent"})
 PRESENCE_OPERATORS = frozenset({"present", "absent"})
@@ -116,7 +155,7 @@ _CONTROL_FIELDS = frozenset({
     "interim_expected", "final_expected", "os_default", "os_default_source",
     "presence_rollout_state", "missing_result", "missing_note", "value_source",
     "baseline_gap", "remediation", "caveats", "audit_before_enforce",
-    "gpo_deliverable",
+    "gpo_deliverable", "directory_check", "directory_targets",
 })
 
 _REQUIRED_CONTROL_FIELDS = ("id", "title", "source", "scope", "check_type",
@@ -159,6 +198,8 @@ class Control:
     caveats: Tuple[str, ...] = ()
     audit_before_enforce: Optional[str] = None
     gpo_deliverable: bool = True
+    directory_check: Optional[str] = None
+    directory_targets: Tuple[str, ...] = ()
 
     @property
     def absence_check_command(self) -> Optional[str]:
@@ -440,7 +481,19 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
                 f"{'/'.join(sorted(PRESENCE_OPERATORS))} operators, not "
                 f"{operator!r}")
 
-    if status == STATUS_NEEDS_BASELINE_VALUE:
+    directory_check = raw.get("directory_check")
+    directory_targets = raw.get("directory_targets")
+    if raw["check_type"] == "directory-state":
+        _validate_directory_control(raw, where)
+    elif directory_check is not None or directory_targets is not None:
+        raise CatalogError(
+            f"{where}: 'directory_check' and 'directory_targets' only apply to "
+            f"directory-state controls")
+
+    if raw["check_type"] == "directory-state" and status != \
+            STATUS_NEEDS_BASELINE_VALUE:
+        pass  # validated above; the registry rules below do not apply
+    elif status == STATUS_NEEDS_BASELINE_VALUE:
         if interim is not None or final is not None or os_default is not None:
             raise CatalogError(
                 f"{where} is flagged {STATUS_NEEDS_BASELINE_VALUE} but carries "
@@ -543,7 +596,56 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
         caveats=tuple(str(c) for c in caveats),
         audit_before_enforce=raw.get("audit_before_enforce"),
         gpo_deliverable=True if gpo_deliverable is None else gpo_deliverable,
+        directory_check=directory_check,
+        directory_targets=tuple(directory_targets or ()),
     )
+
+
+def _validate_directory_control(raw: Dict[str, Any], where: str) -> None:
+    """The rules for a ``directory-state`` control.
+
+    It asserts that a named directory query returns nothing, so it carries no
+    registry key, no expected values and no OS default, and its operator is
+    ``absent``. An unscored one (``needs_baseline_value``) needs no query.
+    """
+    check = raw.get("directory_check")
+    targets = raw.get("directory_targets")
+    if raw.get("status") == STATUS_NEEDS_BASELINE_VALUE and check is None:
+        return
+    if check not in DIRECTORY_CHECKS:
+        raise CatalogError(
+            f"{where}: directory-state controls need 'directory_check' to be "
+            f"one of: {', '.join(sorted(DIRECTORY_CHECKS))} (got {check!r})")
+    if raw.get("operator") != "absent":
+        raise CatalogError(
+            f"{where}: a directory-state control asserts that its query finds "
+            f"nothing, so its operator must be 'absent'")
+    for name in ("registry_key", "registry_type", "interim_expected",
+                 "final_expected", "os_default", "os_default_source",
+                 "missing_result", "presence_rollout_state"):
+        if raw.get(name) is not None:
+            raise CatalogError(
+                f"{where}: '{name}' has no meaning for a directory-state "
+                f"control and must be null")
+    if raw.get("gpo_deliverable") is False:
+        raise CatalogError(
+            f"{where}: 'gpo_deliverable' has no meaning for a directory-state "
+            f"control")
+    if check in DIRECTORY_CHECKS_WITH_TARGETS:
+        if (not isinstance(targets, list) or not targets
+                or not all(isinstance(t, str) and t.strip() for t in targets)):
+            raise CatalogError(
+                f"{where}: directory_check {check!r} needs 'directory_targets', "
+                f"a non-empty list of names")
+        unknown = [t for t in targets if t not in WELL_KNOWN_GROUPS]
+        if unknown:
+            raise CatalogError(
+                f"{where}: unknown group(s) {', '.join(map(repr, unknown))}. "
+                f"Groups are looked up by well-known SID, so each name must be "
+                f"one of: {', '.join(sorted(WELL_KNOWN_GROUPS))}")
+    elif targets is not None:
+        raise CatalogError(
+            f"{where}: directory_check {check!r} takes no 'directory_targets'")
 
 
 def _require_enum(raw: Dict[str, Any], field_name: str,
