@@ -217,5 +217,5 @@ def write_scan(scan_result: Dict[str, Any], output_path: Any) -> Tuple[Path, int
         path.write_bytes(payload)
     except OSError as exc:
         raise ScanFileError(
-            f"could not write the scan to {str(path)!r}: {exc}") from exc
+            f"could not write the scan to '{path}': {exc}") from exc
     return path, len(payload)

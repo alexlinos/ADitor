@@ -1419,7 +1419,7 @@ def write_report(scan_result: Dict[str, Any], output_path: Any) -> Tuple[Path, i
         path.write_bytes(payload)
     except OSError as exc:
         raise ReportPathError(
-            f"could not write the report to {str(path)!r}: {exc}") from exc
+            f"could not write the report to '{path}': {exc}") from exc
     return path, len(payload)
 
 
