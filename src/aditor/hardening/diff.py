@@ -311,6 +311,8 @@ def _gpos(finding: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Which GPOs deliver the setting, ordered by DN."""
     seen = []
     for match in _found(finding):
+        if not match.get("gpo_dn"):
+            continue  # a directory-state object, not a GPO-delivered value
         seen.append({"dn": match.get("gpo_dn"),
                      "display_name": match.get("gpo_display_name")})
     return sorted(seen, key=lambda gpo: _normalise_dn(gpo.get("dn")))

@@ -135,7 +135,8 @@ def provenance(catalog, gpos_scanned=2, gpos_unreadable=0):
 
 
 def scan_payload(gpos, catalog=None, include_not_applicable=True,
-                 read_errors=(), unknown_control_ids=(), control_ids=None):
+                 read_errors=(), unknown_control_ids=(), control_ids=None,
+                 directory=None):
     """Build the payload ``scan_hardening`` would return, using the real engine.
 
     The findings come from the real evaluator over the real shipped catalog, so
@@ -144,8 +145,13 @@ def scan_payload(gpos, catalog=None, include_not_applicable=True,
     """
     catalog = catalog or load_catalog()
     controls, _unknown = catalog.select(control_ids)
+    if directory is None:  # every directory query ran and found nothing
+        directory = {c.directory_check: {"objects": [], "notes": [],
+                                         "error": None}
+                     for c in controls if c.check_type == "directory-state"}
     findings, counts = evaluate_controls(
-        controls, gpos, include_not_applicable=include_not_applicable)
+        controls, gpos, include_not_applicable=include_not_applicable,
+        directory=directory)
     return {
         "scan": provenance(catalog, gpos_scanned=len(gpos),
                            gpos_unreadable=len(read_errors)),
@@ -998,7 +1004,18 @@ def sample_scan():
                                 enforced=True)]),
         snapshot(GUID_C, "Unreadable Sample GPO",
                  read_error="SMB read failed: STATUS_ACCESS_DENIED"),
-    ], catalog=catalog, read_errors=read_errors)
+    ], catalog=catalog, read_errors=read_errors, directory={
+        # One directory-state failure and two passes, so the sample shows
+        # what a directory finding looks like.
+        "unconstrained-delegation": {"objects": [{
+            "value": "APPSRV01$", "dn": f"CN=APPSRV01,CN=Computers,{BASE_DN}",
+            "object_class": "computer",
+            "detail": "computer trusted for delegation to any service"}],
+            "notes": [], "error": None},
+        "spn-accounts-without-aes": {"objects": [], "notes": [],
+                                     "error": None},
+        "non-empty-groups": {"objects": [], "notes": [], "error": None},
+    })
 
 
 if __name__ == "__main__":  # pragma: no cover - a maintenance utility
