@@ -775,7 +775,8 @@ def _render_directory_found(finding: Dict[str, Any]) -> str:
                 f'{_esc(finding.get("error"))}</p>')
     if not found:
         return ('<p class="found-none">Nothing found &mdash; the directory '
-                'query returned no matching objects.</p>')
+                'query returned no matching objects that the bind account can '
+                'read.</p>')
     rows = "".join(
         '<tr>'
         f'<td>{_esc(m.get("value"))}</td>'
