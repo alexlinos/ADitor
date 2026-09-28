@@ -37,13 +37,13 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
 | DEVORE-03-LDAP-DIAG-LOGGING | 3 | gpo-registry-pol | ✅ floor >=2 (audit helper; levels 0–5 per MS) |
 | DEVORE-04-KERB-CONFIGURE-ENCTYPES | 4 | gpo-security-template | ❌ reg path not stated |
 | DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES | 4 | gpo-registry-pol | ✅ 0x38 quoted |
-| DEVORE-04-MSDS-SUPPORTEDENCTYPES | 4 | directory-state | ⚠️ per-account attribute |
+| DEVORE-04-MSDS-SUPPORTEDENCTYPES | 4 | directory-state | ⚠️ per-account attribute — shipped as DEVORE-04-SPN-ACCOUNTS-AES |
 | DEVORE-05-LDAP-CHANNEL-BINDING | 5 | gpo-security-template | ✅ path quoted; 0/1/2 from MS KB4034879 |
 | DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS | 6 | gpo-security-template | ✅ =1 (MS smb-signing-overview) |
 | DEVORE-06-SMB-SERVER-SIGNING-ALWAYS | 6 | gpo-security-template | ✅ =1 (MS smb-signing-overview) |
 | DEVORE-06-LLMNR-DISABLE | 6 | gpo-registry-pol | ✅ =0 quoted |
 | DEVORE-06-NBTNS-NODETYPE | 6 | gpo-registry-pol | ✅ =2 quoted |
-| DEVORE-07-LEAST-PRIVILEGE | 7 | directory-state | ⚠️ membership/ACL/attr |
+| DEVORE-07-LEAST-PRIVILEGE | 7 | directory-state | ⚠️ membership/ACL/attr — two parts shipped: DEVORE-07-EMPTY-PRIVILEGED-GROUPS, DEVORE-07-UNCONSTRAINED-DELEGATION |
 | DEVORE-08-NTLM-AUDIT-INCOMING | 8 | gpo-security-template | ✅ floor >=1 (MS option set) |
 | DEVORE-08-NTLM-AUDIT-OUTGOING | 8 | gpo-security-template | ✅ floor >=1 (MS option set) |
 | DEVORE-08-NTLM-AUDIT-INDOMAIN | 8 | gpo-security-template | ✅ floor >=1 (MS option set) |
@@ -81,7 +81,18 @@ types**: `gpo-security-template`, `gpo-registry-pol`, and `directory-state`.
    Benchmarks. Plan the catalog to cite two sources per control: Devore (the *why*
    / rollout) + baseline (the *exact value*).
 
-2. **Three engines, two already exist.** `gpo-security-template` and
+2. **Three engines.** The `directory-state` engine (engine 1.4.0) runs a fixed,
+   read-only directory query named by the control's `directory_check`
+   (`spn-accounts-without-aes`, `non-empty-groups`, `unconstrained-delegation`)
+   and asserts that it finds nothing: none is a pass, any is a fail listing the
+   objects, and a failed query is an error, never a pass. Queries are named,
+   not written as LDAP filters in the catalog, so a catalog edit cannot become
+   an arbitrary directory query. Results are kept per control. Groups are
+   found by well-known SID (never by their localizable name) and include
+   primary-group members; a group that must exist but can't be found is an
+   error. Writable DCs are excluded from the delegation check by account type
+   (SERVER_TRUST_ACCOUNT), not by primaryGroupID. Originally:
+   **Three engines, two already exist.** `gpo-security-template` and
    `gpo-registry-pol` are served by the SYSVOL reader (GptTmpl.inf `[Registry Values]`
    + Registry.pol + Group Policy Preferences `Registry.xml`). `directory-state`
    controls (SMBv1 feature, msDS-SupportedEncryptionTypes,

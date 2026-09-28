@@ -33,7 +33,6 @@ nothing at all.
 import dataclasses
 
 import pytest
-
 from aditor.gpo.parsers import (
     parse_ini,
     parse_registry_pol,
@@ -50,6 +49,8 @@ from aditor.hardening.evaluator import (
     EVIDENCE_SOURCE_NOT_CONFIGURED,
     EVIDENCE_SOURCE_OS_DEFAULT,
     EVIDENCE_SOURCE_UNKNOWN,
+    NON_WRITE_DELETE,
+    NON_WRITE_KEY_DELETE,
     RESULT_ERROR,
     RESULT_FAIL,
     RESULT_NOT_APPLICABLE,
@@ -59,8 +60,6 @@ from aditor.hardening.evaluator import (
     STATE_AUDIT,
     STATE_ENFORCED,
     STATE_NOT_STARTED,
-    NON_WRITE_DELETE,
-    NON_WRITE_KEY_DELETE,
     UNSCORED_NEEDS_BASELINE_VALUE,
     GpoLink,
     GpoSnapshot,
@@ -157,6 +156,12 @@ def line(key, type_code, data):
 
 TEST_FLAG_LINE = "MACHINE\\System\\CurrentControlSet\\Services\\Test\\Flag=4,{}"
 
+
+
+def clean_directory(catalog):
+    """Every directory query in ``catalog`` run, and none found anything."""
+    return {c.id: {"objects": [], "notes": [], "error": None}
+            for c in catalog.controls if c.check_type == "directory-state"}
 
 class TestSatisfies:
     """The five catalog operators."""
@@ -1524,7 +1529,8 @@ class TestShippedCatalogAgainstSynthesizedGpos:
                         dword(1 if value is None else value)))
 
     @pytest.mark.parametrize("control_id", [
-        c.id for c in load_catalog().scored_controls])
+        c.id for c in load_catalog().scored_controls
+        if c.check_type != "directory-state"])
     def test_every_active_control_can_pass(self, control_id):
         control_obj = load_catalog().by_id(control_id)
 
@@ -1535,7 +1541,8 @@ class TestShippedCatalogAgainstSynthesizedGpos:
 
     @pytest.mark.parametrize("control_id", [
         c.id for c in load_catalog().scored_controls
-        if c.os_default is None and c.gpo_deliverable])
+        if c.os_default is None and c.gpo_deliverable
+        and c.check_type != "directory-state"])
     def test_every_active_control_reports_something_on_an_empty_domain(
             self, control_id):
         """For these controls a GPO *is* the delivery mechanism.
@@ -1602,6 +1609,7 @@ class TestShippedCatalogAgainstSynthesizedGpos:
         catalog = load_catalog()
 
         findings, counts = evaluate_controls(catalog.controls, [],
+                                             directory=clean_directory(catalog),
                                              include_not_applicable=True)
 
         assert counts["total"] == len(catalog.controls)
@@ -2325,6 +2333,7 @@ class TestPreferencesDoNotDisturbTheRestOfTheEngine:
                        "00000038"))
 
         findings, counts = evaluate_controls(catalog.controls, [gpo],
+                                             directory=clean_directory(catalog),
                                              include_not_applicable=True)
 
         assert counts["total"] == len(catalog.controls)
@@ -2616,6 +2625,7 @@ class TestUnknownFindingsInTheCounts:
     def test_every_result_is_a_known_result_value(self):
         catalog = load_catalog()
         findings, counts = evaluate_controls(catalog.controls, [],
+                                             directory=clean_directory(catalog),
                                             include_not_applicable=True)
 
         assert all(f["result"] in RESULTS for f in findings)
@@ -2626,6 +2636,7 @@ class TestUnknownFindingsInTheCounts:
         catalog = load_catalog()
 
         _findings, counts = evaluate_controls(catalog.controls, [],
+                                             directory=clean_directory(catalog),
                                              include_not_applicable=True)
 
         assert counts[RESULT_UNKNOWN] == 2
@@ -2799,7 +2810,7 @@ class TestKeyScopedDeletesAreDisclosed:
 
         findings, counts = evaluate_controls(
             catalog.controls, [self.key_delete_gpo()],
-            include_not_applicable=True)
+            include_not_applicable=True, directory=clean_directory(catalog))
 
         assert counts["total"] == len(catalog.controls)
         assert counts[RESULT_ERROR] == 0

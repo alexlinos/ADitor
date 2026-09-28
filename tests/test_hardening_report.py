@@ -135,7 +135,8 @@ def provenance(catalog, gpos_scanned=2, gpos_unreadable=0):
 
 
 def scan_payload(gpos, catalog=None, include_not_applicable=True,
-                 read_errors=(), unknown_control_ids=(), control_ids=None):
+                 read_errors=(), unknown_control_ids=(), control_ids=None,
+                 directory=None):
     """Build the payload ``scan_hardening`` would return, using the real engine.
 
     The findings come from the real evaluator over the real shipped catalog, so
@@ -144,8 +145,12 @@ def scan_payload(gpos, catalog=None, include_not_applicable=True,
     """
     catalog = catalog or load_catalog()
     controls, _unknown = catalog.select(control_ids)
+    if directory is None:  # every directory query ran and found nothing
+        directory = {c.id: {"objects": [], "notes": [], "error": None}
+                     for c in controls if c.check_type == "directory-state"}
     findings, counts = evaluate_controls(
-        controls, gpos, include_not_applicable=include_not_applicable)
+        controls, gpos, include_not_applicable=include_not_applicable,
+        directory=directory)
     return {
         "scan": provenance(catalog, gpos_scanned=len(gpos),
                            gpos_unreadable=len(read_errors)),
@@ -998,7 +1003,19 @@ def sample_scan():
                                 enforced=True)]),
         snapshot(GUID_C, "Unreadable Sample GPO",
                  read_error="SMB read failed: STATUS_ACCESS_DENIED"),
-    ], catalog=catalog, read_errors=read_errors)
+    ], catalog=catalog, read_errors=read_errors, directory={
+        # One directory-state failure and two passes, so the sample shows
+        # what a directory finding looks like.
+        "DEVORE-07-UNCONSTRAINED-DELEGATION": {"objects": [{
+            "value": "APPSRV01$", "dn": f"CN=APPSRV01,CN=Computers,{BASE_DN}",
+            "object_class": "computer",
+            "detail": "computer trusted for delegation to any service"}],
+            "notes": [], "error": None},
+        "DEVORE-04-SPN-ACCOUNTS-AES": {"objects": [], "notes": [],
+                                       "error": None},
+        "DEVORE-07-EMPTY-PRIVILEGED-GROUPS": {"objects": [], "notes": [],
+                                              "error": None},
+    })
 
 
 if __name__ == "__main__":  # pragma: no cover - a maintenance utility
@@ -1396,7 +1413,7 @@ class TestUnknownVerdictThatIsNotAReadFailure:
     def test_the_section_lede_explains_both_kinds_of_unknown(self, document):
         lede = visible_text(sections_of(document)[SECTION_UNKNOWN])
 
-        assert "a GPO couldn't be read" in lede
+        assert "A GPO couldn't be read" in lede
         assert "Group Policy can't show it" in lede
         assert "unconfirmed, not as passes" in lede
 

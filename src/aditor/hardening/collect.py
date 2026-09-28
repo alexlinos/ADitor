@@ -18,12 +18,15 @@ version, timestamp, domain and base DN — because a report that cannot state
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import ldap3
+from ldap3.utils.conv import escape_filter_chars
+from ldap3.utils.dn import parse_dn
 
 from ..core.logging import log_ldap_operation
 from ..gpo.parsers import (
@@ -34,13 +37,32 @@ from ..gpo.parsers import (
     parse_security_template_registry_values,
 )
 from . import SCAN_ENGINE_VERSION
-from .catalog import Catalog, CatalogError, load_catalog
+from .catalog import (
+    DIRECTORY_CHECK_NON_EMPTY_GROUPS,
+    DIRECTORY_CHECK_SPN_WITHOUT_AES,
+    DIRECTORY_CHECK_UNCONSTRAINED_DELEGATION,
+    WELL_KNOWN_GROUPS,
+    Catalog,
+    CatalogError,
+    Control,
+    load_catalog,
+)
 from .evaluator import GpoLink, GpoSnapshot, evaluate_controls
 
 # The GptTmpl.inf section holding registry-backed security options.
 _REGISTRY_VALUES_SECTION = "Registry Values"
 
 _MACHINE_REGISTRY_POL = r"machine\registry.pol"
+
+# userAccountControl and msDS-SupportedEncryptionTypes bits the directory
+# checks read (Microsoft's documented values).
+_UAC_ACCOUNTDISABLE = 0x2
+_UAC_SERVER_TRUST_ACCOUNT = 0x2000  # a writable domain controller's account
+_UAC_TRUSTED_FOR_DELEGATION = 0x80000
+_ETYPE_RC4 = 0x4
+_ETYPE_AES = 0x8 | 0x10  # AES128-CTS-HMAC-SHA1-96 | AES256-CTS-HMAC-SHA1-96
+# LDAP_MATCHING_RULE_BIT_AND, for filtering on a userAccountControl bit.
+_BIT_AND = "1.2.840.113556.1.4.803"
 # Group Policy Preferences deliver registry values that have no ADMX policy
 # behind them, so a GPO's real hardening often lives here rather than in
 # Registry.pol.
@@ -136,9 +158,11 @@ class Scanner:
             snapshots, read_errors = self._read_gpo_snapshots(links_by_guid)
         except Exception as exc:
             raise GpoReadFailure(exc) from exc
+        directory = self._read_directory_state(controls)
 
         findings, counts = evaluate_controls(
-            controls, snapshots, include_not_applicable=include_not_applicable)
+            controls, snapshots, include_not_applicable=include_not_applicable,
+            directory=directory)
 
         log_ldap_operation(operation, self.ldap.ad_config.base_dn, True,
                            f"Evaluated {counts['total']} controls against "
@@ -266,6 +290,235 @@ class Scanner:
             ))
         return snapshots, read_errors
 
+    # --- directory state ---------------------------------------------------
+
+    def _read_directory_state(self, controls: Sequence[Control]
+                              ) -> Dict[str, Dict[str, Any]]:
+        """Run the directory query each selected directory-state control names.
+
+        Keyed by **control id**, not by query: two controls can name the same
+        query with different targets, and each must be judged on its own
+        result. A query that raises is recorded as that control's ``error``
+        rather than failing the scan: the GPO findings are still sound, and
+        the affected control reports an error, never a pass.
+        """
+        runners = {
+            DIRECTORY_CHECK_SPN_WITHOUT_AES: self._spn_accounts_without_aes,
+            DIRECTORY_CHECK_NON_EMPTY_GROUPS: self._non_empty_groups,
+            DIRECTORY_CHECK_UNCONSTRAINED_DELEGATION:
+                self._unconstrained_delegation,
+        }
+        out: Dict[str, Dict[str, Any]] = {}
+        for control in controls:
+            if not (control.check_type == "directory-state" and control.scored
+                    and control.directory_check in runners):
+                continue
+            try:
+                out[control.id] = runners[control.directory_check](control)
+            except Exception as exc:
+                out[control.id] = {"objects": [], "notes": [],
+                                   "error": str(exc)}
+        return out
+
+    def _search(self, search_filter: str, attributes: List[str],
+                base: Optional[str] = None, scope: Any = ldap3.SUBTREE
+                ) -> List[Dict[str, Any]]:
+        """Search this domain. A result whose DN is outside ``base_dn`` (a
+        referral followed into a child domain) is dropped, so another domain's
+        accounts are never reported as this one's."""
+        root = self.ldap.ad_config.base_dn
+        results = self.ldap.search(
+            search_base=base or root,
+            search_filter=search_filter,
+            attributes=attributes,
+            search_scope=scope,
+        ) or []
+        return [r for r in results
+                if not isinstance(r, dict) or _within(r.get("dn"), root)]
+
+    def _forest_root_dn(self) -> Optional[str]:
+        """The forest root domain's DN, from the RootDSE ldap3 read on bind.
+
+        ``None`` when it can't be read; callers then assume this *is* the
+        forest root, so a forest-root group that can't be found is an error
+        rather than a quiet pass.
+        """
+        try:
+            info = self.ldap.connect().server.info
+            value = (info.other or {}).get("rootDomainNamingContext")
+        except Exception:
+            return None
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else None
+        return value if isinstance(value, str) and value.strip() else None
+
+    def _spn_accounts_without_aes(self, _control: Control) -> Dict[str, Any]:
+        """Enabled service accounts with an SPN whose encryption types lack AES.
+
+        User accounts and managed service accounts (sMSA, gMSA). Computer
+        accounts are skipped (Windows maintains theirs) and so is krbtgt. A
+        blank ``msDS-SupportedEncryptionTypes`` counts as no AES: the account
+        then gets whatever the domain default is, which depends on the domain
+        controllers' patch level.
+        """
+        entries = self._search(
+            "(&(|(objectCategory=person)"
+            "(objectCategory=msDS-GroupManagedServiceAccount)"
+            "(objectCategory=msDS-ManagedServiceAccount))"
+            "(servicePrincipalName=*)(!(sAMAccountName=krbtgt))"
+            f"(!(userAccountControl:{_BIT_AND}:={_UAC_ACCOUNTDISABLE})))",
+            ["sAMAccountName", "msDS-SupportedEncryptionTypes", "objectClass"])
+        objects = []
+        for entry in entries:
+            try:
+                attributes = entry.get("attributes", {}) or {}
+                raw = _attr(attributes, "msDS-SupportedEncryptionTypes")
+                blank = raw in (None, "", [])
+                etypes = 0 if blank else _as_int(raw)
+                if etypes & _ETYPE_AES:
+                    continue
+                if blank:
+                    detail = ("not set: uses the domain default, which is RC4 "
+                              "on domain controllers without the 2026 Kerberos "
+                              "updates")
+                elif etypes & _ETYPE_RC4:
+                    detail = (f"set to {etypes} (0x{etypes & 0xFFFFFFFF:X}): "
+                              f"RC4 and no AES")
+                else:
+                    detail = (f"set to {etypes} (0x{etypes & 0xFFFFFFFF:X}): "
+                              f"no AES")
+                objects.append(_object(entry, attributes, _account_kind(
+                    attributes), detail))
+            except Exception as exc:
+                objects.append(_unreadable(entry, exc))
+        return {"objects": _sorted(objects), "notes": [], "error": None}
+
+    def _domain_sid(self) -> str:
+        """The domain's SID, read from the domain object itself."""
+        entries = self._search("(objectClass=*)", ["objectSid"],
+                               scope=ldap3.BASE)
+        sid = _sid_text(_attr((entries[0].get("attributes") or {})
+                              if entries else {}, "objectSid"))
+        if not sid:
+            raise RuntimeError("could not read the domain's SID, so the "
+                               "domain groups could not be looked up")
+        return sid
+
+    def _non_empty_groups(self, control: Control) -> Dict[str, Any]:
+        """The control's target groups that have any member.
+
+        Each group is found by its well-known SID, not its name (names are
+        localized and can be renamed). Its members are the union of:
+
+        * its ``member`` values;
+        * every account whose ``memberOf`` names it. AD returns no ``member``
+          attribute for an empty group *and* for one the bind account may not
+          read, so an empty ``member`` is never taken on its own word;
+        * for domain groups, every account whose ``primaryGroupID`` is the
+          group, because AD leaves an account out of its primary group's
+          ``member``.
+
+        A group that should exist but isn't found is an error, not an empty
+        group: the bind account may simply not be able to see it. A query
+        that fails is an error for the whole control, never a listed group.
+        """
+        objects, notes, missing = [], [], []
+        domain_sid = None
+        forest_root = self._forest_root_dn()
+        in_forest_root = forest_root is None or _same_dn(
+            forest_root, self.ldap.ad_config.base_dn)
+        for name in control.directory_targets:
+            scope, ident, exists = WELL_KNOWN_GROUPS[name]
+            required = exists is True or (exists == "forest-root"
+                                          and in_forest_root)
+            if scope == "domain":
+                domain_sid = domain_sid or self._domain_sid()
+                sid, rid = f"{domain_sid}-{ident}", ident
+            else:
+                sid, rid = ident, None
+            entries = self._search(
+                f"(&(objectClass=group)(objectSid={escape_filter_chars(sid)}))",
+                ["sAMAccountName", "member"])
+            if not entries:
+                if required:
+                    missing.append(f"{name} ({sid})")
+                elif exists == "forest-root":
+                    notes.append(f"{name} ({sid}) was not found. It exists only "
+                                 f"in the forest root domain, and this domain "
+                                 f"is not the forest root ({forest_root}), so "
+                                 f"its members were not checked here.")
+                else:
+                    notes.append(f"{name} ({sid}) was not found. That is "
+                                 f"normal for this group where the schema or "
+                                 f"role that adds it isn't present.")
+                continue
+            entry = entries[0]
+            group_dn = _text(entry.get("dn"))
+            # The member queries run outside the per-entry guard: if one
+            # fails, the whole control is an error, not a listed group.
+            extra = [str(e.get("dn") or "") for e in self._search(
+                f"(memberOf={escape_filter_chars(group_dn)})",
+                ["sAMAccountName"])] if group_dn else []
+            if rid is not None:
+                extra += [str(e.get("dn") or "") for e in self._search(
+                    f"(primaryGroupID={rid})", ["sAMAccountName"])]
+            try:
+                attributes = entry.get("attributes", {}) or {}
+                members = [_text(m) for m in _as_list(attributes.get("member"))]
+                members = sorted({m for m in members + extra if m},
+                                 key=str.lower)
+                if not members:
+                    continue
+                shown = ", ".join(_rdn(m) for m in members[:5])
+                more = (f" and {len(members) - 5} more"
+                        if len(members) > 5 else "")
+                local = _text(_attr(attributes, "sAMAccountName")) or name
+                label = name if local == name else f"{name} ({local})"
+                objects.append({
+                    "value": label, "dn": group_dn,
+                    "object_class": "group",
+                    "detail": f"{len(members)} member(s): {shown}{more}",
+                    "members": members,
+                })
+            except Exception as exc:
+                objects.append(_unreadable(entry, exc, name))
+        if missing:
+            raise RuntimeError(
+                "these groups should exist in this domain but were not found, "
+                "so their members could not be checked (the bind account may "
+                f"not be able to read them): {', '.join(missing)}")
+        return {"objects": _sorted(objects), "notes": notes, "error": None}
+
+    def _unconstrained_delegation(self, _control: Control) -> Dict[str, Any]:
+        """Accounts, other than writable domain controllers, trusted for
+        delegation to any service. Disabled accounts are listed and marked:
+        re-enabling one brings the exposure back.
+
+        Writable DCs are recognised by their account type (a computer with
+        SERVER_TRUST_ACCOUNT), not by ``primaryGroupID``, which can be set on
+        any account. Read-only DCs don't carry this flag by design, so an RODC
+        that has it is listed.
+        """
+        entries = self._search(
+            f"(&(userAccountControl:{_BIT_AND}:={_UAC_TRUSTED_FOR_DELEGATION})"
+            f"(!(&(objectCategory=computer)"
+            f"(userAccountControl:{_BIT_AND}:={_UAC_SERVER_TRUST_ACCOUNT}))))",
+            ["sAMAccountName", "objectClass", "userAccountControl"])
+        objects = []
+        for entry in entries:
+            try:
+                attributes = entry.get("attributes", {}) or {}
+                kind = _account_kind(attributes)
+                disabled = _as_int(_attr(attributes, "userAccountControl")) \
+                    & _UAC_ACCOUNTDISABLE
+                detail = f"{kind} trusted for delegation to any service"
+                if disabled:
+                    detail += " (disabled; re-enabling it restores this)"
+                objects.append(_object(entry, attributes, kind, detail))
+            except Exception as exc:
+                objects.append(_unreadable(entry, exc))
+        return {"objects": _sorted(objects), "notes": [], "error": None}
+
     # --- SMB / SYSVOL ------------------------------------------------------
 
     def _smb_target(self, sysvol_path: str) -> Dict[str, str]:
@@ -336,6 +589,119 @@ class Scanner:
 # --------------------------------------------------------------------------- #
 # Content extraction (module-level so it stays trivially testable)
 # --------------------------------------------------------------------------- #
+
+def _text(value: Any) -> str:
+    """A directory value as plain text: bytes decoded, lists reduced, never
+    ``None`` — so a finding always serialises and always renders."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else ""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _as_int(value: Any) -> int:
+    """An integer attribute, 0 when it isn't one. ``0x..`` strings parse."""
+    value = value[0] if isinstance(value, (list, tuple)) and value else value
+    try:
+        return int(value, 0) if isinstance(value, str) else int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _as_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _account_kind(attributes: Dict[str, Any]) -> str:
+    classes = {_text(c).lower() for c in _as_list(attributes.get("objectClass"))}
+    if classes & {"msds-groupmanagedserviceaccount",
+                  "msds-managedserviceaccount"}:
+        return "managed service account"
+    if "computer" in classes:
+        return "computer"
+    return "user"
+
+
+def _object(entry: Dict[str, Any], attributes: Dict[str, Any], kind: str,
+            detail: str) -> Dict[str, Any]:
+    return {"value": _text(_attr(attributes, "sAMAccountName")),
+            "dn": _text(entry.get("dn")), "object_class": kind,
+            "detail": detail}
+
+
+def _unreadable(entry: Any, exc: Exception, name: str = "") -> Dict[str, Any]:
+    """A matching entry whose attributes couldn't be read.
+
+    Listed, never skipped: the query matched it, so skipping it could turn a
+    fail into a pass.
+    """
+    dn = _text(entry.get("dn")) if isinstance(entry, dict) else ""
+    return {"value": name or _rdn(dn) or "(unreadable entry)", "dn": dn,
+            "object_class": "unknown",
+            "detail": f"listed because its attributes couldn't be read: {exc}"}
+
+
+def _sid_text(value: Any) -> str:
+    """A SID as ``S-1-5-21-...``, from ldap3's formatted string or raw bytes."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray)) and len(value) >= 8:
+        revision, count = value[0], value[1]
+        authority = int.from_bytes(value[2:8], "big")
+        subs = [int.from_bytes(value[8 + 4 * i:12 + 4 * i], "little")
+                for i in range(count)]
+        return "-".join(["S", str(revision), str(authority)] + [str(x) for x in subs])
+    return ""
+
+
+def _norm_dn(dn: Any) -> str:
+    return ",".join(part.strip() for part in _text(dn).lower().split(","))
+
+
+def _same_dn(a: Any, b: Any) -> bool:
+    return _norm_dn(a) == _norm_dn(b)
+
+
+def _within(dn: Any, root: Any) -> bool:
+    """Whether ``dn`` is in the same domain as ``root``, at or under it.
+
+    Textually under isn't enough: a child domain's objects
+    (``...,DC=child,DC=test,DC=local``) end with the parent's DN too. An AD
+    object's ``DC=`` components are exactly its own domain's, so they must
+    match ``root``'s as well.
+    """
+    dn, root = _norm_dn(dn), _norm_dn(root)
+    if not root or not (dn == root or dn.endswith("," + root)):
+        return False
+    def dcs(text: str) -> List[str]:
+        return [part for part in text.split(",") if part.startswith("dc=")]
+    return dcs(dn) == dcs(root)
+
+
+def _sorted(objects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Directory objects in a stable order, so two scans list them alike."""
+    return sorted(objects, key=lambda o: (str(o.get("value")).lower(),
+                                          str(o.get("dn")).lower()))
+
+
+def _rdn(dn: Any) -> str:
+    """``CN=Doe\\, Jane,OU=...`` -> ``Doe, Jane``: a member's name, for display."""
+    text = _text(dn)
+    try:
+        value = parse_dn(text)[0][1]
+    except Exception:
+        value = text.split(",", 1)[0].split("=", 1)[-1]
+    return re.sub(r"\\([0-9A-Fa-f]{2}|.)",
+                  lambda m: (chr(int(m.group(1), 16)) if len(m.group(1)) == 2
+                             else m.group(1)), value)
+
 
 def _template_entries(contents: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Structured ``[Registry Values]`` entries from every GptTmpl.inf found."""

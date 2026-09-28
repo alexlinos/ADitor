@@ -147,6 +147,8 @@ EVIDENCE_SOURCE_GPO = "gpo"
 EVIDENCE_SOURCE_OS_DEFAULT = "os-default"
 EVIDENCE_SOURCE_NOT_CONFIGURED = "not-configured"
 EVIDENCE_SOURCE_UNKNOWN = "unknown"
+# A directory-state verdict rests on a directory query, not on Group Policy.
+EVIDENCE_SOURCE_DIRECTORY = "directory"
 
 # How a GPO put the value in place. Recorded per found value in
 # ``evidence.found[].delivery`` — see the module docstring for why this is
@@ -627,7 +629,9 @@ def _as_number(value: Any, role: str) -> int:
 # --------------------------------------------------------------------------- #
 
 def evaluate_control(control: Control,
-                     gpos: Iterable[GpoSnapshot]) -> Dict[str, Any]:
+                     gpos: Iterable[GpoSnapshot],
+                     directory: Optional[Dict[str, Any]] = None
+                     ) -> Dict[str, Any]:
     """Evaluate one control against every GPO, returning one finding.
 
     The finding carries ``result`` (``pass``/``fail``/``unknown``/
@@ -651,6 +655,8 @@ def evaluate_control(control: Control,
             control, UNSCORED_UNSUPPORTED_CHECK_TYPE,
             f"check type {control.check_type!r} has no evaluator in this release",
             gpos)
+    if control.check_type == "directory-state":
+        return _directory_finding(control, (directory or {}).get(control.id))
 
     try:
         matches = find_matches(control, gpos)
@@ -700,13 +706,17 @@ def evaluate_control(control: Control,
 
 def evaluate_controls(controls: Iterable[Control],
                       gpos: Iterable[GpoSnapshot],
-                      include_not_applicable: bool = False
+                      include_not_applicable: bool = False,
+                      directory: Optional[Dict[str, Any]] = None
                       ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """Evaluate many controls and count the outcomes.
 
     Args:
         controls: The controls to evaluate, in report order.
         gpos: The GPO snapshots to evaluate them against.
+        directory: The results of the directory queries directory-state
+            controls name, keyed by control id — see
+            :func:`_directory_finding` for the shape.
         include_not_applicable: Include findings that came back
             ``not_applicable`` because the control did not apply (an unset
             conditional setting). ``needs_baseline_value`` findings are **always**
@@ -744,7 +754,7 @@ def evaluate_controls(controls: Iterable[Control],
     findings: List[Dict[str, Any]] = []
 
     for control in controls:
-        finding = evaluate_control(control, gpos)
+        finding = evaluate_control(control, gpos, directory)
         counts["total"] += 1
         counts[finding["result"]] += 1
         if finding["scored"]:
@@ -1014,6 +1024,71 @@ def _finding(control: Control, result: str, rollout_state: Optional[str],
         "caveats": list(control.caveats),
         "audit_before_enforce": control.audit_before_enforce,
     })
+    return finding
+
+
+def _directory_finding(control: Control,
+                       result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """A directory-state control, judged on its query's result.
+
+    ``result`` is ``{"objects": [...], "error": str | None, "notes": [...]}``
+    as :mod:`aditor.hardening.collect` returns it, or ``None`` when the query
+    was not run. Each object is ``{"value", "dn", "object_class", "detail"}``,
+    where ``value`` is the object's name, so a scan diff compares the lists of
+    offending objects the way it compares found registry values.
+
+    The control asserts that the query finds nothing: none is a pass, any is a
+    fail listing them, and a query that failed or never ran is an error —
+    never a pass, because "we could not look" is not "nothing is there".
+    """
+    if result is None:
+        result = {"objects": [], "notes": [],
+                  "error": "the directory query for this control was not run"}
+    objects = [o for o in (result.get("objects") or []) if isinstance(o, dict)]
+    notes = [str(n) for n in (result.get("notes") or []) if str(n).strip()]
+    error = result.get("error")
+
+    finding = control.summary()
+    finding.update({
+        "rollout_state": None,
+        "scored": control.scored,
+        "unscored_reason": None,
+        "evidence": {
+            "registry_key": None,
+            "registry_type": None,
+            "directory_check": control.directory_check,
+            "directory_targets": list(control.directory_targets) or None,
+            "expected": {
+                "operator": control.operator,
+                "interim": None,
+                "final": None,
+                "os_default": None,
+                "value_source": control.value_source,
+            },
+            "source": EVIDENCE_SOURCE_DIRECTORY,
+            "os_default": None,
+            "found": objects,
+            "found_count": len(objects),
+            "gpos_searched": None,
+            "notes": notes,
+        },
+        "conflict": None,
+        "caveats": list(control.caveats),
+        "audit_before_enforce": control.audit_before_enforce,
+    })
+    if error:
+        finding["result"] = RESULT_ERROR
+        finding["error"] = str(error)
+        finding["evidence"]["source"] = EVIDENCE_SOURCE_UNKNOWN
+        finding["evidence"]["notes"].append(
+            f"Could not evaluate: {error}. Reported as an error rather than a "
+            f"pass or a fail.")
+    elif objects:
+        finding["result"] = RESULT_FAIL
+        finding["rollout_state"] = STATE_NOT_STARTED
+    else:
+        finding["result"] = RESULT_PASS
+        finding["rollout_state"] = STATE_ENFORCED
     return finding
 
 

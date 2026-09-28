@@ -636,6 +636,16 @@ def render_scan_result(result: "ScanResult") -> str:
             "affected controls are reported as unknown rather than as clean. "
             "The report lists which ones and why.</p>"))
 
+    directory_errors = payload.get("directory_errors") or []
+    if directory_errors:
+        parts.append(_banner(
+            "warn", f"{len(directory_errors)} directory check(s) could not "
+                    f"run.",
+            "<p>Their queries failed, so these controls are reported as "
+            "unknown rather than as clean: "
+            + esc(", ".join(str(c) for c in directory_errors))
+            + ". The report says why.</p>"))
+
     parts.append(_rows([
         ("Snapshot folder", f'<code>{esc(payload.get("snapshot_dir"))}</code>'),
         ("Scans run", esc(payload.get("scans_run"), "0")),
@@ -649,7 +659,8 @@ def render_scan_result(result: "ScanResult") -> str:
     parts.append(_banner(
         "info", "This folder contains directory content.",
         "<p>Both files embed this domain's Group Policy names, registry "
-        "values and distinguished names. Treat the folder accordingly when "
+        "values, distinguished names, and the names of the accounts and group "
+        "members the directory checks list. Treat the folder accordingly when "
         "attaching it to a ticket or sharing it.</p>"))
     return "".join(parts)
 

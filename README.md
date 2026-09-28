@@ -96,7 +96,9 @@ Each finding carries a result, a rollout state (not started / audit / enforced,
 so a domain correctly mid-rollout does not read as failing), and evidence: the
 expected value next to every value found, with the source GPO and its link path.
 Controls come from the Devore AD Hardening Series, and each one cites its
-article. Policy precedence is not resolved: GPOs that disagree are reported as
+article. Most read Group Policy; a few read the directory itself (service
+accounts without AES, built-in privileged groups that should be empty, and
+unconstrained delegation), with read-only LDAP queries. Policy precedence is not resolved: GPOs that disagree are reported as
 conflicts. Controls whose exact expected value the source does not state are
 reported but never scored or guessed.
 
