@@ -120,8 +120,16 @@ def signed_the_leaf(candidate: x509.Certificate,
         an *unknown* answer, which the caller renders as unavailable rather than
         as a rejection, because "we cannot check" is not "it is wrong".
     """
-    key = candidate.public_key()
-    algorithm = leaf.signature_hash_algorithm
+    try:
+        # Inside the guard: a real certificate store holds certificates whose
+        # key this build can't even parse (found on a Windows runner's ROOT
+        # store), and one of those must not take the whole fetch down.
+        key = candidate.public_key()
+        algorithm = leaf.signature_hash_algorithm
+    except (ValueError, UnsupportedAlgorithm) as exc:
+        return False, (f"ADitor could not read this certificate's key "
+                       f"({redact(str(exc))}), so this candidate was neither "
+                       f"confirmed nor ruled out.")
     try:
         if isinstance(key, rsa.RSAPublicKey):
             if algorithm is None:
@@ -365,7 +373,12 @@ def fetch_issuing_ca(leaf: CertificateFacts, *,
         if facts.fingerprint_hex in seen:
             return
         seen.add(facts.fingerprint_hex)
-        verified, reason = signed_the_leaf(certificate, leaf_certificate)
+        try:
+            verified, reason = signed_the_leaf(certificate, leaf_certificate)
+        except Exception as exc:  # pragma: no cover - signed_the_leaf guards
+            verified, reason = False, (
+                f"The signature check failed ({redact(str(exc))}), so this "
+                f"candidate was neither confirmed nor ruled out.")
         candidates.append(Candidate(facts=facts, verified=verified,
                                     reason=reason))
 

@@ -343,6 +343,40 @@ class TestDownloadsAndStores:
             "This computer's Windows certificate store (ROOT)"]
 
 
+class TestAnUnreadableCertificateDoesNotStopTheFetch:
+    """Found on a real Windows runner: its ROOT store held a certificate whose
+    key this build of cryptography can't parse, and reading it crashed the
+    button ("That did not work")."""
+
+    class Unparseable:
+        def public_key(self):
+            raise ValueError("Could not deserialize key data")
+
+    def test_signed_the_leaf_reports_it_as_unchecked(self):
+        verified, reason = signed_the_leaf(self.Unparseable(), chain().leaf)
+        assert verified is False
+        assert "neither confirmed nor ruled out" in reason
+
+    def test_the_fetch_still_finds_the_issuer_past_it(self, monkeypatch):
+        import types
+
+        real = x509.load_der_x509_certificate
+        bad = der(chain().rogue_root)
+
+        def load(data):
+            return self.Unparseable() if data == bad else real(data)
+        # Only the issuer module's view of x509: certificate_facts must still
+        # parse the certificate, as it does on the real store.
+        proxy = types.SimpleNamespace(**{name: getattr(x509, name)
+                                         for name in dir(x509)
+                                         if not name.startswith("__")})
+        proxy.load_der_x509_certificate = load
+        monkeypatch.setattr("aditor.app.issuer.x509", proxy)
+        result = fetch(store(chain().rogue_root, chain().issuing))
+        assert result.ok is True
+        assert result.unchecked == 1
+
+
 class TestItSendsNoCredential:
     """The HIGH finding: the fetch used to bind with the operator's password
     over a session whose certificate was deliberately not validated."""
