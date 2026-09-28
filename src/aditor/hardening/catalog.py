@@ -101,6 +101,27 @@ DIRECTORY_CHECKS = frozenset({
 # Checks that need ``directory_targets`` (the group names to inspect).
 DIRECTORY_CHECKS_WITH_TARGETS = frozenset({DIRECTORY_CHECK_NON_EMPTY_GROUPS})
 
+# The groups ``non-empty-groups`` can inspect, by the English name the catalog
+# uses. They are looked up by well-known SID, never by name: built-in group
+# names are localized when a domain is created and can be renamed, and a
+# name lookup that finds nothing would read as an empty group.
+#
+# name: (scope, id, always_exists). ``builtin`` ids are full SIDs; ``domain``
+# ids are RIDs relative to the domain SID. ``always_exists`` is False for
+# groups a domain can legitimately lack (forest-root-only groups, and groups a
+# newer schema or role adds); a missing one that should exist is an error.
+WELL_KNOWN_GROUPS: Dict[str, Tuple[str, Any, bool]] = {
+    "Account Operators": ("builtin", "S-1-5-32-548", True),
+    "Server Operators": ("builtin", "S-1-5-32-549", True),
+    "Print Operators": ("builtin", "S-1-5-32-550", True),
+    "Backup Operators": ("builtin", "S-1-5-32-551", True),
+    "Replicator": ("builtin", "S-1-5-32-552", True),
+    "Incoming Forest Trust Builders": ("builtin", "S-1-5-32-557", False),
+    "Storage Replica Administrators": ("builtin", "S-1-5-32-582", False),
+    "Schema Admins": ("domain", 518, False),
+    "Group Policy Creator Owners": ("domain", 520, True),
+}
+
 OPERATORS = frozenset({"equals", "gte", "in", "present", "absent"})
 PRESENCE_OPERATORS = frozenset({"present", "absent"})
 VALUE_OPERATORS = frozenset({"equals", "gte", "in"})
@@ -614,6 +635,12 @@ def _validate_directory_control(raw: Dict[str, Any], where: str) -> None:
             raise CatalogError(
                 f"{where}: directory_check {check!r} needs 'directory_targets', "
                 f"a non-empty list of names")
+        unknown = [t for t in targets if t not in WELL_KNOWN_GROUPS]
+        if unknown:
+            raise CatalogError(
+                f"{where}: unknown group(s) {', '.join(map(repr, unknown))}. "
+                f"Groups are looked up by well-known SID, so each name must be "
+                f"one of: {', '.join(sorted(WELL_KNOWN_GROUPS))}")
     elif targets is not None:
         raise CatalogError(
             f"{where}: directory_check {check!r} takes no 'directory_targets'")

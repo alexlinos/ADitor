@@ -160,7 +160,7 @@ TEST_FLAG_LINE = "MACHINE\\System\\CurrentControlSet\\Services\\Test\\Flag=4,{}"
 
 def clean_directory(catalog):
     """Every directory query in ``catalog`` run, and none found anything."""
-    return {c.directory_check: {"objects": [], "notes": [], "error": None}
+    return {c.id: {"objects": [], "notes": [], "error": None}
             for c in catalog.controls if c.check_type == "directory-state"}
 
 class TestSatisfies:

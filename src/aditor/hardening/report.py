@@ -122,9 +122,10 @@ SECTIONS: Tuple[Tuple[str, str, str], ...] = (
      "a future GPO could weaken them. Set each one in a GPO to lock it in."),
     (SECTION_UNKNOWN, "Unknown",
      "The scan couldn't confirm these settings. <strong>Treat them as "
-     "unconfirmed, not as passes.</strong> Either a GPO couldn't be read, or "
-     "the setting is normally made directly in the registry, where Group "
-     "Policy can't show it. Each card says which, and how to check."),
+     "unconfirmed, not as passes.</strong> A GPO couldn't be read, a "
+     "directory query failed, or the setting is normally made directly in the "
+     "registry, where Group Policy can't show it. Each card says which, and "
+     "how to check."),
     (SECTION_CONFLICTS, "Conflicts — GPOs disagree",
      "Two or more GPOs set the same setting to different values, and this scan "
      "doesn't work out which one wins. <strong>Check the value a machine "
@@ -768,6 +769,10 @@ def _render_directory_found(finding: Dict[str, Any]) -> str:
     """The objects a directory query found: name, kind, why, and DN."""
     found = [m for m in ((finding.get("evidence") or {}).get("found") or [])
              if isinstance(m, dict)]
+    if finding.get("result") == "error":
+        return ('<p class="found-none bad"><strong>Not read</strong> &mdash; '
+                'the directory query failed, so this setting is unconfirmed. '
+                f'{_esc(finding.get("error"))}</p>')
     if not found:
         return ('<p class="found-none">Nothing found &mdash; the directory '
                 'query returned no matching objects.</p>')
@@ -1331,6 +1336,8 @@ def _render_pass_row(finding: Dict[str, Any]) -> str:
         + _render_source(finding)
         + '</div>')
 
+    found_text = ("none" if _is_directory(finding)
+                  else _esc(values, "no value (see evidence)"))
     return (
         '<details class="pass-row">'
         '<summary>'
@@ -1338,7 +1345,7 @@ def _render_pass_row(finding: Dict[str, Any]) -> str:
         f'<span class="pass-title">{_esc(finding.get("title"))}</span> '
         f'<span class="badge badge-state-{_esc(state, "none")}">stage: '
         f'{_esc(_STATE_LABELS.get(str(state), state))}</span> '
-        f'<span class="pass-val">found {_esc(values, "no value (see evidence)")}'
+        f'<span class="pass-val">found {found_text}'
         f'</span>{preference}{conflict}'
         '</summary>'
         f'{detail_body}'

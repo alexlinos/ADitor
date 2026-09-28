@@ -146,8 +146,7 @@ def scan_payload(gpos, catalog=None, include_not_applicable=True,
     catalog = catalog or load_catalog()
     controls, _unknown = catalog.select(control_ids)
     if directory is None:  # every directory query ran and found nothing
-        directory = {c.directory_check: {"objects": [], "notes": [],
-                                         "error": None}
+        directory = {c.id: {"objects": [], "notes": [], "error": None}
                      for c in controls if c.check_type == "directory-state"}
     findings, counts = evaluate_controls(
         controls, gpos, include_not_applicable=include_not_applicable,
@@ -1007,14 +1006,15 @@ def sample_scan():
     ], catalog=catalog, read_errors=read_errors, directory={
         # One directory-state failure and two passes, so the sample shows
         # what a directory finding looks like.
-        "unconstrained-delegation": {"objects": [{
+        "DEVORE-07-UNCONSTRAINED-DELEGATION": {"objects": [{
             "value": "APPSRV01$", "dn": f"CN=APPSRV01,CN=Computers,{BASE_DN}",
             "object_class": "computer",
             "detail": "computer trusted for delegation to any service"}],
             "notes": [], "error": None},
-        "spn-accounts-without-aes": {"objects": [], "notes": [],
-                                     "error": None},
-        "non-empty-groups": {"objects": [], "notes": [], "error": None},
+        "DEVORE-04-SPN-ACCOUNTS-AES": {"objects": [], "notes": [],
+                                       "error": None},
+        "DEVORE-07-EMPTY-PRIVILEGED-GROUPS": {"objects": [], "notes": [],
+                                              "error": None},
     })
 
 
@@ -1413,7 +1413,7 @@ class TestUnknownVerdictThatIsNotAReadFailure:
     def test_the_section_lede_explains_both_kinds_of_unknown(self, document):
         lede = visible_text(sections_of(document)[SECTION_UNKNOWN])
 
-        assert "a GPO couldn't be read" in lede
+        assert "A GPO couldn't be read" in lede
         assert "Group Policy can't show it" in lede
         assert "unconfirmed, not as passes" in lede
 

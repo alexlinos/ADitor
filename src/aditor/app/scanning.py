@@ -326,6 +326,12 @@ def run_scan(settings: ConnectionSettings, password: str,
         "counts": payload["counts"],
         "headline": headline_counts(payload),
         "scan": payload["scan"],
+        # Directory-state controls whose query failed: the scan still
+        # completed, so the screen has to say so rather than look clean.
+        "directory_errors": [
+            f.get("control_id") for f in payload.get("findings") or []
+            if f.get("check_type") == "directory-state"
+            and f.get("result") == "error"],
     })
 
 

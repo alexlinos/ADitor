@@ -2,12 +2,18 @@
 
 A directory-state control names a fixed read-only directory query and asserts
 that it finds nothing. No network: the LDAP manager is a Mock whose ``search``
-answers by filter, and every DN and account name is synthesized.
+answers by filter, and every DN, SID and account name is synthesized.
+
+Several tests here are regressions from an adversarial QA pass. Each one names
+the false pass (or false clean) it pins.
 """
 
+import json
 from unittest.mock import Mock
 
 import pytest
+from aditor.app.render import render_scan_result
+from aditor.app.scanning import ScanResult
 from aditor.hardening.catalog import (
     DIRECTORY_CHECK_NON_EMPTY_GROUPS,
     DIRECTORY_CHECK_SPN_WITHOUT_AES,
@@ -31,6 +37,7 @@ from aditor.hardening.evaluator import (
 from aditor.hardening.report import render_report
 
 BASE_DN = "DC=test,DC=local"
+DOMAIN_SID = "S-1-5-21-1111-2222-3333"
 SPN_CONTROL = "DEVORE-04-SPN-ACCOUNTS-AES"
 GROUPS_CONTROL = "DEVORE-07-EMPTY-PRIVILEGED-GROUPS"
 DELEGATION_CONTROL = "DEVORE-07-UNCONSTRAINED-DELEGATION"
@@ -55,9 +62,91 @@ def catalog_of(*controls):
                           "controls": list(controls)}, "<test>")
 
 
-def obj(name, dn=None, kind="user", detail="synthetic"):
-    return {"value": name, "dn": dn or f"CN={name},{BASE_DN}",
-            "object_class": kind, "detail": detail}
+def obj(name, dn=None, kind="user", detail="synthetic", members=None):
+    out = {"value": name, "dn": dn or f"CN={name},{BASE_DN}",
+           "object_class": kind, "detail": detail}
+    if members is not None:
+        out["members"] = members
+    return out
+
+
+def ok(objects=(), notes=()):
+    return {"objects": list(objects), "notes": list(notes), "error": None}
+
+
+# --------------------------------------------------------------------------- #
+# A fake directory: answers the scanner's real filter strings
+# --------------------------------------------------------------------------- #
+
+def entry(dn, **attributes):
+    return {"dn": dn, "attributes": attributes}
+
+
+class FakeDirectory:
+    """Routes each search to a handler by what its filter asks for.
+
+    ``groups`` maps SID -> (sAMAccountName, [member DNs]); a SID absent from
+    it is a group the domain doesn't have. ``primary`` maps a RID to the
+    accounts using it as their primary group.
+    """
+
+    def __init__(self, groups=None, primary=None, spn=(), delegation=(),
+                 fail_on=None):
+        self.groups = groups if groups is not None else {}
+        self.primary = primary or {}
+        self.spn, self.delegation = list(spn), list(delegation)
+        self.fail_on = fail_on
+        self.filters = []
+
+    def manager(self):
+        manager = Mock()
+        manager.ad_config.base_dn = BASE_DN
+        manager.search.side_effect = self.search
+        return manager
+
+    def search(self, search_base=None, search_filter=None, **_kwargs):
+        self.filters.append(search_filter)
+        if self.fail_on and self.fail_on in search_filter:
+            raise RuntimeError("LDAP server down")
+        if search_filter == "(objectClass=*)":
+            return [entry(BASE_DN, objectSid=DOMAIN_SID)]
+        if "objectSid=" in search_filter:
+            sid = search_filter.split("objectSid=", 1)[1].split(")", 1)[0]
+            if sid not in self.groups:
+                return []
+            name, members = self.groups[sid]
+            return [entry(f"CN={name},{BASE_DN}", sAMAccountName=name,
+                          member=members)]
+        if search_filter.startswith("(primaryGroupID="):
+            rid = int(search_filter[len("(primaryGroupID="):-1])
+            return [entry(dn, sAMAccountName=dn) for dn in
+                    self.primary.get(rid, [])]
+        if "servicePrincipalName=*" in search_filter:
+            return self.spn
+        if ":=524288" in search_filter:
+            return self.delegation
+        return []
+
+
+def every_group_empty():
+    """Every group in the shipped control present, and empty."""
+    return {sid: (name, []) for name, sid in (
+        ("Account Operators", "S-1-5-32-548"),
+        ("Server Operators", "S-1-5-32-549"),
+        ("Print Operators", "S-1-5-32-550"),
+        ("Backup Operators", "S-1-5-32-551"),
+        ("Replicator", "S-1-5-32-552"),
+        ("Incoming Forest Trust Builders", "S-1-5-32-557"),
+        ("Storage Replica Administrators", "S-1-5-32-582"),
+        ("Schema Admins", f"{DOMAIN_SID}-518"),
+        ("Group Policy Creator Owners", f"{DOMAIN_SID}-520"),
+    )}
+
+
+def read(directory, *control_ids, catalog=None):
+    catalog = catalog or load_catalog()
+    controls = [catalog.by_id(cid) for cid in control_ids]
+    return Scanner(directory.manager())._read_directory_state(controls)
 
 
 # --------------------------------------------------------------------------- #
@@ -81,6 +170,8 @@ class TestCatalogRules:
          "directory_targets"),
         ({"directory_check": DIRECTORY_CHECK_NON_EMPTY_GROUPS,
           "directory_targets": []}, "directory_targets"),
+        ({"directory_check": DIRECTORY_CHECK_NON_EMPTY_GROUPS,
+          "directory_targets": ["Some Custom Group"]}, "well-known SID"),
         ({"directory_targets": ["Schema Admins"]}, "takes no"),
     ])
     def test_malformed_directory_controls_are_refused(self, overrides, message):
@@ -119,24 +210,21 @@ class TestVerdict:
         return load_catalog().by_id(DELEGATION_CONTROL)
 
     def run(self, control, result):
-        return evaluate_control(control, [],
-                                {control.directory_check: result})
+        return evaluate_control(control, [], {control.id: result})
 
     def test_nothing_found_is_a_pass(self, control):
-        finding = self.run(control, {"objects": [], "notes": [], "error": None})
+        finding = self.run(control, ok())
         assert finding["result"] == RESULT_PASS
         assert finding["rollout_state"] == STATE_ENFORCED
         assert finding["evidence"]["source"] == EVIDENCE_SOURCE_DIRECTORY
 
     def test_anything_found_is_a_fail_that_lists_it(self, control):
-        found = [obj("SRV01$", kind="computer"), obj("svc-app")]
-        finding = self.run(control, {"objects": found, "notes": [],
-                                     "error": None})
+        finding = self.run(control, ok([obj("SRV01$", kind="computer"),
+                                        obj("svc-app")]))
         assert finding["result"] == RESULT_FAIL
         assert finding["rollout_state"] == STATE_NOT_STARTED
         assert [o["value"] for o in finding["evidence"]["found"]] == [
             "SRV01$", "svc-app"]
-        assert finding["evidence"]["found_count"] == 2
 
     def test_a_failed_query_is_an_error_never_a_pass(self, control):
         finding = self.run(control, {"objects": [], "notes": [],
@@ -145,133 +233,227 @@ class TestVerdict:
         assert "LDAP server down" in finding["error"]
 
     def test_a_query_that_never_ran_is_an_error_never_a_pass(self, control):
-        finding = evaluate_control(control, [], directory=None)
-        assert finding["result"] == RESULT_ERROR
+        assert evaluate_control(control, [], directory=None)["result"] == \
+            RESULT_ERROR
 
     def test_the_counts_include_directory_findings(self, control):
         _findings, counts = evaluate_controls(
-            [control], [], directory={control.directory_check: {
-                "objects": [obj("svc-app")], "notes": [], "error": None}})
+            [control], [], directory={control.id: ok([obj("svc-app")])})
         assert counts[RESULT_FAIL] == 1 and counts["total"] == 1
+
+    def test_two_controls_sharing_a_query_are_judged_separately(self):
+        """QA: results were keyed by query, so the last control's targets
+        judged both, and a Schema Admins member passed unseen."""
+        groups = every_group_empty()
+        groups[f"{DOMAIN_SID}-518"] = ("Schema Admins",
+                                       [f"CN=Eve,{BASE_DN}"])
+        catalog = catalog_of(
+            a_directory_control(id="A",
+                                directory_check=DIRECTORY_CHECK_NON_EMPTY_GROUPS,
+                                directory_targets=["Schema Admins"]),
+            a_directory_control(id="B",
+                                directory_check=DIRECTORY_CHECK_NON_EMPTY_GROUPS,
+                                directory_targets=["Print Operators"]))
+        results = read(FakeDirectory(groups=groups), "A", "B", catalog=catalog)
+        findings, _ = evaluate_controls(list(catalog.controls), [],
+                                        directory=results)
+        verdicts = {f["control_id"]: f["result"] for f in findings}
+        assert verdicts == {"A": RESULT_FAIL, "B": RESULT_PASS}
 
 
 # --------------------------------------------------------------------------- #
 # The queries
 # --------------------------------------------------------------------------- #
 
-def entry(dn, **attributes):
-    return {"dn": dn, "attributes": attributes}
+class TestServiceAccountsWithoutAes:
 
+    def result(self, *entries):
+        directory = FakeDirectory(spn=list(entries))
+        return read(directory, SPN_CONTROL)[SPN_CONTROL], directory
 
-def manager_answering(answers, fail_on=None):
-    """A Mock LDAP manager: ``answers`` maps a filter substring to results."""
-    manager = Mock()
-    manager.ad_config.base_dn = BASE_DN
-    seen = []
-
-    def search(search_base=None, search_filter=None, **_kwargs):
-        seen.append(search_filter)
-        if fail_on and fail_on in search_filter:
-            raise RuntimeError("LDAP server down")
-        for needle, result in answers.items():
-            if needle in search_filter:
-                return result
-        return []
-    manager.search.side_effect = search
-    manager.filters = seen
-    return manager
-
-
-def read(manager, *control_ids):
-    catalog = load_catalog()
-    controls = [catalog.by_id(cid) for cid in control_ids]
-    return Scanner(manager)._read_directory_state(controls)
-
-
-class TestQueries:
-
-    def test_spn_accounts_without_aes_are_listed_and_aes_ones_are_not(self):
-        manager = manager_answering({"servicePrincipalName=*": [
+    def test_blank_and_rc4_only_are_listed_and_aes_is_not(self):
+        result, directory = self.result(
             entry(f"CN=svc-blank,{BASE_DN}", sAMAccountName="svc-blank"),
             entry(f"CN=svc-rc4,{BASE_DN}", sAMAccountName="svc-rc4",
                   **{"msDS-SupportedEncryptionTypes": 4}),
             entry(f"CN=svc-aes,{BASE_DN}", sAMAccountName="svc-aes",
                   **{"msDS-SupportedEncryptionTypes": 24}),
-        ]})
-        result = read(manager, SPN_CONTROL)[DIRECTORY_CHECK_SPN_WITHOUT_AES]
-        assert [o["value"] for o in result["objects"]] == ["svc-blank",
-                                                           "svc-rc4"]
-        assert "not set" in result["objects"][0]["detail"]
-        # The query itself skips krbtgt and disabled accounts.
-        spn_filter = next(f for f in manager.filters
-                          if "servicePrincipalName" in f)
+            entry(f"CN=svc-both,{BASE_DN}", sAMAccountName="svc-both",
+                  **{"msDS-SupportedEncryptionTypes": 28}))
+        listed = {o["value"]: o["detail"] for o in result["objects"]}
+        assert set(listed) == {"svc-blank", "svc-rc4"}
+        assert "domain default" in listed["svc-blank"]
+        assert "RC4 and no AES" in listed["svc-rc4"]
+        spn_filter = directory.filters[0]
         assert "sAMAccountName=krbtgt" in spn_filter
         assert ":1.2.840.113556.1.4.803:=2" in spn_filter
 
-    def test_only_groups_with_members_are_listed(self):
-        manager = manager_answering({
-            "sAMAccountName=Schema Admins": [entry(
-                f"CN=Schema Admins,{BASE_DN}", sAMAccountName="Schema Admins",
-                member=[f"CN=Administrator,CN=Users,{BASE_DN}"])],
-            "sAMAccountName=Backup Operators": [entry(
-                f"CN=Backup Operators,CN=Builtin,{BASE_DN}",
-                sAMAccountName="Backup Operators", member=[])],
-        })
-        result = read(manager, GROUPS_CONTROL)[DIRECTORY_CHECK_NON_EMPTY_GROUPS]
-        assert [o["value"] for o in result["objects"]] == ["Schema Admins"]
-        assert "1 member(s): Administrator" in result["objects"][0]["detail"]
-        # Groups this domain doesn't have are noted, not reported.
-        assert any("does not exist" in note for note in result["notes"])
-
-    def test_group_names_are_escaped_in_the_filter(self):
-        manager = manager_answering({})
-        catalog = catalog_of(a_directory_control(
-            directory_check=DIRECTORY_CHECK_NON_EMPTY_GROUPS,
-            directory_targets=["Evil*)(objectClass=*"]))
-        Scanner(manager)._read_directory_state(list(catalog.controls))
-        assert "Evil\\2a\\29\\28objectClass=\\2a" in manager.filters[0]
-
-    def test_unconstrained_delegation_excludes_domain_controllers(self):
-        manager = manager_answering({":1.2.840.113556.1.4.803:=524288": [
-            entry(f"CN=SRV01,{BASE_DN}", sAMAccountName="SRV01$",
-                  objectClass=["top", "computer"]),
-        ]})
-        result = read(manager, DELEGATION_CONTROL)[
-            DIRECTORY_CHECK_UNCONSTRAINED_DELEGATION]
+    def test_managed_service_accounts_are_checked_too(self):
+        """QA: (objectCategory=person) excluded gMSAs and sMSAs."""
+        result, directory = self.result(entry(
+            f"CN=gmsa-sql,{BASE_DN}", sAMAccountName="gmsa-sql$",
+            objectClass=["top", "user", "computer",
+                         "msDS-GroupManagedServiceAccount"],
+            **{"msDS-SupportedEncryptionTypes": 4}))
         assert [(o["value"], o["object_class"]) for o in result["objects"]] == [
-            ("SRV01$", "computer")]
-        delegation_filter = manager.filters[0]
-        assert "(!(primaryGroupID=516))" in delegation_filter
-        assert "(!(primaryGroupID=521))" in delegation_filter
+            ("gmsa-sql$", "managed service account")]
+        assert "objectCategory=msDS-GroupManagedServiceAccount" in \
+            directory.filters[0]
+
+    def test_an_explicit_zero_is_not_called_not_set(self):
+        result, _ = self.result(entry(
+            f"CN=svc0,{BASE_DN}", sAMAccountName="svc0",
+            **{"msDS-SupportedEncryptionTypes": 0}))
+        assert result["objects"][0]["detail"].startswith("set to 0")
+
+    def test_a_malformed_entry_is_listed_not_skipped(self):
+        """Skipping it could turn a fail into a pass."""
+        result, _ = self.result(
+            entry(f"CN=svc-ok,{BASE_DN}", sAMAccountName="svc-ok",
+                  **{"msDS-SupportedEncryptionTypes": 24}),
+            None)
+        assert result["error"] is None
+        assert [o["object_class"] for o in result["objects"]] == ["unknown"]
+        assert "couldn't be read" in result["objects"][0]["detail"]
+
+    def test_a_bytes_name_still_serialises(self):
+        result, _ = self.result(entry(
+            f"CN=svc-bytes,{BASE_DN}", sAMAccountName=b"svc-\xff"))
+        json.dumps(result)  # would raise on bytes
+        assert result["objects"][0]["value"].startswith("svc-")
+
+
+class TestPrivilegedGroups:
+
+    def result(self, directory):
+        return read(directory, GROUPS_CONTROL)[GROUPS_CONTROL]
+
+    def test_an_empty_domain_passes(self):
+        result = self.result(FakeDirectory(groups=every_group_empty()))
+        assert result["error"] is None and result["objects"] == []
+
+    def test_groups_are_found_by_sid_not_name(self):
+        """QA: a localized group was 'not found' by its English name, so a
+        member-filled group passed."""
+        groups = every_group_empty()
+        groups["S-1-5-32-551"] = ("Sicherungs-Operatoren",
+                                  [f"CN=Eve,{BASE_DN}"])
+        directory = FakeDirectory(groups=groups)
+        result = self.result(directory)
+        assert [o["value"] for o in result["objects"]] == [
+            "Backup Operators (Sicherungs-Operatoren)"]
+        assert any("objectSid=S-1-5-32-551" in f for f in directory.filters)
+        assert not any("sAMAccountName=Backup Operators" in f
+                       for f in directory.filters)
+
+    def test_primary_group_members_are_counted(self):
+        """QA: AD leaves an account out of its primary group's ``member``, so
+        primaryGroupID=518 hid a Schema Admin."""
+        directory = FakeDirectory(groups=every_group_empty(),
+                                  primary={518: [f"CN=mallory,{BASE_DN}"]})
+        result = self.result(directory)
+        assert [o["value"] for o in result["objects"]] == ["Schema Admins"]
+        assert "mallory" in result["objects"][0]["detail"]
+
+    def test_a_group_that_must_exist_but_cannot_be_found_is_an_error(self):
+        groups = every_group_empty()
+        del groups["S-1-5-32-548"]  # Account Operators
+        result = self.result(FakeDirectory(groups=groups))
+        assert result["error"] and "Account Operators" in result["error"]
+
+    def test_a_forest_root_only_group_that_is_missing_is_only_noted(self):
+        groups = every_group_empty()
+        del groups[f"{DOMAIN_SID}-518"]  # Schema Admins, in a child domain
+        result = self.result(FakeDirectory(groups=groups))
+        assert result["error"] is None
+        assert any("Schema Admins" in note for note in result["notes"])
+
+    def test_member_names_with_escaped_commas_display_properly(self):
+        groups = every_group_empty()
+        groups["S-1-5-32-550"] = ("Print Operators",
+                                  [f"CN=Doe\\, Jane,OU=People,{BASE_DN}"])
+        result = self.result(FakeDirectory(groups=groups))
+        assert "Doe, Jane" in result["objects"][0]["detail"]
+
+    def test_the_full_member_list_is_kept_for_the_diff(self):
+        groups = every_group_empty()
+        members = [f"CN=user{i},{BASE_DN}" for i in range(8)]
+        groups["S-1-5-32-550"] = ("Print Operators", members)
+        result = self.result(FakeDirectory(groups=groups))
+        assert len(result["objects"][0]["members"]) == 8
+        assert "and 3 more" in result["objects"][0]["detail"]
+
+    def test_group_names_never_reach_the_filter(self):
+        """The catalog names a group; the filter carries only its SID."""
+        directory = FakeDirectory(groups=every_group_empty())
+        self.result(directory)
+        group_filters = [f for f in directory.filters if "objectSid=" in f]
+        assert group_filters and not any("Operators" in f
+                                         for f in group_filters)
+
+
+class TestUnconstrainedDelegation:
+
+    def result(self, *entries):
+        directory = FakeDirectory(delegation=list(entries))
+        return read(directory, DELEGATION_CONTROL)[DELEGATION_CONTROL], directory
+
+    def test_only_writable_dcs_are_excluded_by_account_type(self):
+        """QA: the exclusion keyed on primaryGroupID, so a user with
+        primaryGroupID=516 (and any RODC) was hidden."""
+        _result, directory = self.result()
+        delegation_filter = directory.filters[0]
+        assert "primaryGroupID" not in delegation_filter
+        assert "(!(&(objectCategory=computer)(userAccountControl:" \
+            "1.2.840.113556.1.4.803:=8192)))" in delegation_filter
+
+    def test_computers_and_users_are_both_listed(self):
+        result, _ = self.result(
+            entry(f"CN=SRV01,{BASE_DN}", sAMAccountName="SRV01$",
+                  objectClass=["top", "computer"], userAccountControl=0x81000),
+            entry(f"CN=backdoor,{BASE_DN}", sAMAccountName="backdoor",
+                  objectClass=["top", "user"], userAccountControl=0x80200))
+        assert [(o["value"], o["object_class"]) for o in result["objects"]] == [
+            ("backdoor", "user"), ("SRV01$", "computer")]
+
+    def test_disabled_accounts_are_listed_and_marked(self):
+        result, directory = self.result(entry(
+            f"CN=old,{BASE_DN}", sAMAccountName="old$",
+            objectClass=["computer"], userAccountControl=0x80002))
+        assert "disabled" in result["objects"][0]["detail"]
+        assert ":=2)" not in directory.filters[0]
 
     def test_one_failing_query_does_not_sink_the_others(self):
-        manager = manager_answering({}, fail_on="servicePrincipalName")
-        results = read(manager, SPN_CONTROL, DELEGATION_CONTROL)
-        assert "LDAP server down" in results[DIRECTORY_CHECK_SPN_WITHOUT_AES][
-            "error"]
-        assert results[DIRECTORY_CHECK_UNCONSTRAINED_DELEGATION]["error"] is None
+        directory = FakeDirectory(groups=every_group_empty(),
+                                  fail_on="servicePrincipalName")
+        results = read(directory, SPN_CONTROL, DELEGATION_CONTROL)
+        assert "LDAP server down" in results[SPN_CONTROL]["error"]
+        assert results[DELEGATION_CONTROL]["error"] is None
 
     def test_no_query_runs_when_no_directory_control_is_selected(self):
-        manager = manager_answering({})
-        catalog = load_catalog()
-        gpo_only = [c for c in catalog.controls
+        directory = FakeDirectory()
+        gpo_only = [c for c in load_catalog().controls
                     if c.check_type != "directory-state"]
-        assert Scanner(manager)._read_directory_state(gpo_only) == {}
-        manager.search.assert_not_called()
+        assert Scanner(directory.manager())._read_directory_state(gpo_only) == {}
+        assert directory.filters == []
 
 
 # --------------------------------------------------------------------------- #
-# The report and the diff
+# The report, the app and the diff
 # --------------------------------------------------------------------------- #
 
-def payload_with(delegation_objects, scan_id="a" * 32,
+def payload_with(delegation=None, groups=None, errors=None, scan_id="a" * 32,
                  timestamp="2026-09-28T09:00:00+00:00"):
     catalog = load_catalog()
     controls = [c for c in catalog.controls if c.check_type == "directory-state"]
-    directory = {c.directory_check: {"objects": [], "notes": [], "error": None}
-                 for c in controls}
-    directory[DIRECTORY_CHECK_UNCONSTRAINED_DELEGATION]["objects"] = \
-        delegation_objects
+    directory = {c.id: ok() for c in controls}
+    if delegation is not None:
+        directory[DELEGATION_CONTROL] = ok(delegation)
+    if groups is not None:
+        directory[GROUPS_CONTROL] = ok(groups)
+    for control_id in errors or ():
+        directory[control_id] = {"objects": [], "notes": [],
+                                 "error": "LDAP server down"}
     findings, counts = evaluate_controls(controls, [], True, directory)
     return {
         "scan": {"tool": "scan_hardening", "tool_version": "1.4.0",
@@ -286,39 +468,101 @@ def payload_with(delegation_objects, scan_id="a" * 32,
     }
 
 
-class TestReportAndDiff:
+def later(**kwargs):
+    return payload_with(scan_id="b" * 32,
+                        timestamp="2026-09-29T09:00:00+00:00", **kwargs)
+
+
+def card_for(document, control_id):
+    start = document.index(f'id="{control_id.lower()}"')
+    return document[start:document.index("</article>", start)]
+
+
+def evidence_changes_for(diff, control_id):
+    return [c for e in diff["evidence_changes"] if e["control_id"] == control_id
+            for c in e["evidence"]["changes"]]
+
+
+class TestReportAppAndDiff:
 
     def test_a_failing_card_names_what_it_found(self):
-        document = render_report(payload_with([obj("SRV01$", kind="computer")]))
-        card = document[document.index(f'id="{DELEGATION_CONTROL.lower()}"'):]
-        card = card[:card.index("</article>")]
+        document = render_report(payload_with(
+            delegation=[obj("SRV01$", kind="computer")]))
+        card = card_for(document, DELEGATION_CONTROL)
         assert "1 listed: SRV01$" in card
         assert "<strong>Target:</strong> none" in card
-        assert "Why it is listed" in card  # the evidence table
+        assert "Why it is listed" in card
         start = document[document.index('id="start-here"'):]
         assert "Next: fix the 1 listed on the card" in start
 
-    def test_a_passing_control_says_nothing_was_found(self):
-        document = render_report(payload_with([]))
-        assert DELEGATION_CONTROL in document[document.index('id="passes"'):]
+    def test_a_failed_query_is_never_described_as_finding_nothing(self):
+        """QA: the evidence said 'returned no matching objects' under an
+        error."""
+        document = render_report(payload_with(errors=[SPN_CONTROL]))
+        card = card_for(document, SPN_CONTROL)
+        assert "returned no matching objects" not in card
+        assert "Not read" in card
+        start = document[document.index('id="start-here"'):]
+        assert "the directory query failed" in start
 
-    def test_the_diff_reports_the_list_changing_not_a_gpo_changing(self):
-        before = payload_with([obj("SRV01$", kind="computer")])
-        after = payload_with([obj("SRV01$", kind="computer"), obj("svc-app")],
-                             scan_id="b" * 32,
-                             timestamp="2026-09-29T09:00:00+00:00")
-        diff = diff_scans(before, after)
-        changes = [c for entry in diff["evidence_changes"]
-                   if entry["control_id"] == DELEGATION_CONTROL
-                   for c in entry["evidence"]["changes"]]
-        fields = {c["field"] for c in changes}
-        assert "value" in fields
-        assert "gpo" not in fields
+    def test_a_passing_control_reads_found_none(self):
+        document = render_report(payload_with())
+        passes = document[document.index('id="passes"'):]
+        row = passes[passes.index(DELEGATION_CONTROL):]
+        assert "found none" in row[:row.index("</summary>")]
+
+    def test_the_app_warns_when_directory_queries_failed(self):
+        result = ScanResult(ok=True, payload={
+            "success": True, "snapshot_name": "s", "snapshot_dir": "/tmp/s",
+            "scans_run": 1, "counts": {}, "headline": {},
+            "scan": {"gpos_scanned": 0, "gpos_unreadable": 0},
+            "directory_errors": [SPN_CONTROL]})
+        html = render_scan_result(result)
+        assert "1 directory check(s) could not run" in html
+        assert SPN_CONTROL in html
+
+    def test_the_diff_sees_a_new_member_in_an_already_populated_group(self):
+        """QA: only the group name was compared, so a new Schema Admin made no
+        diff entry at all."""
+        one = [f"CN=Administrator,{BASE_DN}"]
+        two = one + [f"CN=attacker,{BASE_DN}"]
+        diff = diff_scans(
+            payload_with(groups=[obj("Schema Admins", kind="group",
+                                     detail="1 member(s): Administrator",
+                                     members=one)]),
+            later(groups=[obj("Schema Admins", kind="group",
+                              detail="2 member(s): Administrator, attacker",
+                              members=two)]))
+        assert "value" in {c["field"] for c in
+                           evidence_changes_for(diff, GROUPS_CONTROL)}
+
+    def test_the_diff_sees_a_member_swapped_for_another(self):
+        """Same count, same shown names (only 5 are shown): the member digest
+        is what catches it."""
+        base = [f"CN=user{i},{BASE_DN}" for i in range(6)]
+        detail = "6 member(s): user0, user1, user2, user3, user4 and 1 more"
+        swapped = base[:5] + [f"CN=intruder,{BASE_DN}"]
+        diff = diff_scans(
+            payload_with(groups=[obj("Print Operators", kind="group",
+                                     detail=detail, members=base)]),
+            later(groups=[obj("Print Operators", kind="group", detail=detail,
+                              members=swapped)]))
+        assert evidence_changes_for(diff, GROUPS_CONTROL)
+
+    def test_the_diff_ignores_a_reordered_but_identical_list(self):
+        a, b = obj("svc-a"), obj("svc-b")
+        diff = diff_scans(payload_with(delegation=[a, b]),
+                          later(delegation=[b, a]))
+        assert evidence_changes_for(diff, DELEGATION_CONTROL) == []
+
+    def test_the_diff_reports_a_list_change_not_a_gpo_change(self):
+        diff = diff_scans(payload_with(delegation=[obj("SRV01$")]),
+                          later(delegation=[obj("SRV01$"), obj("svc-app")]))
+        fields = {c["field"] for c in evidence_changes_for(diff,
+                                                           DELEGATION_CONTROL)}
+        assert "value" in fields and "gpo" not in fields
 
     def test_the_diff_calls_a_new_offender_a_regression(self):
-        before = payload_with([])
-        after = payload_with([obj("svc-app")], scan_id="b" * 32,
-                             timestamp="2026-09-29T09:00:00+00:00")
-        diff = diff_scans(before, after)
+        diff = diff_scans(payload_with(), later(delegation=[obj("svc-app")]))
         assert [r["control_id"] for r in diff["regressions"]] == [
             DELEGATION_CONTROL]
