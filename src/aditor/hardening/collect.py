@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import ldap3
+from ldap3.utils.conv import escape_filter_chars
 
 from ..core.logging import log_ldap_operation
 from ..gpo.parsers import (
@@ -34,13 +35,32 @@ from ..gpo.parsers import (
     parse_security_template_registry_values,
 )
 from . import SCAN_ENGINE_VERSION
-from .catalog import Catalog, CatalogError, load_catalog
+from .catalog import (
+    DIRECTORY_CHECK_NON_EMPTY_GROUPS,
+    DIRECTORY_CHECK_SPN_WITHOUT_AES,
+    DIRECTORY_CHECK_UNCONSTRAINED_DELEGATION,
+    Catalog,
+    CatalogError,
+    Control,
+    load_catalog,
+)
 from .evaluator import GpoLink, GpoSnapshot, evaluate_controls
 
 # The GptTmpl.inf section holding registry-backed security options.
 _REGISTRY_VALUES_SECTION = "Registry Values"
 
 _MACHINE_REGISTRY_POL = r"machine\registry.pol"
+
+# userAccountControl and msDS-SupportedEncryptionTypes bits the directory
+# checks read (Microsoft's documented values).
+_UAC_ACCOUNTDISABLE = 0x2
+_UAC_TRUSTED_FOR_DELEGATION = 0x80000
+_ETYPE_AES = 0x8 | 0x10  # AES128-CTS-HMAC-SHA1-96 | AES256-CTS-HMAC-SHA1-96
+# LDAP_MATCHING_RULE_BIT_AND, for filtering on a userAccountControl bit.
+_BIT_AND = "1.2.840.113556.1.4.803"
+# primaryGroupID of domain controllers (516) and read-only DCs (521): they are
+# trusted for delegation by design, so they are not findings.
+_DC_PRIMARY_GROUPS = ("516", "521")
 # Group Policy Preferences deliver registry values that have no ADMX policy
 # behind them, so a GPO's real hardening often lives here rather than in
 # Registry.pol.
@@ -136,9 +156,11 @@ class Scanner:
             snapshots, read_errors = self._read_gpo_snapshots(links_by_guid)
         except Exception as exc:
             raise GpoReadFailure(exc) from exc
+        directory = self._read_directory_state(controls)
 
         findings, counts = evaluate_controls(
-            controls, snapshots, include_not_applicable=include_not_applicable)
+            controls, snapshots, include_not_applicable=include_not_applicable,
+            directory=directory)
 
         log_ldap_operation(operation, self.ldap.ad_config.base_dn, True,
                            f"Evaluated {counts['total']} controls against "
@@ -266,6 +288,128 @@ class Scanner:
             ))
         return snapshots, read_errors
 
+    # --- directory state ---------------------------------------------------
+
+    def _read_directory_state(self, controls: Sequence[Control]
+                              ) -> Dict[str, Dict[str, Any]]:
+        """Run the directory query each selected directory-state control names.
+
+        Keyed by ``directory_check``. A query that raises is recorded as that
+        check's ``error`` rather than failing the scan: the GPO findings are
+        still sound, and the affected control reports an error, never a pass.
+        """
+        wanted = {c.directory_check: c for c in controls
+                  if c.check_type == "directory-state" and c.scored
+                  and c.directory_check}
+        runners = {
+            DIRECTORY_CHECK_SPN_WITHOUT_AES: self._spn_accounts_without_aes,
+            DIRECTORY_CHECK_NON_EMPTY_GROUPS: self._non_empty_groups,
+            DIRECTORY_CHECK_UNCONSTRAINED_DELEGATION:
+                self._unconstrained_delegation,
+        }
+        out: Dict[str, Dict[str, Any]] = {}
+        for check, control in wanted.items():
+            try:
+                out[check] = runners[check](control)
+            except Exception as exc:
+                out[check] = {"objects": [], "notes": [], "error": str(exc)}
+        return out
+
+    def _search(self, search_filter: str, attributes: List[str]
+                ) -> List[Dict[str, Any]]:
+        return list(self.ldap.search(
+            search_base=self.ldap.ad_config.base_dn,
+            search_filter=search_filter,
+            attributes=attributes,
+            search_scope=ldap3.SUBTREE,
+        ) or [])
+
+    def _spn_accounts_without_aes(self, _control: Control) -> Dict[str, Any]:
+        """Enabled user accounts with an SPN whose encryption types lack AES.
+
+        A blank ``msDS-SupportedEncryptionTypes`` counts as no AES: the KDC
+        then falls back to RC4 for the account's service tickets. ``krbtgt``
+        and computer accounts are skipped (computers maintain their own).
+        """
+        entries = self._search(
+            "(&(objectCategory=person)(objectClass=user)"
+            "(servicePrincipalName=*)(!(sAMAccountName=krbtgt))"
+            f"(!(userAccountControl:{_BIT_AND}:={_UAC_ACCOUNTDISABLE})))",
+            ["sAMAccountName", "msDS-SupportedEncryptionTypes"])
+        objects = []
+        for entry in entries:
+            attributes = entry.get("attributes", {}) or {}
+            raw = _attr(attributes, "msDS-SupportedEncryptionTypes")
+            try:
+                etypes = int(raw) if raw not in (None, "", []) else 0
+            except (TypeError, ValueError):
+                etypes = 0
+            if etypes & _ETYPE_AES:
+                continue
+            objects.append({
+                "value": _attr(attributes, "sAMAccountName", "") or "",
+                "dn": entry.get("dn", ""),
+                "object_class": "user",
+                "detail": ("msDS-SupportedEncryptionTypes not set (RC4 by "
+                           "default)" if not raw else
+                           f"msDS-SupportedEncryptionTypes = {etypes} "
+                           f"(0x{etypes:X}), no AES"),
+            })
+        return {"objects": _sorted(objects), "notes": [], "error": None}
+
+    def _non_empty_groups(self, control: Control) -> Dict[str, Any]:
+        """The control's target groups that have any direct member.
+
+        A target group that doesn't exist in this domain (some are created
+        only by a newer schema or a role) is noted, not reported.
+        """
+        objects, notes = [], []
+        for name in control.directory_targets:
+            entries = self._search(
+                f"(&(objectClass=group)(sAMAccountName="
+                f"{escape_filter_chars(name)}))",
+                ["sAMAccountName", "member"])
+            if not entries:
+                notes.append(f"Group {name!r} does not exist in this domain, "
+                             f"so it has no members.")
+                continue
+            for entry in entries:
+                members = (entry.get("attributes", {}) or {}).get("member") or []
+                if isinstance(members, str):
+                    members = [members]
+                if not members:
+                    continue
+                shown = ", ".join(_rdn(m) for m in members[:5])
+                more = f" and {len(members) - 5} more" if len(members) > 5 else ""
+                objects.append({
+                    "value": name,
+                    "dn": entry.get("dn", ""),
+                    "object_class": "group",
+                    "detail": f"{len(members)} member(s): {shown}{more}",
+                })
+        return {"objects": _sorted(objects), "notes": notes, "error": None}
+
+    def _unconstrained_delegation(self, _control: Control) -> Dict[str, Any]:
+        """Enabled accounts, other than domain controllers, trusted for
+        delegation to any service."""
+        not_dcs = "".join(f"(!(primaryGroupID={g}))" for g in _DC_PRIMARY_GROUPS)
+        entries = self._search(
+            f"(&(userAccountControl:{_BIT_AND}:={_UAC_TRUSTED_FOR_DELEGATION})"
+            f"(!(userAccountControl:{_BIT_AND}:={_UAC_ACCOUNTDISABLE})){not_dcs})",
+            ["sAMAccountName", "objectClass"])
+        objects = []
+        for entry in entries:
+            attributes = entry.get("attributes", {}) or {}
+            classes = attributes.get("objectClass") or []
+            kind = "computer" if "computer" in classes else "user"
+            objects.append({
+                "value": _attr(attributes, "sAMAccountName", "") or "",
+                "dn": entry.get("dn", ""),
+                "object_class": kind,
+                "detail": f"{kind} trusted for delegation to any service",
+            })
+        return {"objects": _sorted(objects), "notes": [], "error": None}
+
     # --- SMB / SYSVOL ------------------------------------------------------
 
     def _smb_target(self, sysvol_path: str) -> Dict[str, str]:
@@ -336,6 +480,18 @@ class Scanner:
 # --------------------------------------------------------------------------- #
 # Content extraction (module-level so it stays trivially testable)
 # --------------------------------------------------------------------------- #
+
+def _sorted(objects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Directory objects in a stable order, so two scans list them alike."""
+    return sorted(objects, key=lambda o: (str(o.get("value")).lower(),
+                                          str(o.get("dn")).lower()))
+
+
+def _rdn(dn: str) -> str:
+    """``CN=Jane Doe,OU=...`` -> ``Jane Doe``: a member's name, for display."""
+    first = str(dn).split(",", 1)[0]
+    return first.split("=", 1)[1] if "=" in first else first
+
 
 def _template_entries(contents: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Structured ``[Registry Values]`` entries from every GptTmpl.inf found."""

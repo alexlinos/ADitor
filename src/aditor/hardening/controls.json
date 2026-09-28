@@ -1,5 +1,5 @@
 {
-  "catalog_version": "2026.08.3",
+  "catalog_version": "2026.09.1",
   "spec": "docs/HARDENING_CATALOG.md",
   "baseline": {
     "primary_source": "Jerry Devore, \"Active Directory Hardening Series\", Microsoft Core Infrastructure and Security Blog (series verified Aug 2026).",
@@ -7,7 +7,7 @@
     "pending_value_source": "Microsoft Security Baselines (Security Compliance Toolkit) and/or CIS Benchmarks — needed to close the 'needs_baseline_value' controls."
   },
   "notes": [
-    "Check types in this release: gpo-security-template (GptTmpl.inf [Registry Values]) and gpo-registry-pol (Registry.pol). The catalog's directory-state controls (DEVORE-02 SMBv1, DEVORE-04 msDS-SupportedEncryptionTypes, DEVORE-07 least privilege, DEVORE-08 Protected Users) have no evaluator yet and are deliberately absent rather than present-and-unevaluatable; they arrive with their own engine.",
+    "Check types in this release: gpo-security-template (GptTmpl.inf [Registry Values]), gpo-registry-pol (Registry.pol and Preferences Registry.xml) and directory-state. A directory-state control names a fixed, read-only directory query in directory_check and asserts that it finds nothing: none is a pass, any is a fail listing them, and a query that fails is an error. The spec's other directory-state controls (DEVORE-02 SMBv1, which the directory cannot show; DEVORE-08 Protected Users; the rest of DEVORE-07) are not in the catalog yet.",
     "registry_key is the full path including the value name (its last component). For gpo-registry-pol the evaluator splits the last component off to match Registry.pol's separate key/value fields; for gpo-security-template the whole path is one [Registry Values] key.",
     "Rollout is phased, not binary: interim_expected is the audit/negotiate step and final_expected the enforced step, so a domain correctly mid-rollout reports rollout_state 'audit' and result 'pass', not a failure.",
     "os_default records the value Windows uses when no GPO sets the key, and only where a Microsoft document states it. Such a finding is evaluated against the default and marked 'source: os-default', so an assumed value is never mistaken for an enforced one. It is deliberately absent where there is no default to cite — LdapEnforceChannelBinding, for one, has no such key by default (channel binding is off), which is precisely why configuring it matters. Two limitations are deliberate. A finding resting on a default is capped at rollout_state 'audit', because 'enforced' means Group Policy holds the value and nothing enforces a default. And os_default is a single value, so a default that depends on the machine's role cannot be expressed: DEVORE-06-SMB-SERVER-SIGNING-ALWAYS is 'Enabled' by Microsoft's table for domain controllers but 'Disabled' for member servers and clients. Making that expressible would need the evaluator to know which machines a GPO lands on, which a SYSVOL/GPO scan cannot see at all — so those controls carry no default and say why in missing_note, rather than asserting one role's default over the whole domain."
@@ -191,6 +191,36 @@
       "audit_before_enforce": "4768 Ticket Encryption Type = RC4 identifies the accounts and devices that still depend on RC4."
     },
     {
+      "scope": "domain-root",
+      "check_type": "directory-state",
+      "status": "active",
+      "friendly_policy": null,
+      "registry_key": null,
+      "registry_type": null,
+      "operator": "absent",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": null,
+      "missing_result": null,
+      "missing_note": null,
+      "id": "DEVORE-04-SPN-ACCOUNTS-AES",
+      "title": "Service accounts with an SPN support AES (msDS-SupportedEncryptionTypes)",
+      "source": {
+        "part": 4,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-4-%E2%80%93-enforcing-aes-for-kerberos/4114965"
+      },
+      "severity": "high",
+      "directory_check": "spn-accounts-without-aes",
+      "value_source": "Devore Part 4: service accounts with an SPN should carry the AES bits in msDS-SupportedEncryptionTypes; when the attribute is blank the KDC defaults to RC4 for that account. AES bits per Microsoft: 0x8 (AES128) and 0x10 (AES256).",
+      "remediation": "For each listed service account, add the AES bits to msDS-SupportedEncryptionTypes (0x8 for AES128, 0x10 for AES256). Do this before disabling RC4 at the domain level, which is the last step of the Part 4 rollout.",
+      "caveats": [
+        "An account whose password was set before the domain supported AES may have no AES keys yet; resetting its password generates them. Accounts migrated with ADMT are the usual case.",
+        "Only user accounts with an SPN are checked. Computer accounts maintain this attribute themselves and should not be set by hand, and krbtgt is skipped.",
+        "Disabled accounts are not listed."
+      ],
+      "audit_before_enforce": "Event 4769 (and 4768) with Ticket Encryption Type 0x17 (RC4) shows which accounts and services still get RC4 tickets."
+    },
+    {
       "id": "DEVORE-05-LDAP-CHANNEL-BINDING",
       "title": "Domain controller LDAP server channel binding token requirement",
       "source": {
@@ -328,6 +358,76 @@
       "remediation": "Computer Configuration > Policies > Administrative Templates > MS Security Guide > 'NetBT NodeType configuration' = P-node (writes NodeType = 2). Requires SecGuide.admx from the Security Compliance Toolkit.",
       "caveats": [
         "Explicit value in the post. Needs SecGuide.admx from the Security Compliance Toolkit for a native GPO setting."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "scope": "domain-root",
+      "check_type": "directory-state",
+      "status": "active",
+      "friendly_policy": null,
+      "registry_key": null,
+      "registry_type": null,
+      "operator": "absent",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": null,
+      "missing_result": null,
+      "missing_note": null,
+      "id": "DEVORE-07-EMPTY-PRIVILEGED-GROUPS",
+      "title": "Built-in privileged groups that should be empty have no members",
+      "source": {
+        "part": 7,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-7-%E2%80%93-implementing-least-privilege/4366626"
+      },
+      "severity": "high",
+      "directory_check": "non-empty-groups",
+      "directory_targets": [
+        "Account Operators",
+        "Backup Operators",
+        "Group Policy Creator Owners",
+        "Schema Admins",
+        "Server Operators",
+        "Print Operators",
+        "Replicator",
+        "Storage Replica Administrators",
+        "Incoming Forest Trust Builders"
+      ],
+      "value_source": "Devore Part 7 lists these built-in groups as ones that should normally have no members. Only direct members are checked.",
+      "remediation": "Remove the members of each listed group. Where someone needs the rights a group carries, delegate the specific rights instead, or add them only for the duration of the task.",
+      "caveats": [
+        "Schema Admins and Group Policy Creator Owners contain the built-in Administrator account by default, so they are often listed on a domain nobody has changed. Emptying them is the recommendation; add a member back only while a change needs it.",
+        "Only direct members are listed. A nested group counts as one member.",
+        "A group that doesn't exist in this domain is skipped; the scan notes lists it."
+      ],
+      "audit_before_enforce": null
+    },
+    {
+      "scope": "domain-root",
+      "check_type": "directory-state",
+      "status": "active",
+      "friendly_policy": null,
+      "registry_key": null,
+      "registry_type": null,
+      "operator": "absent",
+      "interim_expected": null,
+      "final_expected": null,
+      "presence_rollout_state": null,
+      "missing_result": null,
+      "missing_note": null,
+      "id": "DEVORE-07-UNCONSTRAINED-DELEGATION",
+      "title": "No accounts other than domain controllers have unconstrained delegation",
+      "source": {
+        "part": 7,
+        "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-7-%E2%80%93-implementing-least-privilege/4366626"
+      },
+      "severity": "high",
+      "directory_check": "unconstrained-delegation",
+      "value_source": "Devore Part 7: accounts trusted for delegation to any service (userAccountControl TRUSTED_FOR_DELEGATION, 0x80000) should be moved to constrained or resource-based constrained delegation. Domain controllers carry this flag by design and are excluded.",
+      "remediation": "For each listed account, switch to constrained delegation or resource-based constrained delegation (RBCD) for only the services it needs, then turn off 'Trust this computer/user for delegation to any service'.",
+      "caveats": [
+        "Changing delegation can break the services that depend on it. Find out what each listed account delegates to before changing it, and change one at a time.",
+        "Domain controllers and read-only domain controllers are excluded. Disabled accounts are not listed."
       ],
       "audit_before_enforce": null
     },

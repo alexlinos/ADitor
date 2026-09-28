@@ -18,8 +18,8 @@ import re
 
 import pytest
 from aditor.hardening.catalog import (
-    CHECK_TYPES,
     DEFAULT_CATALOG_PATH,
+    DIRECTORY_CHECKS,
     EVALUABLE_CHECK_TYPES,
     MISSING_RESULTS,
     OPERATORS,
@@ -82,6 +82,11 @@ _AUTHORITATIVE_VALUE_HOSTS = ("learn.microsoft.com", "docs.microsoft.com",
 def _cites_authoritative_source(value_source):
     return any(host in (value_source or "") for host in _AUTHORITATIVE_VALUE_HOSTS)
 
+
+
+def gpo_controls(catalog):
+    """The scored controls a GPO engine judges; directory-state ones are not."""
+    return [c for c in catalog.scored_controls if c.check_type != "directory-state"]
 
 class TestLoaderAcceptsValidCatalogs:
 
@@ -743,13 +748,13 @@ class TestCitationHonesty:
             assert control.value_source, control.id
 
     def test_every_active_control_says_what_an_unset_key_means(self, catalog):
-        for control in catalog.scored_controls:
+        for control in gpo_controls(catalog):
             assert control.missing_result in MISSING_RESULTS, control.id
             assert control.missing_note, control.id
 
     def test_both_missing_result_semantics_are_exercised(self, catalog):
         """A hardening gap fails; a conditional setting is not_applicable."""
-        semantics = {c.missing_result for c in catalog.scored_controls}
+        semantics = {c.missing_result for c in gpo_controls(catalog)}
 
         assert semantics == MISSING_RESULTS
         assert catalog.by_id("DEVORE-08-PRINT-RPCNAMEDPIPE").missing_result \
@@ -764,7 +769,7 @@ class TestCitationHonesty:
         its place, it must explain in ``caveats`` why no floor is needed, and
         this assertion is the prompt to think about it.
         """
-        presence_only = [c.id for c in catalog.scored_controls
+        presence_only = [c.id for c in gpo_controls(catalog)
                          if c.operator in PRESENCE_OPERATORS]
 
         assert presence_only == []
@@ -811,11 +816,16 @@ class TestCitationHonesty:
         for control in catalog.scored_controls:
             assert control.check_type in EVALUABLE_CHECK_TYPES, control.id
 
-    def test_no_directory_state_controls_ship_before_their_engine_exists(self, catalog):
-        """They are deliberately absent, not present-and-unevaluatable."""
-        assert "directory-state" in CHECK_TYPES
-        assert [c.id for c in catalog.controls
-                if c.check_type == "directory-state"] == []
+    def test_directory_state_controls_name_a_known_query_and_assert_none(
+            self, catalog):
+        directory = [c for c in catalog.scored_controls
+                     if c.check_type == "directory-state"]
+        assert directory, "the catalog ships directory-state controls"
+        for control in directory:
+            assert control.directory_check in DIRECTORY_CHECKS, control.id
+            assert control.operator == "absent", control.id
+            assert control.registry_key is None, control.id
+            assert control.value_source and control.caveats, control.id
         assert any("directory-state" in note for note in catalog.notes)
 
     def test_operators_and_severities_stay_inside_the_supported_sets(self, catalog):
