@@ -28,6 +28,6 @@ Version of the *app shell*, separate from the scan engine and report versions
 so a UI change and a scan-logic change are not confused for one another.
 """
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 
 __all__ = ["APP_VERSION"]
