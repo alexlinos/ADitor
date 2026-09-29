@@ -62,13 +62,21 @@ you work, build from source instead (below).
 
 ## Requirements
 
-- Python 3.12
-- [uv](https://github.com/astral-sh/uv) (recommended) or pip
-- LDAP/LDAPS access to a domain controller, with a bind account that has read
-  permissions
-- SMB read access to the SYSVOL share
+The Windows downloads carry their own Python, so there's nothing else to
+install. You need:
+
+- **64-bit Windows:** Windows 10 or 11, or Windows Server 2016 or later. The
+  command line is also tested on Server Core. The desktop app needs WebView2,
+  which Windows 10 and 11 already have and Server Core doesn't.
+- **Network access to a domain controller:** LDAPS on TCP 636 (or LDAP on 389,
+  which sends the password in clear text), and SMB on TCP 445 to read SYSVOL.
+- **A domain account to bind with.** An ordinary domain user is enough. It
+  doesn't need admin rights.
 
 ## Installing from source
+
+For macOS or Linux, or if you'd rather not run an unsigned executable. This
+needs Python 3.12 and [uv](https://github.com/astral-sh/uv) (or pip).
 
 ```bash
 git clone https://github.com/alexlinos/ADitor.git
@@ -114,6 +122,9 @@ On macOS, [`scan_keychain.sh`](scan_keychain.sh) pulls the password from the
 Keychain (service `admcp-ldap`) and runs a scan with it.
 
 ## Usage
+
+With the Windows download, use `aditor-cli.exe` wherever this says `aditor`,
+for example `.\aditor-cli.exe scan --config config.json --out C:\scans`.
 
 ```bash
 aditor scan --config ad-config/config.json --out ~/scans
@@ -182,7 +193,8 @@ A control added to or removed from the catalog is never counted as either.
 
 ## The desktop app
 
-For an administrator who would rather not use a terminal:
+For an administrator who would rather not use a terminal. On Windows, run
+`ADitor.exe`. From source:
 
 ```bash
 uv pip install -e ".[gui,smb]"
