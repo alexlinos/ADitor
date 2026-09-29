@@ -3,11 +3,18 @@ name: Windows build
 on:
   push:
     branches: [main, windows-build]
+    tags: ["v*"]
+  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write  # the release step attaches the exes to a GitHub Release
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -53,3 +60,15 @@ jobs:
       # to try; the run is still marked failed.
       - name: Tests
         run: pytest -q
+
+      # Only for a v* tag, and only after the tests pass.
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Get-FileHash dist\*.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content dist\SHA256SUMS.txt
+          gh release create $env:GITHUB_REF_NAME dist\ADitor.exe dist\aditor-cli.exe dist\SHA256SUMS.txt --title "ADitor $env:GITHUB_REF_NAME" --generate-notes
