@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/alexlinos/ADitor/releases/latest"><b>Download for Windows</b></a> ·
-  <a href="examples/hardening-report-sample.html">Sample report</a> ·
+  <a href="https://alexlinos.github.io/ADitor/examples/hardening-report-sample.html">Sample report</a> ·
   <a href="docs/HARDENING_CATALOG.md">Control catalog</a> ·
   <a href="SECURITY.md">Security</a>
 </p>
@@ -27,7 +27,7 @@ changed and whether anything regressed. It never writes to the directory.
 
 <p align="center">
   <img src="assets/report-sample.png" alt="The Results and Start here sections of an ADitor report, rendered from synthetic data" width="820">
-  <br><sub>From the <a href="examples/hardening-report-sample.html">sample report</a>, rendered from synthetic data.</sub>
+  <br><sub>From the <a href="https://alexlinos.github.io/ADitor/examples/hardening-report-sample.html">sample report</a>, rendered from synthetic data.</sub>
 </p>
 
 ## What it touches
@@ -159,7 +159,7 @@ a "Start here" box (where you stand, and the first few things to do) and groups
 findings by what you do with them: **Fix**, **Check by hand**, **Not covered
 yet** and **Good**. Each finding shows found versus target, the fix and the safe
 rollout order up front, with the evidence one click away. A warning about
-unreadable GPOs always comes first. See [`examples/hardening-report-sample.html`](examples/hardening-report-sample.html),
+unreadable GPOs always comes first. See [the sample report](https://alexlinos.github.io/ADitor/examples/hardening-report-sample.html),
 rendered from synthetic data.
 
 **Both files contain directory content** — GPO display names, registry values
