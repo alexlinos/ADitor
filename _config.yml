@@ -1,0 +1,10 @@
+# GitHub Pages. The theme prints site.title above a page unless the page has
+# the same title; giving the README page that title hides the duplicate, since
+# the README opens with the banner.
+title: ADitor
+description: A read-only Active Directory and Group Policy hardening auditor
+defaults:
+  - scope:
+      path: README.md
+    values:
+      title: ADitor
