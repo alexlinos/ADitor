@@ -583,7 +583,7 @@ class TestFailureCard:
         remediation = catalog.by_id(LM_CONTROL).remediation
         assert "Remediation" in card
         # The catalog's own words, escaped but not paraphrased.
-        assert "Bring all clients and member servers to" in card
+        assert "Set every client and member server to" in card
         assert remediation.split(".")[0][:40] in card.replace("&gt;", ">")
 
     def test_carries_the_phasing_caveat_interim_first(self, card):
@@ -598,14 +598,14 @@ class TestFailureCard:
 
     def test_carries_the_catalogs_audit_before_enforce_evidence(self, card):
         assert "Before enforcing, check:" in card
-        assert "LmPackageName=&#x27;NTLM V1&#x27;" in card
+        assert "LmPackageName = &#x27;NTLM V1&#x27;" in card
 
     def test_carries_every_catalog_caveat_including_unprefixed_ones(
             self, card, catalog):
         """All of them: Part 4's service-account warning carries no prefix."""
         for caveat in catalog.by_id(LM_CONTROL).caveats:
             assert caveat.split(":")[0][:30].replace("'", "&#x27;") in card
-        assert 'class="flagged"' in card  # the PHASED: caveat is emphasised
+        assert 'class="flagged"' in card  # the IN STAGES: caveat is emphasised
 
     def test_rc4_control_surfaces_the_service_account_warning(self, catalog):
         """Part 4: remediate service accounts before disabling RC4 domain-wide.
@@ -634,7 +634,7 @@ class TestFailureCard:
             [snapshot(GUID_A, "Empty GPO", links=[GpoLink(target_dn=BASE_DN)])],
             catalog=catalog, control_ids=[LM_CONTROL])
         card = card_of(render_report(payload), SECTION_FAIL, LM_CONTROL)
-        assert "No GPO configures the level" in card
+        assert "No GPO sets the level" in card
 
     def test_thin_catalog_guidance_is_reported_as_a_gap_not_improvised(self):
         """A control with no interim, no audit evidence and no caveats."""
@@ -1403,7 +1403,7 @@ class TestUnknownVerdictThatIsNotAReadFailure:
 
         assert "Remediation" in card
         assert "How to roll it out safely" in card
-        assert "NOT GPO-DELIVERED" in card  # the catalog's own caveat
+        assert "NOT SET THROUGH GROUP POLICY" in card  # the catalog's own caveat
 
     def test_it_is_not_reported_as_a_read_failure(self, document):
         """The distinction acceptance 7 asks for: nothing failed to read."""

@@ -527,7 +527,7 @@ class TestShippedCatalogInvariants:
         assert control.baseline_gap
         assert any(phrase in control.baseline_gap.lower()
                    or any(phrase in caveat.lower() for caveat in control.caveats)
-                   for phrase in ("unscored", "excluded from scoring")), control.id
+                   for phrase in ("unscored", "excluded from scoring", "isn't checked yet")), control.id
 
     @pytest.mark.parametrize("control_id,service", [
         ("DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS", "LanManWorkstation"),
@@ -707,7 +707,7 @@ class TestCitationHonesty:
 
         assert service in control.value_source
         assert service in control.registry_key
-        assert "CASING IS VERBATIM" in control.value_source
+        assert "as Microsoft writes it" in control.value_source
 
     def test_channel_binding_is_scored_on_a_named_microsoft_source(self, catalog):
         """The doc used to call these numerics unsourced while the control scored.
@@ -787,7 +787,7 @@ class TestCitationHonesty:
         assert control.final_expected == 1
         assert control.presence_rollout_state is None
         assert _cites_authoritative_source(control.value_source)
-        assert any("FLOOR, NOT LEVEL" in caveat for caveat in control.caveats)
+        assert any("MINIMUM, NOT EXACT LEVEL" in caveat for caveat in control.caveats)
 
     @pytest.mark.parametrize("control_id", [
         "DEVORE-08-NTLM-BLOCK-INCOMING",
@@ -959,7 +959,7 @@ class TestGpoDeliverableIsScopedToTwoShippedControls:
         """The report renders caveats; the limitation must not hide in code."""
         caveats = catalog.by_id(control_id).caveats
 
-        assert any("NOT GPO-DELIVERED" in caveat for caveat in caveats), caveats
+        assert any("NOT SET THROUGH GROUP POLICY" in caveat for caveat in caveats), caveats
 
     @pytest.mark.parametrize("control_id", NON_DELIVERABLE)
     def test_each_marked_control_does_not_assert_the_key_is_unset(
@@ -967,5 +967,5 @@ class TestGpoDeliverableIsScopedToTwoShippedControls:
         """``missing_note`` is rendered verbatim, so it must not claim more."""
         note = catalog.by_id(control_id).missing_note
 
-        assert "no GPO trace" in note
-        assert "not evidence" in note
+        assert "leaves nothing in Group Policy" in note
+        assert "can't tell either way" in note
