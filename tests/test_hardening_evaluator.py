@@ -1462,7 +1462,7 @@ class TestNtlmAuditFloorOnTheShippedCatalog:
         assert domain_accounts["result"] == all_accounts["result"] == RESULT_PASS
         assert domain_accounts["evidence"]["found"][0]["value"] == 1
         assert all_accounts["evidence"]["found"][0]["value"] == 2
-        assert any("FLOOR, NOT LEVEL" in caveat
+        assert any("MINIMUM, NOT EXACT LEVEL" in caveat
                    for caveat in domain_accounts["caveats"])
 
     @pytest.mark.parametrize("control_id", sorted(KEYS))
@@ -1496,7 +1496,7 @@ class TestNtlmAuditFloorOnTheShippedCatalog:
         assert block["unscored_reason"] == UNSCORED_NEEDS_BASELINE_VALUE
         assert block["evidence"]["registry_key"] is None
         assert counts["needs_baseline_value"] == 1
-        assert any("NOT evidence that outgoing NTLM is blocked" in caveat
+        assert any("doesn't mean outgoing NTLM is blocked" in caveat
                    for caveat in audit["caveats"])
 
     def test_two_gpos_disagreeing_about_the_audit_level_follow_the_worst(self):
