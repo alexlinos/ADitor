@@ -7,11 +7,41 @@ versioned catalog of hardening controls, and writes a report you can hand to
 someone. Run it again next month and diff the two scans to see what your fixes
 changed and whether anything regressed. It never writes to the directory.
 
+## What it touches
+
+- **Reads only.** LDAP searches and SMB reads of SYSVOL. ADitor sends no
+  modify, add or delete to the directory, and writes nothing to SYSVOL.
+- **A read-only account is enough.** An ordinary domain user can normally read
+  everything it checks, so it doesn't need Domain Admin. Anything it can't read
+  is reported as unreadable, never as a pass.
+- **Nothing leaves the machine.** No telemetry and no update checks. The report
+  is written locally and loads nothing from the network. The only other
+  connection it makes is the optional issuing-CA download, which fetches a
+  public certificate from the URL printed in your DC's certificate and sends no
+  credential.
+- **The output is sensitive.** `scan.json` and `report.html` contain GPO names,
+  registry values and DNs from your domain.
+
+## Download
+
+Windows builds are on the [Releases](https://github.com/alexlinos/ADitor/releases)
+page:
+
+- `ADitor.exe`: the desktop app. It needs WebView2, which is already on
+  Windows 10 and 11.
+- `aditor-cli.exe`: the command line, for scheduled tasks and Server Core.
+- `SHA256SUMS.txt`: checksums. Check one with
+  `Get-FileHash .\ADitor.exe -Algorithm SHA256` in PowerShell.
+
+The executables are not code-signed yet, so Windows SmartScreen will warn the
+first time you run one (**More info → Run anyway**). If that's a problem where
+you work, build from source instead (below).
+
 > **Status.** ADitor began as a fork of
 > [ActiveDirectoryMCP](https://github.com/alpadalar/ActiveDirectoryMCP)
 > (Alperen Adalar, MIT). The MCP server and its directory-management tools were
-> removed; the last version with them is tagged `v-mcp-final`. The control
-> catalog and its design are in [`docs/HARDENING_CATALOG.md`](docs/HARDENING_CATALOG.md).
+> removed. The control catalog and its design are in
+> [`docs/HARDENING_CATALOG.md`](docs/HARDENING_CATALOG.md).
 
 ## Requirements
 
@@ -21,7 +51,7 @@ changed and whether anything regressed. It never writes to the directory.
   permissions
 - SMB read access to the SYSVOL share
 
-## Installation
+## Installing from source
 
 ```bash
 git clone https://github.com/alexlinos/ADitor.git
@@ -191,6 +221,16 @@ src/aditor/
 tests/
 docs/                  # design docs and the hardening control catalog
 ```
+
+## Contributing
+
+Issues and pull requests are welcome. Every pull request runs the test suite on
+Windows. A new control goes in `src/aditor/hardening/controls.json`, with a
+source for its expected value and a test that fails without it.
+
+Don't put real domain data in an issue, a test fixture or a screenshot. Use
+`example.com` and made-up names. To report a vulnerability, see
+[SECURITY.md](SECURITY.md).
 
 ## License
 
