@@ -13,8 +13,6 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    permissions:
-      contents: write  # the release step attaches the exes to a GitHub Release
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -61,14 +59,51 @@ jobs:
       - name: Tests
         run: pytest -q
 
-      # Only for a v* tag, and only after the tests pass.
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
+  # The build runner has Python installed, so the smoke test above can't show
+  # the exe runs without it. Windows Server Core in a container has no Python,
+  # uv or pip, and no WebView2, so only the CLI is run there.
+  clean-machine:
+    needs: build
+    runs-on: windows-2022  # process isolation needs the container to match the host
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: aditor-windows
+          path: dist
+
+      - name: Run aditor-cli.exe on Server Core with no Python
         shell: pwsh
+        run: |
+          docker run --rm -v "${PWD}\dist:C:\app" `
+            mcr.microsoft.com/windows/servercore:ltsc2022 `
+            powershell -NoProfile -Command '
+              if (Get-Command python, py, uv -ErrorAction SilentlyContinue) { throw "this container has Python" }
+              C:\app\aditor-cli.exe --help
+              if ($LASTEXITCODE -ne 0) { throw "--help exited $LASTEXITCODE" }
+              C:\app\aditor-cli.exe scan --config missing.json
+              if ($LASTEXITCODE -ne 2) { throw "expected exit 2, got $LASTEXITCODE" }
+              "aditor-cli.exe ran with no Python on the machine"
+              exit 0'
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  # Only for a v* tag, and only after the tests and the clean-machine run pass.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, clean-machine]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: aditor-windows
+          path: dist
+
+      - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          Get-FileHash dist\*.exe -Algorithm SHA256 |
-            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
-            Set-Content dist\SHA256SUMS.txt
-          gh release create $env:GITHUB_REF_NAME dist\ADitor.exe dist\aditor-cli.exe dist\SHA256SUMS.txt --title "ADitor $env:GITHUB_REF_NAME" --generate-notes
+          cd dist
+          sha256sum ADitor.exe aditor-cli.exe > SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" ADitor.exe aditor-cli.exe SHA256SUMS.txt \
+            -R "$GITHUB_REPOSITORY" --title "ADitor $GITHUB_REF_NAME" --generate-notes
