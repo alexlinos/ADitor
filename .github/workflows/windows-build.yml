@@ -13,6 +13,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -26,9 +28,16 @@ jobs:
       # smbclient is imported lazily, so it is collected explicitly.
       # Distinct names: Windows filenames are case-insensitive, so aditor.exe
       # and ADitor.exe would be the same file.
+      # SignPath requires product name and version on the signed files.
+      - name: Version resources
+        run: |
+          python packaging/version_info.py aditor-cli "ADitor command line" > cli-version.txt
+          python packaging/version_info.py ADitor "ADitor desktop app" > app-version.txt
+
       - name: Build aditor-cli.exe (command line)
         run: >
           pyinstaller --noconfirm --onefile --name aditor-cli
+          --version-file cli-version.txt
           --collect-data aditor --collect-submodules aditor
           --collect-submodules smbclient --collect-submodules smbprotocol
           packaging/aditor_cli.py
@@ -36,6 +45,7 @@ jobs:
       - name: Build ADitor.exe (desktop app)
         run: >
           pyinstaller --noconfirm --onefile --windowed --name ADitor
+          --version-file app-version.txt
           --collect-data aditor --collect-submodules aditor
           --collect-submodules smbclient --collect-submodules smbprotocol
           packaging/aditor_app.py
@@ -48,8 +58,16 @@ jobs:
           dist\aditor-cli.exe scan --config missing.json
           if ($LASTEXITCODE -ne 2) { throw "expected exit 2, got $LASTEXITCODE" }
           $global:LASTEXITCODE = 0
+          $version = python -c "import aditor; print(aditor.__version__)"
+          foreach ($exe in 'ADitor.exe', 'aditor-cli.exe') {
+            $info = (Get-Item "dist\$exe").VersionInfo
+            if ($info.ProductName -ne 'ADitor' -or $info.ProductVersion -ne $version) {
+              throw "$exe has ProductName '$($info.ProductName)', ProductVersion '$($info.ProductVersion)'"
+            }
+          }
 
       - uses: actions/upload-artifact@v7
+        id: upload
         with:
           name: aditor-windows
           path: dist/*.exe
@@ -99,23 +117,56 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
   # Only for a v* tag, and only after the tests and the clean-machine run pass.
+  # Signing is off until the repository variable SIGNPATH_ORGANIZATION_ID is
+  # set (with the secret SIGNPATH_API_TOKEN); until then releases go out
+  # unsigned, as before. Once it is on, a release fails rather than ship an
+  # unsigned exe.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, clean-machine]
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     permissions:
       contents: write
+      actions: read  # SignPath reads the build artifact through the GitHub API
     steps:
       - uses: actions/download-artifact@v7
+        if: vars.SIGNPATH_ORGANIZATION_ID == ''
         with:
           name: aditor-windows
           path: dist
 
+      - name: Sign with SignPath
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'ADitor' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist
+
+      - name: Check signatures
+        if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        shell: pwsh
+        run: |
+          foreach ($exe in 'ADitor.exe', 'aditor-cli.exe') {
+            $sig = Get-AuthenticodeSignature "dist\$exe"
+            if ($sig.Status -ne 'Valid') { throw "$exe signature: $($sig.Status) $($sig.StatusMessage)" }
+            "$exe signed by $($sig.SignerCertificate.Subject)"
+          }
+
       - name: Release
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
-          sha256sum ADitor.exe aditor-cli.exe > SHA256SUMS.txt
-          gh release create "$GITHUB_REF_NAME" ADitor.exe aditor-cli.exe SHA256SUMS.txt \
-            -R "$GITHUB_REPOSITORY" --title "ADitor $GITHUB_REF_NAME" --generate-notes
+          Get-FileHash ADitor.exe, aditor-cli.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content SHA256SUMS.txt -Encoding ascii
+          gh release create $env:GITHUB_REF_NAME ADitor.exe aditor-cli.exe SHA256SUMS.txt `
+            -R $env:GITHUB_REPOSITORY --title "ADitor $env:GITHUB_REF_NAME" --generate-notes `
+            --notes "Code signing policy: https://github.com/alexlinos/ADitor#code-signing-policy"

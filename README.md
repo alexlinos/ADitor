@@ -67,6 +67,8 @@ The executables are not code-signed yet, so Windows SmartScreen will warn the
 first time you run one (**More info → Run anyway**). If that's a problem where
 you work, build from source instead (below).
 
+See the [code signing policy](#code-signing-policy) for how releases are signed.
+
 ## Requirements
 
 The Windows downloads carry their own Python, so there's nothing else to
@@ -267,6 +269,26 @@ source for its expected value and a test that fails without it.
 Don't put real domain data in an issue, a test fixture or a screenshot. Use
 `example.com` and made-up names. To report a vulnerability, see
 [SECURITY.md](SECURITY.md).
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/),
+certificate by [SignPath Foundation](https://signpath.org/).
+
+Only the executables built from this repository by its GitHub Actions workflow
+are signed, and only for a tagged release.
+
+| Role | Who |
+|---|---|
+| Committers and reviewers | [Alex Linos](https://github.com/alexlinos) |
+| Approvers | [Alex Linos](https://github.com/alexlinos) |
+
+**Privacy.** This program will not transfer any information to other networked
+systems unless specifically requested by the user or the person installing or
+operating it. ADitor connects only to the domain controller you configure and,
+if you choose **Download the issuing CA certificate**, to the certificate URL
+printed in that domain controller's certificate. See
+[What it touches](#what-it-touches).
 
 ## License
 
