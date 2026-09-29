@@ -71,6 +71,18 @@ jobs:
           name: aditor-windows
           path: dist
 
+      # The Docker service isn't always running yet when the job starts.
+      - name: Start Docker
+        shell: pwsh
+        run: |
+          Start-Service docker
+          foreach ($i in 1..30) {
+            docker info *> $null
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Start-Sleep 5
+          }
+          throw "Docker did not start"
+
       - name: Run aditor-cli.exe on Server Core with no Python
         shell: pwsh
         run: |
