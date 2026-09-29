@@ -25,6 +25,13 @@ versioned catalog of hardening controls, and writes a report you can hand to
 someone. Run it again next month and diff the two scans to see what your fixes
 changed and whether anything regressed. It never writes to the directory.
 
+ADitor doesn't replace [PingCastle](https://www.pingcastle.com/) or
+[Purple Knight](https://www.purple-knight.com/). Use them for a broad
+assessment of your Active Directory security. ADitor complements them for the
+hardening work that follows: it checks specific Group Policy and directory
+settings against a catalog of sourced controls, tells you what order to change
+them in, and compares scans so you can see what each change did.
+
 <p align="center">
   <img src="assets/report-sample.png" alt="The Results and Start here sections of an ADitor report, rendered from synthetic data" width="820">
   <br><sub>From the <a href="https://alexlinos.github.io/ADitor/examples/hardening-report-sample.html">sample report</a>, rendered from synthetic data.</sub>
@@ -267,3 +274,7 @@ MIT, see [LICENSE](LICENSE). ADitor began as a fork of
 [ActiveDirectoryMCP](https://github.com/alpadalar/ActiveDirectoryMCP) by Alperen
 Adalar (MIT), whose copyright is kept in the license file. The MCP server and
 its directory-management tools were removed.
+
+---
+
+Copyright © 2026 Alex Linos.
