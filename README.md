@@ -1,11 +1,34 @@
-# ADitor
+<p align="center">
+  <img src="assets/banner.png" alt="ADitor" width="640">
+</p>
 
-A read-only Active Directory / GPO hardening auditor.
+<h3 align="center">A read-only Active Directory and Group Policy hardening auditor</h3>
+
+<p align="center">
+  <a href="https://github.com/alexlinos/ADitor/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/alexlinos/ADitor?color=f5a524&label=release"></a>
+  <a href="https://github.com/alexlinos/ADitor/actions/workflows/windows-build.yml"><img alt="Windows build" src="https://img.shields.io/github/actions/workflow/status/alexlinos/ADitor/windows-build.yml?branch=main&label=windows%20build"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-7c8a99"></a>
+  <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12-7c8a99">
+</p>
+
+<p align="center">
+  <a href="https://github.com/alexlinos/ADitor/releases/latest"><b>Download for Windows</b></a> ·
+  <a href="examples/hardening-report-sample.html">Sample report</a> ·
+  <a href="docs/HARDENING_CATALOG.md">Control catalog</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
+
+---
 
 ADitor reads a domain's Group Policy over LDAP and SYSVOL, checks it against a
 versioned catalog of hardening controls, and writes a report you can hand to
 someone. Run it again next month and diff the two scans to see what your fixes
 changed and whether anything regressed. It never writes to the directory.
+
+<p align="center">
+  <img src="assets/report-sample.png" alt="The Results and Start here sections of an ADitor report, rendered from synthetic data" width="820">
+  <br><sub>From the <a href="examples/hardening-report-sample.html">sample report</a>, rendered from synthetic data.</sub>
+</p>
 
 ## What it touches
 
@@ -36,12 +59,6 @@ page:
 The executables are not code-signed yet, so Windows SmartScreen will warn the
 first time you run one (**More info → Run anyway**). If that's a problem where
 you work, build from source instead (below).
-
-> **Status.** ADitor began as a fork of
-> [ActiveDirectoryMCP](https://github.com/alpadalar/ActiveDirectoryMCP)
-> (Alperen Adalar, MIT). The MCP server and its directory-management tools were
-> removed. The control catalog and its design are in
-> [`docs/HARDENING_CATALOG.md`](docs/HARDENING_CATALOG.md).
 
 ## Requirements
 
@@ -234,5 +251,7 @@ Don't put real domain data in an issue, a test fixture or a screenshot. Use
 
 ## License
 
-MIT — see [LICENSE](LICENSE). ADitor is derived from ActiveDirectoryMCP by
-Alperen Adalar (MIT); the original copyright is retained in the license file.
+MIT, see [LICENSE](LICENSE). ADitor began as a fork of
+[ActiveDirectoryMCP](https://github.com/alpadalar/ActiveDirectoryMCP) by Alperen
+Adalar (MIT), whose copyright is kept in the license file. The MCP server and
+its directory-management tools were removed.
