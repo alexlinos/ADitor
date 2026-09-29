@@ -982,8 +982,12 @@ class TestHeadlineCounts:
 # display names, registry values and DNs, so a sample taken from a live scan
 # would commit exactly the environmental detail this repo keeps out of git.
 
-def sample_scan():
-    """The richest synthetic scan: a read failure, a conflict, and passes."""
+def sample_scan(first_gpo=HOSTILE_NAME):
+    """The richest synthetic scan: a read failure, a conflict, and passes.
+
+    The escaping tests use the hostile GPO name; the published sample passes a
+    plain one, since people read it as a showcase.
+    """
     catalog = load_catalog()
     read_errors = [{
         "gpo_dn": gpo_dn(GUID_C),
@@ -991,7 +995,7 @@ def sample_scan():
         "error": "SMB read failed: STATUS_ACCESS_DENIED",
     }]
     return scan_payload([
-        snapshot(GUID_A, HOSTILE_NAME, entries=[template_entry(LM_KEY, 1)],
+        snapshot(GUID_A, first_gpo, entries=[template_entry(LM_KEY, 1)],
                  links=[GpoLink(target_dn=BASE_DN)]),
         snapshot(GUID_B, "Sample Override GPO",
                  entries=[
@@ -1023,7 +1027,8 @@ if __name__ == "__main__":  # pragma: no cover - a maintenance utility
 
     destination = sys.argv[1] if len(sys.argv) > 1 else \
         "examples/hardening-report-sample.html"
-    written, size = write_report(sample_scan(), destination)
+    written, size = write_report(sample_scan("Sample Workstation Baseline GPO"),
+                                 destination)
     print(f"wrote {size} bytes of synthetic sample report to {written}")
 
 
