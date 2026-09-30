@@ -471,6 +471,15 @@ class TestShippedCatalogInvariants:
     def catalog(self):
         return load_catalog()
 
+    def test_every_interim_step_says_what_it_does(self, catalog):
+        """Step 1 used to be called "audit mode ... without blocking anything"
+        for every control, which was false for NTLMv2 level 3 and for LDAP
+        channel binding. Each interim step now carries its own effect."""
+        for control in catalog.controls:
+            if control.interim_expected is not None:
+                assert (control.interim_effect or "").strip(), control.id
+                assert "without blocking anything" not in control.interim_effect
+
     def test_catalog_file_ships_inside_the_package(self):
         assert DEFAULT_CATALOG_PATH.name == "controls.json"
         assert DEFAULT_CATALOG_PATH.exists()

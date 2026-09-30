@@ -863,7 +863,9 @@ class TestUnreadableGposCannotProduceAnOsDefaultPass:
 
         finding = evaluate_control(self.default_control(), gpos)
 
-        assert finding["result"] == RESULT_PASS
+        # The found value is still reported, but the unread GPO also reaches
+        # these machines and could set a weaker value, so it can't be a pass.
+        assert finding["result"] == RESULT_UNKNOWN
         assert finding["evidence"]["source"] == EVIDENCE_SOURCE_GPO
         assert finding["evidence"]["found"][0]["value"] == 2
         assert any("could not be read" in note
@@ -2815,3 +2817,109 @@ class TestKeyScopedDeletesAreDisclosed:
         assert counts["total"] == len(catalog.controls)
         assert counts[RESULT_ERROR] == 0
         assert len(findings) == len(catalog.controls)
+
+
+# --------------------------------------------------------------------------- #
+# A setting counts only where its GPO actually applies
+# --------------------------------------------------------------------------- #
+
+LDAP_SIGNING_LINE = ("MACHINE\\System\\CurrentControlSet\\Services\\NTDS\\"
+                     "Parameters\\LDAPServerIntegrity=4,2")
+SITE_DN = "CN=Default-First-Site-Name,CN=Sites,CN=Configuration," + BASE_DN
+
+
+class TestOnlyGposThatApplyAreCounted:
+    """A compliant value in a GPO that reaches nothing used to score pass /
+    enforced. That is the false pass an auditor must never produce."""
+
+    @pytest.fixture
+    def signing(self):
+        return load_catalog().by_id("DEVORE-03-LDAP-SERVER-SIGNING")
+
+    def verdict(self, control, **gpo):
+        links = gpo.pop("links")
+        snapshot = dataclasses.replace(
+            template_gpo(GUID_SIGNING, "Signing GPO", LDAP_SIGNING_LINE,
+                         links=links), **gpo)
+        return evaluate_control(control, [snapshot])
+
+    @pytest.mark.parametrize("links", [
+        (),
+        (GpoLink(DC_OU, link_enabled=False),),
+        (GpoLink(f"OU=Workstations,{BASE_DN}"),),
+    ], ids=["unlinked", "link-disabled", "workstation-ou-only"])
+    def test_a_gpo_that_does_not_reach_the_dcs_is_not_counted(self, signing,
+                                                              links):
+        finding = self.verdict(signing, links=links)
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["found"] == []
+        assert any("Signing GPO" in note and "isn't counted" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_computer_settings_disabled_is_not_counted(self, signing):
+        finding = self.verdict(signing, links=(GpoLink(DC_OU),), flags=2)
+
+        assert finding["result"] == RESULT_FAIL
+        assert any("computer settings are disabled" in note
+                   for note in finding["evidence"]["notes"])
+
+    @pytest.mark.parametrize("target", [DC_OU, BASE_DN, SITE_DN],
+                             ids=["dc-ou", "domain-root", "site"])
+    def test_a_gpo_that_reaches_the_dcs_is_counted(self, signing, target):
+        finding = self.verdict(signing, links=(GpoLink(target),))
+
+        assert finding["result"] == RESULT_PASS
+
+    def test_a_domain_wide_control_accepts_any_enabled_link(self):
+        control = load_catalog().by_id("DEVORE-01-NTLM-LMCOMPATIBILITYLEVEL")
+        gpo = template_gpo(
+            GUID_SIGNING, "Workstation Baseline",
+            "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\"
+            "LmCompatibilityLevel=4,5",
+            links=(GpoLink(f"OU=Workstations,{BASE_DN}"),))
+
+        assert evaluate_control(control, [gpo])["result"] == RESULT_PASS
+
+
+class TestKdcAcceptsAnyAesOnlyValue:
+    """0x38 was the only passing value, so 0x18 (also AES only) failed."""
+
+    @pytest.mark.parametrize("value,result", [
+        (0x38, RESULT_PASS), (0x18, RESULT_PASS), (0x10, RESULT_PASS),
+        (0x3C, RESULT_FAIL), (0x1C, RESULT_FAIL), (0x7, RESULT_FAIL),
+        (0x20, RESULT_FAIL),
+    ])
+    def test_rc4_or_des_bits_fail_and_aes_passes(self, value, result):
+        control = load_catalog().by_id(KDC_CONTROL_ID)
+        gpo = pol_gpo(GUID_SIGNING, "KDC", (
+            r"System\CurrentControlSet\services\KDC",
+            "DefaultDomainSupportedEncTypes", 4, dword(value)),
+            links=(GpoLink(DC_OU),))
+
+        assert evaluate_control(control, [gpo])["result"] == result
+
+
+class TestConflictsReadTheLinks:
+
+    LM = "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\LmCompatibilityLevel=4,{}"
+
+    def conflict(self, weak_links, strong_links):
+        control = load_catalog().by_id("DEVORE-01-NTLM-LMCOMPATIBILITYLEVEL")
+        gpos = [template_gpo(GUID_SIGNING, "Baseline", self.LM.format(1),
+                             links=weak_links),
+                template_gpo(GUID_ENFORCED, "Override", self.LM.format(5),
+                             links=strong_links)]
+        return evaluate_control(control, gpos)["conflict"]
+
+    def test_enforced_on_the_dc_ou_is_a_split_not_an_override(self):
+        conflict = self.conflict((GpoLink(BASE_DN),),
+                                 (GpoLink(DC_OU, enforced=True),))
+
+        assert "linked to different parts of the domain" in conflict["detail"]
+
+    def test_enforced_on_the_domain_root_overrides(self):
+        conflict = self.conflict((GpoLink(f"OU=Workstations,{BASE_DN}"),),
+                                 (GpoLink(BASE_DN, enforced=True),))
+
+        assert "likely overridden" in conflict["detail"]
