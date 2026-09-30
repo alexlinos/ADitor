@@ -215,13 +215,28 @@ class Scanner:
         instead of one per GPO.
         """
         links: Dict[str, List[GpoLink]] = {}
-        results = self.ldap.search(
-            search_base=self.ldap.ad_config.base_dn,
+        base_dn = self.ldap.ad_config.base_dn
+        results = list(self.ldap.search(
+            search_base=base_dn,
             search_filter="(gPLink=*)",
             attributes=["gPLink", "gPOptions", "distinguishedName"],
             search_scope=ldap3.SUBTREE,
-        )
-        for entry in results or []:
+        ) or [])
+        # Site links live in the Configuration partition. Without them a GPO
+        # linked only to a site would look unlinked and its settings uncounted.
+        # ponytail: assumes the scanned domain is the forest root; in a child
+        # domain this search finds nothing and site-linked GPOs stay uncounted.
+        try:
+            results += list(self.ldap.search(
+                search_base=f"CN=Sites,CN=Configuration,{base_dn}",
+                search_filter="(gPLink=*)",
+                attributes=["gPLink", "gPOptions", "distinguishedName"],
+                search_scope=ldap3.SUBTREE,
+            ) or [])
+        except Exception:  # noqa: BLE001 - optional; missing sites is not fatal
+            pass
+        seen = set()
+        for entry in results:
             attributes = entry.get("attributes", {}) or {}
             target_dn = entry.get("dn") or _attr(attributes, "distinguishedName", "")
             try:
@@ -231,8 +246,9 @@ class Scanner:
 
             for link in parse_gp_link(_attr(attributes, "gPLink", "")):
                 guid = (link.get("guid") or "").strip("{}").lower()
-                if not guid:
+                if not guid or (guid, target_dn.lower()) in seen:
                     continue
+                seen.add((guid, target_dn.lower()))
                 links.setdefault(guid, []).append(GpoLink(
                     target_dn=target_dn,
                     enforced=bool(link.get("enforced")),
@@ -253,7 +269,7 @@ class Scanner:
         results = self.ldap.search(
             search_base=f"CN=Policies,CN=System,{self.ldap.ad_config.base_dn}",
             search_filter="(objectClass=groupPolicyContainer)",
-            attributes=["cn", "displayName", "gPCFileSysPath"],
+            attributes=["cn", "displayName", "gPCFileSysPath", "flags"],
             search_scope=ldap3.SUBTREE,
         )
 
@@ -266,6 +282,10 @@ class Scanner:
             display_name = _attr(attributes, "displayName", "") or ""
             sysvol_path = _attr(attributes, "gPCFileSysPath", "") or ""
             links = tuple(links_by_guid.get(guid.lower(), ()))
+            try:
+                flags = int(_attr(attributes, "flags", 0) or 0)
+            except (TypeError, ValueError):
+                flags = 0
 
             try:
                 contents = self._read_gpo_sysvol(sysvol_path)
@@ -276,7 +296,7 @@ class Scanner:
                 snapshots.append(GpoSnapshot(dn=entry.get("dn", ""),
                                              display_name=display_name,
                                              guid=guid, links=links,
-                                             read_error=str(exc)))
+                                             read_error=str(exc), flags=flags))
                 continue
 
             snapshots.append(GpoSnapshot(
@@ -287,6 +307,7 @@ class Scanner:
                 registry_pol_entries=_machine_pol_entries(contents),
                 registry_xml_entries=_machine_preference_entries(contents),
                 links=links,
+                flags=flags,
             ))
         return snapshots, read_errors
 

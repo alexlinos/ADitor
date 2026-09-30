@@ -275,6 +275,9 @@ Don't put real domain data in an issue, a test fixture or a screenshot. Use
 Free code signing provided by [SignPath.io](https://about.signpath.io/),
 certificate by [SignPath Foundation](https://signpath.org/).
 
+Signing starts with the first release after SignPath approves the project.
+Until then, the downloads are unsigned.
+
 Only the executables built from this repository by its GitHub Actions workflow
 are signed, and only for a tagged release.
 

@@ -299,6 +299,8 @@ class GpoSnapshot:
             ``Preferences\\Registry\\Registry.xml``. Defaults to empty, so a
             caller that does not read preferences behaves exactly as before.
         links: Where the GPO is linked, with enforcement flags.
+        flags: The GPO's ``flags`` attribute. Every control reads computer
+            settings, so a GPO with them disabled (2) sets nothing.
         read_error: Set when the GPO's content could not be read, so findings
             can say "unknown" rather than "not configured".
     """
@@ -311,6 +313,9 @@ class GpoSnapshot:
     registry_xml_entries: Sequence[Dict[str, Any]] = field(default_factory=tuple)
     links: Sequence[GpoLink] = field(default_factory=tuple)
     read_error: Optional[str] = None
+    #: The groupPolicyContainer ``flags`` attribute: 1 = user settings
+    #: disabled, 2 = computer settings disabled, 3 = both.
+    flags: int = 0
 
     @property
     def enforced(self) -> bool:
@@ -319,6 +324,71 @@ class GpoSnapshot:
 
     def link_dicts(self) -> List[Dict[str, Any]]:
         return [link.as_dict() for link in self.links]
+
+
+# --------------------------------------------------------------------------- #
+# Reach: does a GPO's computer policy get to the machines a control is about?
+# --------------------------------------------------------------------------- #
+
+#: groupPolicyContainer ``flags`` bit: computer configuration disabled.
+GPO_FLAG_COMPUTER_DISABLED = 2
+
+
+def _is_domain_root(dn: str) -> bool:
+    return dn.strip().lower().startswith("dc=")
+
+
+def _is_site(dn: str) -> bool:
+    return ",cn=sites,cn=configuration," in dn.strip().lower()
+
+
+def _is_dc_ou(dn: str) -> bool:
+    return dn.strip().lower().startswith("ou=domain controllers,")
+
+
+def gpo_reach_problem(control: Control, gpo: GpoSnapshot) -> Optional[str]:
+    """Why ``gpo``'s settings can't apply to ``control``'s machines, or ``None``.
+
+    A setting only takes effect through an enabled link. Counting a GPO that is
+    unlinked, or linked only where the control's machines aren't, is a false
+    pass: the value sits in SYSVOL and applies to nothing.
+
+    ``domain-controllers`` controls need a link on the domain root or on the
+    Domain Controllers OU, or on a site (a site link reaches every machine in
+    that site, DCs included). Other controls accept any enabled link, since the
+    scan doesn't resolve which machines sit under which OU (see
+    ``_NO_RSOP_NOTE``).
+    """
+    # ponytail: a root link blocked by Block Inheritance on the Domain
+    # Controllers OU still counts as reaching DCs; resolve per-OU inheritance
+    # if that turns up in practice.
+    if gpo.flags & GPO_FLAG_COMPUTER_DISABLED:
+        return "its computer settings are disabled"
+    enabled = [link for link in gpo.links if link.link_enabled]
+    if not enabled:
+        if gpo.links:
+            return "all of its links are disabled"
+        return "it isn't linked anywhere"
+    if control.scope == "domain-controllers" and not any(
+            _is_domain_root(link.target_dn) or _is_dc_ou(link.target_dn)
+            or _is_site(link.target_dn) for link in enabled):
+        where = "; ".join(sorted({link.target_dn for link in enabled}))
+        return (f"it's linked only to {where}, which doesn't contain the "
+                f"domain controllers")
+    return None
+
+
+def _unreached_notes(control: Control,
+                     unreached: Sequence[Tuple[GpoSnapshot, str]]) -> List[str]:
+    """Say which GPOs set the key but can't apply, so they aren't counted."""
+    notes = []
+    for gpo, problem in unreached:
+        for match in find_matches(control, [gpo]):
+            notes.append(
+                f"'{gpo.display_name or gpo.dn}' sets this to "
+                f"{match['value']!r}, but {problem}, so it has no effect and "
+                f"isn't counted.")
+    return notes
 
 
 # --------------------------------------------------------------------------- #
@@ -578,7 +648,11 @@ class OperatorError(ValueError):
 def satisfies(operator: str, found: Any, expected: Any) -> bool:
     """Apply one catalog operator to a found value.
 
-    Supported: ``equals``, ``gte``, ``in``, ``present``, ``absent``. ``present``
+    Supported: ``equals``, ``gte``, ``in``, ``aes_only``, ``present``,
+    ``absent``. ``aes_only`` reads a Kerberos encryption-types bitmask: it holds
+    when an AES bit (0x8 or 0x10) is set and no DES or RC4 bit (0x1, 0x2, 0x4)
+    is, so 0x18 and 0x38 both pass; ``expected`` is only the recommended
+    example. ``present``
     and ``absent`` are decided by whether a setting was found at all and are
     handled by the caller, so they are trivially true here.
 
@@ -594,6 +668,9 @@ def satisfies(operator: str, found: Any, expected: Any) -> bool:
         return _as_comparable(found) == _as_comparable(expected)
     if operator == "gte":
         return _as_number(found, "found") >= _as_number(expected, "expected")
+    if operator == "aes_only":
+        bits = _as_number(found, "found")
+        return bool(bits & 0x18) and not bits & 0x7
     if operator == "in":
         options = expected if isinstance(expected, (list, tuple)) else [expected]
         return any(_as_comparable(found) == _as_comparable(option)
@@ -658,10 +735,14 @@ def evaluate_control(control: Control,
     if control.check_type == "directory-state":
         return _directory_finding(control, (directory or {}).get(control.id))
 
+    problems = [(gpo, gpo_reach_problem(control, gpo)) for gpo in gpos]
+    reaching = [gpo for gpo, problem in problems if problem is None]
+    unreached = [(gpo, problem) for gpo, problem in problems if problem]
+
     try:
-        matches = find_matches(control, gpos)
-        non_writes = find_preference_non_writes(control, gpos)
-        key_deletes = find_preference_key_deletes(control, gpos)
+        matches = find_matches(control, reaching)
+        non_writes = find_preference_non_writes(control, reaching)
+        key_deletes = find_preference_key_deletes(control, reaching)
     except Exception as exc:  # pragma: no cover - defensive
         return _error_finding(control, f"could not scan GPO content: {exc}",
                               [], gpos)
@@ -671,7 +752,8 @@ def evaluate_control(control: Control,
     # but they are usually the explanation for whatever verdict follows. A
     # key-scoped delete is the same story one level up: it removes the key the
     # value lives in, which no value-path comparison can see.
-    extra_notes = _non_write_notes(non_writes) + _key_delete_notes(key_deletes)
+    extra_notes = (_non_write_notes(non_writes) + _key_delete_notes(key_deletes)
+                   + _unreached_notes(control, unreached))
 
     if control.operator == "absent":
         return _absent_finding(control, matches, gpos, extra_notes)
@@ -701,6 +783,16 @@ def evaluate_control(control: Control,
     finding["conflict"] = conflict
     if conflict:
         finding["evidence"]["notes"].append(conflict["detail"])
+
+    # A pass read off the GPOs we could read proves nothing about the ones we
+    # couldn't: any of them could set a weaker value that wins.
+    unreadable = [gpo for gpo in reaching if gpo.read_error]
+    if result == RESULT_PASS and unreadable:
+        finding["result"] = RESULT_UNKNOWN
+        finding["evidence"]["notes"].append(
+            f"The GPOs that were read pass, but {len(unreadable)} GPO(s) that "
+            f"apply here couldn't be read, and any of them could set a weaker "
+            f"value that wins. Reported as unknown until they can be read.")
     return finding
 
 
@@ -932,7 +1024,24 @@ def _detect_conflict(assessed: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
     mixed_delivery = (DELIVERY_REGISTRY_PREFERENCE in deliveries
                       and bool(deliveries & POLICY_DELIVERIES))
 
-    if enforcing:
+    enforced_targets = [t for m in enforcing for t in _link_targets(m)]
+    escaping = [m for m in assessed if not m["enforced_link"] and any(
+        not any(_is_under(target, e) for e in enforced_targets)
+        for target in _link_targets(m))]
+    if enforcing and escaping:
+        # A non-enforced GPO is linked somewhere no enforced link covers, so
+        # its value really applies there: this is a split, not an override.
+        where = "; ".join(
+            f"{m['gpo_display_name'] or m['gpo_dn']} = {m['value']!r} on "
+            f"{' and '.join(_link_targets(m))}"
+            + (" (enforced)" if m["enforced_link"] else "")
+            for m in assessed)
+        detail = (f"{len(assessed)} GPOs set this key to different values, "
+                  f"linked to different parts of the domain: {where}. The "
+                  f"enforced value wins only under its own link; machines "
+                  f"elsewhere get the other value. Check with gpresult on a "
+                  f"machine from each part.")
+    elif enforcing:
         names = ", ".join(f"{m['gpo_display_name'] or m['gpo_dn']} = {m['value']!r}"
                           for m in enforcing)
         detail = (f"{len(assessed)} GPOs set this key to different values and "
@@ -940,6 +1049,7 @@ def _detect_conflict(assessed: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
                   f"other settings are likely overridden. Precedence is not "
                   f"resolved here — verify with RSoP / gpresult before "
                   f"trusting any single value.")
+    if enforcing:
         if mixed_delivery:
             detail += " " + _MIXED_DELIVERY_DETAIL.format(
                 summary=_delivery_summary(assessed))
@@ -970,6 +1080,18 @@ def _detect_conflict(assessed: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]
                    f"value."),
         "settings": settings,
     }
+
+
+def _is_under(dn: str, ancestor: str) -> bool:
+    """Whether ``dn`` is ``ancestor`` or sits below it."""
+    dn, ancestor = dn.strip().lower(), ancestor.strip().lower()
+    return dn == ancestor or dn.endswith("," + ancestor)
+
+
+def _link_targets(match: Dict[str, Any]) -> Tuple[str, ...]:
+    """Where a match's GPO is linked (enabled links only), for comparison."""
+    return tuple(sorted({link["target_dn"] for link in match.get("links") or ()
+                         if link.get("link_enabled", True)}))
 
 
 def _delivery_summary(assessed: Sequence[Dict[str, Any]]) -> str:
@@ -1008,6 +1130,7 @@ def _finding(control: Control, result: str, rollout_state: Optional[str],
             "expected": {
                 "operator": control.operator,
                 "interim": control.interim_expected,
+                "interim_effect": control.interim_effect,
                 "final": control.final_expected,
                 "os_default": control.os_default,
                 "value_source": control.value_source,

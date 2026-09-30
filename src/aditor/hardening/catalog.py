@@ -124,9 +124,9 @@ WELL_KNOWN_GROUPS: Dict[str, Tuple[str, Any, Any]] = {
     "Group Policy Creator Owners": ("domain", 520, True),
 }
 
-OPERATORS = frozenset({"equals", "gte", "in", "present", "absent"})
+OPERATORS = frozenset({"equals", "gte", "in", "aes_only", "present", "absent"})
 PRESENCE_OPERATORS = frozenset({"present", "absent"})
-VALUE_OPERATORS = frozenset({"equals", "gte", "in"})
+VALUE_OPERATORS = frozenset({"equals", "gte", "in", "aes_only"})
 
 SCOPES = frozenset({"all", "domain-controllers", "domain-root"})
 
@@ -152,8 +152,8 @@ ROLLOUT_STATES = frozenset({"not_started", "audit", "enforced"})
 _CONTROL_FIELDS = frozenset({
     "id", "title", "source", "scope", "check_type", "severity", "status",
     "friendly_policy", "registry_key", "registry_type", "operator",
-    "interim_expected", "final_expected", "os_default", "os_default_source",
-    "presence_rollout_state", "missing_result", "missing_note", "value_source",
+    "interim_expected", "interim_effect", "final_expected", "os_default",
+    "os_default_source", "presence_rollout_state", "missing_result", "missing_note", "value_source",
     "baseline_gap", "remediation", "caveats", "audit_before_enforce",
     "gpo_deliverable", "directory_check", "directory_targets",
 })
@@ -187,6 +187,9 @@ class Control:
     registry_type: Optional[str] = None
     friendly_policy: Optional[str] = None
     interim_expected: Any = None
+    #: What setting ``interim_expected`` actually does. An interim step is not
+    #: always an audit: some already change behaviour, so each one says so.
+    interim_effect: Optional[str] = None
     final_expected: Any = None
     os_default: Any = None
     os_default_source: Optional[str] = None
@@ -585,6 +588,7 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
         registry_type=raw.get("registry_type"),
         friendly_policy=raw.get("friendly_policy"),
         interim_expected=interim,
+        interim_effect=raw.get("interim_effect"),
         final_expected=final,
         os_default=os_default,
         os_default_source=raw.get("os_default_source"),

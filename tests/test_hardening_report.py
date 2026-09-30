@@ -695,7 +695,10 @@ class TestConflicts:
 
     def test_flags_the_enforced_override_shape(self, section):
         assert "enforced-override" in section
-        assert "linked with enforcement" in section
+        # 1 on the domain root, 5 enforced on the DC OU: workstations really
+        # get 1, so it's a split between parts of the domain, not an override.
+        assert "linked to different parts of the domain" in section
+        assert "likely overridden" not in section
 
     def test_conflict_on_a_pass_is_still_surfaced(self, catalog):
         """Two GPOs disagree but the worst value still passes: the risky case."""
@@ -1006,6 +1009,7 @@ def sample_scan(first_gpo=HOSTILE_NAME):
                  links=[GpoLink(target_dn=f"OU=Domain Controllers,{BASE_DN}",
                                 enforced=True)]),
         snapshot(GUID_C, "Unreadable Sample GPO",
+                 links=[GpoLink(target_dn=BASE_DN)],
                  read_error="SMB read failed: STATUS_ACCESS_DENIED"),
     ], catalog=catalog, read_errors=read_errors, directory={
         # One directory-state failure and two passes, so the sample shows
@@ -1652,7 +1656,8 @@ class TestStartHere:
         # The only failure in mixed_scan: LmCompatibilityLevel at 1, target 5
         # with an audit step at 3.
         assert 'href="#devore-01-ntlm-lmcompatibilitylevel"' in first
-        assert "Next: step 1: set it to 3 (audit mode)" in first
+        assert "Next: step 1: set it to 3" in first
+        assert "audit mode" not in first
 
     def test_it_warns_about_the_audit_step_when_an_item_has_one(self,
                                                                 mixed_scan):

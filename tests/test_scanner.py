@@ -399,6 +399,40 @@ class TestScanHardening:
         assert link == {"target_dn": BASE_DN, "enforced": True,
                         "link_enabled": True, "block_inheritance": True}
 
+    def test_a_gpo_with_computer_settings_disabled_is_not_counted(
+            self, tools, mock_ldap_manager):
+        entry = gpo_entry(GUID_SIGNING, "Disabled Signing Policy")
+        entry["attributes"]["flags"] = 2
+        wire_ldap(mock_ldap_manager, [entry], [link_entry(DC_OU, GUID_SIGNING)])
+
+        response = run_scan(tools, {GUID_SIGNING: sysvol_contents(LDAP_LINES[1])},
+                            control_ids=["DEVORE-03-LDAP-SERVER-SIGNING"])
+
+        finding = response["findings"][0]
+        assert finding["result"] != "pass"
+        assert any("computer settings are disabled" in note
+                   for note in finding["evidence"]["notes"])
+
+    def test_site_links_are_read_from_the_configuration_partition(
+            self, tools, mock_ldap_manager):
+        site = f"CN=HQ,CN=Sites,CN=Configuration,{BASE_DN}"
+        wire_ldap(mock_ldap_manager,
+                  [gpo_entry(GUID_SIGNING, "Site Signing Policy")], [])
+        domain_search = mock_ldap_manager.search.side_effect
+
+        def search(search_base=None, search_filter=None, **kwargs):
+            if "gPLink" in (search_filter or ""):
+                return ([link_entry(site, GUID_SIGNING)]
+                        if "CN=Sites" in (search_base or "") else [])
+            return domain_search(search_base=search_base,
+                                 search_filter=search_filter, **kwargs)
+        mock_ldap_manager.search.side_effect = search
+
+        response = run_scan(tools, {GUID_SIGNING: sysvol_contents(LDAP_LINES[1])},
+                            control_ids=["DEVORE-03-LDAP-SERVER-SIGNING"])
+
+        assert response["findings"][0]["result"] == "pass"
+
     def test_an_unlinked_gpo_is_still_scanned_and_reported_as_unlinked(
             self, tools, mock_ldap_manager):
         wire_ldap(mock_ldap_manager,
@@ -407,10 +441,16 @@ class TestScanHardening:
         response = run_scan(tools, {GUID_SIGNING: sysvol_contents(LDAP_LINES[1])},
                             control_ids=["DEVORE-03-LDAP-SERVER-SIGNING"])
 
-        assert response["findings"][0]["evidence"]["found"][0]["links"] == []
+        finding = response["findings"][0]
+        # An unlinked GPO applies to nothing: its value is disclosed, not counted.
+        assert finding["evidence"]["found"] == []
+        assert finding["result"] != "pass"
+        assert any("Orphaned Signing Policy" in note and "isn't linked" in note
+                   for note in finding["evidence"]["notes"])
 
     def test_registry_pol_controls_are_evaluated_too(self, tools, mock_ldap_manager):
-        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LLMNR Off")], [])
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LLMNR Off")],
+                  [link_entry(DC_OU, GUID_SIGNING)])
         pol_entry = {"key": "Software\\Policies\\Microsoft\\Windows NT\\DNSClient",
                      "value": "EnableMulticast", "type": "REG_DWORD", "data": 0}
 
@@ -458,7 +498,8 @@ class TestScanHardening:
         does not license a failure verdict; the delete is still disclosed.
         """
         wire_ldap(mock_ldap_manager,
-                  [gpo_entry(GUID_SIGNING, "Undo Enc Types")], [])
+                  [gpo_entry(GUID_SIGNING, "Undo Enc Types")],
+                  [link_entry(DC_OU, GUID_SIGNING)])
 
         response = run_scan(
             tools,
@@ -478,7 +519,8 @@ class TestScanHardening:
             self, tools, mock_ldap_manager):
         """The block is absent for such a GPO, and nothing else moves."""
         wire_ldap(mock_ldap_manager,
-                  [gpo_entry(GUID_SIGNING, "Example DC LDAP Signing")], [])
+                  [gpo_entry(GUID_SIGNING, "Example DC LDAP Signing")],
+                  [link_entry(DC_OU, GUID_SIGNING)])
 
         response = run_scan(tools, {GUID_SIGNING: sysvol_contents(*LDAP_LINES)},
                             control_ids=["DEVORE-03-LDAP-SERVER-SIGNING"])
@@ -492,7 +534,8 @@ class TestScanHardening:
             self, tools, mock_ldap_manager):
         wire_ldap(mock_ldap_manager,
                   [gpo_entry(GUID_SIGNING, "Enc Types By Policy"),
-                   gpo_entry(GUID_OVERRIDE, "Enc Types By Preference")], [])
+                   gpo_entry(GUID_OVERRIDE, "Enc Types By Preference")],
+                  [link_entry(DC_OU, GUID_SIGNING, GUID_OVERRIDE)])
         pol_entry = {"key": r"System\CurrentControlSet\services\KDC",
                      "value": "DefaultDomainSupportedEncTypes",
                      "type": "REG_DWORD", "data": 56}
@@ -516,7 +559,8 @@ class TestScanHardening:
             self, tools, mock_ldap_manager):
         wire_ldap(mock_ldap_manager,
                   [gpo_entry(GUID_SIGNING, "Example DC LDAP Signing"),
-                   gpo_entry(GUID_OVERRIDE, "Unreadable Policy")], [])
+                   gpo_entry(GUID_OVERRIDE, "Unreadable Policy")],
+                  [link_entry(DC_OU, GUID_SIGNING, GUID_OVERRIDE)])
 
         response = run_scan(
             tools,
@@ -529,7 +573,9 @@ class TestScanHardening:
         assert "access denied" in response["gpo_read_errors"][0]["error"]
         notes = response["findings"][0]["evidence"]["notes"]
         assert any("could not be read" in note for note in notes)
-        assert response["findings"][0]["result"] == "pass"
+        # The readable GPO passes, but the unreadable one also reaches the DCs
+        # and could set a weaker value, so the verdict is unknown, not pass.
+        assert response["findings"][0]["result"] == "unknown"
 
     def test_a_domain_with_no_gpos_still_reports_every_control(self, tools,
                                                               mock_ldap_manager):
@@ -697,7 +743,8 @@ class TestUnknownVerdictThroughTheScan:
                                                    mock_ldap_manager):
         """Fix 1a and 1b together, through the scan: 3 is a pass, not a fail."""
         wire_ldap(mock_ldap_manager,
-                  [gpo_entry(GUID_SIGNING, "NTDS Diagnostics")], [])
+                  [gpo_entry(GUID_SIGNING, "NTDS Diagnostics")],
+                  [link_entry(DC_OU, GUID_SIGNING)])
 
         response = run_scan(
             tools, {GUID_SIGNING: sysvol_contents(pol_entries=[DIAG_POL_ENTRY])},
@@ -734,7 +781,8 @@ class TestKeyScopedDeleteThroughTheScan:
             self, tools, mock_ldap_manager):
         wire_ldap(mock_ldap_manager,
                   [gpo_entry(GUID_SIGNING, "Enc Types By Preference"),
-                   gpo_entry(GUID_OVERRIDE, "Undo Enc Types")], [])
+                   gpo_entry(GUID_OVERRIDE, "Undo Enc Types")],
+                  [link_entry(DC_OU, GUID_SIGNING, GUID_OVERRIDE)])
 
         response = run_scan(
             tools,

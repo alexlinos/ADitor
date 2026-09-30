@@ -194,6 +194,7 @@ _OPERATOR_WORDS = {
     "equals": "exactly",
     "gte": "at least",
     "in": "one of",
+    "aes_only": "AES only, no RC4 or DES, for example",
     "present": "present",
     "absent": "absent",
 }
@@ -596,7 +597,7 @@ def _next_step(finding: Dict[str, Any], section_id: str) -> str:
     interim, final = expected.get("interim"), expected.get("final")
     state = finding.get("rollout_state")
     if interim is not None and state not in ("audit", "enforced"):
-        return f"step 1: set it to {_esc_value(interim)} (audit mode)"
+        return f"step 1: set it to {_esc_value(interim)}"
     if interim is not None and state == "audit":
         return f"step 2: set it to {_esc_value(final)}"
     return f"set it to {_esc_value(final)}"
@@ -992,6 +993,7 @@ def _render_phasing(finding: Dict[str, Any]) -> str:
     if not isinstance(expected, dict):
         expected = {}
     interim = expected.get("interim")
+    interim_effect = expected.get("interim_effect")
     final = expected.get("final")
     audit_before = finding.get("audit_before_enforce")
     caveats = [c for c in (finding.get("caveats") or []) if str(c or "").strip()]
@@ -1007,8 +1009,8 @@ def _render_phasing(finding: Dict[str, Any]) -> str:
     if interim is not None:
         parts.append(
             '<p class="phase-step"><strong>Step 1: set it to '
-            f'{_esc_value(interim)} first</strong> (audit mode). This makes the '
-            'setting visible on every machine without blocking anything yet.'
+            f'{_esc_value(interim)} first.</strong> '
+            f'{_esc(interim_effect) if interim_effect else ""}'
             f'{done(step1_done)}</p>')
         parts.append(
             '<p class="phase-step"><strong>Step 2: only then set it to '
