@@ -85,7 +85,7 @@ from .catalog import SEVERITY_RANK
 # Version of the *report layout*. Bumped when the rendered structure changes, so
 # a stored report can say which renderer produced it alongside which engine and
 # which catalog scored it.
-REPORT_FORMAT_VERSION = "1.5.0"
+REPORT_FORMAT_VERSION = "1.6.0"
 
 # The string that identifies a file as one of our reports.
 REPORT_MARKER = "aditor-hardening-report"
@@ -220,6 +220,40 @@ _PREFERENCE_FILTER_WARNING = (
     "apply to only some of the machines this GPO reaches. <strong>Not "
     "evaluated</strong> by this scan."
 )
+# How much reaching the target can break, safest first (catalog CHANGE_RISKS).
+_RISK_LABELS = {
+    "logging-only": "Safe: logging only",
+    "low": "Low risk",
+    "pilot": "Pilot first",
+    "can-lock-out": "Can lock people out",
+}
+_RISK_RANK = {risk: rank for rank, risk in enumerate(_RISK_LABELS)}
+
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July",
+           "August", "September", "October", "November", "December")
+
+
+def _deadline_line(finding: Dict[str, Any], scan_date: str) -> str:
+    """Microsoft's own date for this setting, said as past or coming."""
+    deadline = finding.get("microsoft_deadline")
+    if not isinstance(deadline, dict) or not deadline.get("date"):
+        return ""
+    date = str(deadline["date"])
+    parts = date.split("-")
+    try:
+        when = f"{_MONTHS[int(parts[1]) - 1]} {parts[0]}"
+        if len(parts) > 2:
+            when = f"{int(parts[2])} {when}"
+    except (IndexError, ValueError):
+        when = date
+    passed = bool(scan_date) and date[:len(scan_date)] <= scan_date[:len(date)]
+    lead = ("Microsoft already changed this default" if passed
+            else "Microsoft changes this default")
+    return (f'<p class="deadline"><strong>{lead}: {_esc(when)}.</strong> '
+            f'{_esc(deadline.get("summary"))} '
+            f'{_link(deadline.get("url"), "Microsoft")}</p>')
+
+
 # Worst first. Shared with the scan diff, which orders its regression and
 # improvement lists the same way — one definition so the two cannot drift.
 _SEVERITY_ORDER = SEVERITY_RANK
@@ -549,9 +583,25 @@ def _render_counts(counts: Dict[str, Any],
         '<section class="summary" id="summary">'
         '<h2>Results</h2>'
         f'<ul class="tiles">{"".join(cells)}</ul>'
+        f'{_render_progress(grouped)}'
         f'{note}'
         '</section>'
     )
+
+
+def _render_progress(grouped: Dict[str, List[Dict[str, Any]]]) -> str:
+    """Where the checked settings stand on their rollout, not a score."""
+    judged = [f for f in _group_findings(grouped, [s for s, _t, _l in SECTIONS])
+              if f.get("result") in ("pass", "fail")
+              and f.get("rollout_state") in _STATE_LABELS]
+    if not judged:
+        return ""
+    by_state = {state: sum(1 for f in judged if f.get("rollout_state") == state)
+                for state in ("enforced", "audit", "not_started")}
+    return ('<p class="progress"><strong>Rollout:</strong> '
+            f'{by_state["enforced"]} enforced &middot; {by_state["audit"]} at '
+            f'step 1 &middot; {by_state["not_started"]} not started, of '
+            f'{len(judged)} settings with a value to check.</p>')
 
 
 # The per-section breakdown under each group tile.
@@ -566,6 +616,11 @@ _TILE_PARTS = {
     SECTION_PASSES: ("pass", "passes"),
 }
 
+# The scan's date (YYYY-MM-DD), set per render so a card can say whether a
+# Microsoft deadline has passed. ponytail: module-level, so not safe for two
+# concurrent renders; pass it down if the report is ever rendered in threads.
+_SCAN_DATE: Dict[str, str] = {}
+
 # How many items "Start here" lists before pointing at the rest.
 START_HERE_LIMIT = 5
 
@@ -579,7 +634,7 @@ def _next_step(finding: Dict[str, Any], section_id: str) -> str:
     if section_id == SECTION_UNKNOWN:
         if finding.get("error") and _is_directory(finding):
             return "the directory query failed; the card says why"
-        if finding.get("error"):
+        if finding.get("error") or _held_back_by_unread_gpo(finding):
             return "fix the read failure above, then scan again"
         return "check it by hand; the card gives the command"
     if section_id == SECTION_CONFLICTS:
@@ -619,10 +674,7 @@ def _render_start_here(grouped: Dict[str, List[Dict[str, Any]]],
             '<p class="warn"><strong>This scan is incomplete:</strong> '
             f'{len(read_errors)} GPO(s) couldn\'t be read (see above). Fix '
             'that and scan again before relying on the rest.</p>')
-    lines.append(
-        f'<p class="stand">{totals["fix"]} to fix &middot; {totals["check"]} '
-        f'to check by hand &middot; {totals["not-covered"]} not covered yet '
-        f'&middot; {totals["good"]} good</p>')
+    del totals  # the Results tiles above already give these numbers
 
     todo: List[Tuple[Dict[str, Any], str]] = []
     listed = set()
@@ -633,9 +685,20 @@ def _render_start_here(grouped: Dict[str, List[Dict[str, Any]]],
                 listed.add(id(finding))
                 todo.append((finding, section_id))
 
+    # Safest first: logging and low-risk changes can go in this week and make
+    # the risky ones safer (they produce the evidence step 2 needs). Severity
+    # orders within each risk level. The sort is stable, so the section order
+    # above still breaks ties.
+    todo.sort(key=lambda item: (
+        _RISK_RANK.get(str(item[0].get("change_risk")), len(_RISK_RANK)),
+        _SEVERITY_ORDER.get(str(item[0].get("severity")), 99)))
+
     if not todo:
         lines.append('<p><strong>Nothing to fix or check.</strong></p>')
     else:
+        lines.append('<p class="small">Safest first: the changes at the top '
+                     'can\'t break anything and give you the evidence the '
+                     'riskier ones need.</p>')
         shown = todo[:START_HERE_LIMIT]
         items = []
         for finding, section_id in shown:
@@ -643,6 +706,7 @@ def _render_start_here(grouped: Dict[str, List[Dict[str, Any]]],
             severity = str(finding.get("severity") or "none").lower()
             items.append(
                 f'<li>{_badge(_esc(severity.upper()), f"sev-{severity}")}'
+                f'{_risk_badge(finding)}'
                 f'<a href="#{_esc(anchor)}">{_esc(finding.get("title"))}</a>'
                 f'<br><span class="next">Next: '
                 f'{_next_step(finding, section_id)}</span></li>')
@@ -907,17 +971,18 @@ def _render_conflict(finding: Dict[str, Any]) -> str:
         '<div class="block conflict">'
         f'<h5>Conflict &mdash; {_esc(conflict.get("kind"))}</h5>'
         f'<p>{_esc(conflict.get("detail"))}</p>'
+        '<p class="warn"><strong>Precedence is unresolved.</strong> Confirm the '
+        'effective value with <code>gpresult /h</code> or the Group Policy '
+        'Results (RSoP) wizard on a representative machine before changing or '
+        'trusting any of these settings.</p>'
+        f'<details class="more-warnings"><summary>GPOs involved '
+        f'({len(conflict.get("settings") or [])})</summary>'
         + _scrollable(
             '<table class="grid"><thead><tr>'
             '<th>GPO</th><th>Value</th><th>Rollout step</th>'
             '<th>Delivered by</th><th>Enforced link</th>'
             f'</tr></thead><tbody>{rows}</tbody></table>')
-        +
-        '<p class="warn"><strong>Precedence is unresolved.</strong> Confirm the '
-        'effective value with <code>gpresult /h</code> or the Group Policy '
-        'Results (RSoP) wizard against a representative machine before changing '
-        'or trusting any of these settings.</p>'
-        '</div>'
+        + '</details></div>'
     )
 
 
@@ -936,6 +1001,22 @@ def _render_remediation(finding: Dict[str, Any]) -> str:
                 'the gap so the catalog can state the fix.</p></div>')
     return ('<div class="block remediation"><h5>Remediation</h5>'
             f'<p>{_esc(remediation)}</p></div>')
+
+
+def _is_flagged(caveat: Any) -> bool:
+    """A caveat led by an all-caps label, the catalog's mark for emphasis."""
+    lead = str(caveat or "").strip().split(":", 1)[0]
+    return (3 <= len(lead) <= 40 and lead == lead.upper()
+            and any(c.isalpha() for c in lead))
+
+
+#: Labels whose caveat is about not breaking things. These stay open on the
+#: card; other labelled caveats explain how ADitor judges the value and fold.
+_SAFETY_LABELS = ("IN STAGES", "AUDIT FIRST", "TATTOOING")
+
+
+def _is_safety(caveat: Any) -> bool:
+    return str(caveat or "").strip().split(":", 1)[0] in _SAFETY_LABELS
 
 
 def _caveat_items(caveats: Sequence[Any]) -> str:
@@ -957,17 +1038,14 @@ def _caveat_items(caveats: Sequence[Any]) -> str:
         text = str(caveat or "").strip()
         if not text:
             continue
-        lead = text.split(":", 1)[0]
-        flagged = (len(lead) >= 3 and len(lead) <= 40
-                   and lead == lead.upper() and any(c.isalpha() for c in lead))
-        css = "flagged" if flagged else ""
+        css = "flagged" if _is_flagged(text) else ""
         items.append(f'<li class="{css}">{_esc(text)}</li>')
     if not items:
         return ""
     return f'<ul class="notes caveats">{"".join(items)}</ul>'
 
 
-def _render_phasing(finding: Dict[str, Any]) -> str:
+def _render_phasing(finding: Dict[str, Any], shown_open: bool = False) -> str:
     """Rollout order: the interim step first, and why, before enforcement.
 
     This is the part of a failure card that most needs to be right. Several
@@ -1020,30 +1098,73 @@ def _render_phasing(finding: Dict[str, Any]) -> str:
     elif final is not None:
         parts.append(
             f'<p class="phase-step"><strong>Set it to {_esc_value(final)}.'
-            '</strong> The catalog gives no audit step for this one. That '
-            'doesn\'t make it safe to apply everywhere at once, so read the '
-            f'warnings below.{done(step2_done)}</p>')
+            f'</strong> {_ONE_STEP_TEXT.get(str(finding.get("change_risk")), _ONE_STEP_TEXT[""])}'
+            f'{done(step2_done)}</p>')
 
     if audit_before:
-        parts.append(
-            '<p class="phase-audit"><strong>Before enforcing, check:</strong> '
-            f'{_esc(audit_before)}</p>')
+        if not shown_open:
+            parts.append(
+                '<p class="phase-audit"><strong>Before enforcing, check:</strong> '
+                f'{_esc(audit_before)}</p>')
     elif interim is not None:
         parts.append(
             '<p class="phase-audit muted">The catalog doesn\'t say what to check '
             'before enforcing. Treat that as a catalog gap, and pilot it '
             'first.</p>')
 
-    caveat_items = _caveat_items(caveats)
-    if caveat_items:
+    # Labelled caveats (IN STAGES:, TATTOOING:, ...) are the load-bearing ones
+    # and stay open, because a closed <details> prints closed. The rest fold.
+    flagged = [c for c in caveats if _is_safety(c)]
+    others = [c for c in caveats if not _is_safety(c)]
+    if flagged and not shown_open:
         parts.append('<p class="phase-label"><strong>Watch out for:</strong></p>'
-                     + caveat_items)
+                     + _caveat_items(flagged))
+    if others:
+        parts.append(f'<details class="more-warnings"><summary>More notes '
+                     f'({len(others)})</summary>{_caveat_items(others)}'
+                     '</details>')
 
     if interim is None and not audit_before and not caveats:
         parts.append(f'<p class="warn">{_PHASING_GAP_NOTE}</p>')
 
     return ('<div class="block phasing"><h5>How to roll it out safely</h5>'
             f'{"".join(parts)}</div>')
+
+
+#: What a one-step change needs before it goes everywhere, by change risk.
+_ONE_STEP_TEXT = {
+    "logging-only": "This only turns on logging, so it's safe to apply "
+                    "everywhere at once.",
+    "low": "Low risk: apply it through a GPO, and check a few machines "
+           "afterwards.",
+    "pilot": "This can break some devices or apps. Link it to a small pilot "
+             "OU first, and widen it once nothing breaks.",
+    "can-lock-out": "This can lock people out. Apply it to a pilot group "
+                    "first and read the warnings below.",
+    "": "The catalog gives no audit step for this one. That doesn't make it "
+        "safe to apply everywhere at once, so read the warnings below.",
+}
+
+
+def _render_first_step(finding: Dict[str, Any], section_id: str) -> str:
+    """What to do first, and what can't wait: open on the card.
+
+    The full fix path and every rollout step fold under "How to fix it", but
+    the safety text stays open, because a closed <details> prints closed.
+    """
+    audit_before = finding.get("audit_before_enforce")
+    safety = [c for c in (finding.get("caveats") or []) if _is_safety(c)]
+    parts = [f'<p class="first-step"><strong>Next:</strong> '
+             f'{_next_step(finding, section_id)}.</p>']
+    if finding.get("rollout_state") == "enforced":
+        # Already at the target: the warnings about getting there are history.
+        return f'<div class="block first">{"".join(parts)}</div>'
+    if audit_before and finding.get("change_risk") != "logging-only":
+        parts.append('<p class="phase-audit"><strong>Before enforcing, '
+                     f'check:</strong> {_esc(audit_before)}</p>')
+    if safety:
+        parts.append(_caveat_items(safety))
+    return f'<div class="block first">{"".join(parts)}</div>'
 
 
 def _render_source(finding: Dict[str, Any]) -> str:
@@ -1076,6 +1197,12 @@ def _render_not_judged(finding: Dict[str, Any]) -> str:
     )
 
 
+def _held_back_by_unread_gpo(finding: Dict[str, Any]) -> bool:
+    """An unknown that found values: the GPOs read pass, an unread one might not."""
+    return (finding.get("result") == "unknown"
+            and bool((finding.get("evidence") or {}).get("found")))
+
+
 def _render_unknown_reason(finding: Dict[str, Any]) -> str:
     """Why an ``unknown`` finding was not judged — always visible, never folded.
 
@@ -1085,14 +1212,28 @@ def _render_unknown_reason(finding: Dict[str, Any]) -> str:
     is not a pass will read it as one.
     """
     notes = (finding.get("evidence") or {}).get("notes")
+    if _held_back_by_unread_gpo(finding):
+        lead = ('The GPOs that were read meet the target, but a GPO that '
+                'applies here couldn\'t be read and could set a weaker value. '
+                'Fix the read failure and scan again.')
+    else:
+        lead = ('Group Policy doesn\'t show this setting\'s value, so the '
+                'scan can\'t confirm it either way. Use the check below to '
+                'settle it.')
     return (
         '<div class="block err-block">'
         '<h5>Why this is unknown &mdash; this is not a pass</h5>'
-        '<p>Group Policy doesn\'t show this setting\'s value, so the scan '
-        'can\'t confirm it either way. Use the check below to settle it.</p>'
+        f'<p>{lead}</p>'
         + _notes_list(notes, "notes")
         + '</div>'
     )
+
+
+def _risk_badge(finding: Dict[str, Any]) -> str:
+    risk = str(finding.get("change_risk") or "")
+    if risk not in _RISK_LABELS:
+        return ""
+    return _badge(_esc(_RISK_LABELS[risk]), f"risk-{risk}")
 
 
 def _card_badges(finding: Dict[str, Any], section_id: str) -> str:
@@ -1118,6 +1259,9 @@ def _card_badges(finding: Dict[str, Any], section_id: str) -> str:
                              f"src-{str(source or 'none').replace('-', '')}"))
     if finding.get("conflict"):
         badges.append(_badge("CONFLICT", "conflict"))
+    if section_id in (SECTION_FAIL, SECTION_OPPORTUNITIES, SECTION_UNKNOWN,
+                      SECTION_CONFLICTS):
+        badges.append(_risk_badge(finding))
     return f'<p class="badges">{"".join(badges)}</p>'
 
 
@@ -1227,7 +1371,11 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
     # the card's class.
     anchor = control_id.lower().replace(" ", "-")
 
-    body: List[str] = [_render_glance(finding)]
+    body: List[str] = []
+    if finding.get("why_it_matters"):
+        body.append(f'<p class="why">{_esc(finding.get("why_it_matters"))}</p>')
+    body.append(_deadline_line(finding, _SCAN_DATE.get("date", "")))
+    body.append(_render_glance(finding))
     # True when the evidence notes are already rendered open on the card, so
     # the evidence block does not repeat them.
     notes_shown = False
@@ -1241,8 +1389,12 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
         notes_shown = True
     body.append(_render_conflict(finding))
     if section_id in (SECTION_FAIL, SECTION_UNKNOWN, SECTION_OPPORTUNITIES):
-        body.append(_render_remediation(finding))
-        body.append(_render_phasing(finding))
+        body.append(_render_first_step(finding, section_id))
+        body.append('<details class="block howto"><summary>How to fix it, '
+                    'step by step</summary>'
+                    + _render_remediation(finding)
+                    + _render_phasing(finding, shown_open=True)
+                    + '</details>')
     body.append(_render_evidence(finding, notes_shown))
     body.append(_render_source(finding))
 
@@ -1383,12 +1535,37 @@ def _render_section(section_id: str, findings: Sequence[Dict[str, Any]],
     )
 
 
+#: Groups folded shut: nothing to do in them, and their counts stay on the
+#: Results tiles, so folding them can't make "not checked" read as "clean".
+_FOLDED_GROUPS = ("not-covered", "good")
+
+
 def _render_group(group_id: str, heading: str, intro: str, sections: str,
                   total: int) -> str:
     """A reader group: its heading and intro, then its sections."""
+    head = f'<h2>{_esc(heading)} <span class="count">({total})</span></h2>'
+    if group_id in _FOLDED_GROUPS:
+        return (f'<details class="group group-{group_id}" id="group-{group_id}">'
+                f'<summary>{head}</summary>'
+                f'<p class="group-intro">{_esc(intro)}</p>{sections}</details>')
     return (f'<div class="group group-{group_id}" id="group-{group_id}">'
-            f'<h2>{_esc(heading)} <span class="count">({total})</span></h2>'
-            f'<p class="group-intro">{_esc(intro)}</p>{sections}</div>')
+            f'{head}<p class="group-intro">{_esc(intro)}</p>{sections}</div>')
+
+
+def _render_method(shared: Sequence[str]) -> str:
+    """How ADitor decides, said once instead of on every card."""
+    items = "".join(f"<li>{_esc(text)}</li>" for text in shared)
+    return (
+        '<section class="method" id="method"><h2>How ADitor decides</h2>'
+        f'<p>{_PRECEDENCE_DISCLAIMER}</p>'
+        '<p>Every target value comes from a cited source, shown on each card '
+        'under <em>Where the value comes from</em>. Where no source gives a '
+        'value, the setting is listed under <em>Not covered yet</em> rather '
+        'than guessed.</p>'
+        + (f'<p>These notes apply to several checks, so they are listed here '
+           f'once rather than on each card:</p><ul class="notes">{items}</ul>'
+           if items else "")
+        + '</section>')
 
 
 def _render_toc(grouped: Dict[str, List[Dict[str, Any]]],
@@ -1406,6 +1583,7 @@ def _render_toc(grouped: Dict[str, List[Dict[str, Any]]],
         total = len(_group_findings(grouped, section_ids))
         items.append(f'<li><a href="#group-{group_id}">{_esc(heading)}</a> '
                      f'<span class="count">({total})</span><ol>{subs}</ol></li>')
+    items.append('<li><a href="#method">How ADitor decides</a></li>')
     items.append('<li><a href="#provenance">About this scan</a></li>')
     return f'<nav class="toc"><h2>Contents</h2><ol>{"".join(items)}</ol></nav>'
 
@@ -1440,6 +1618,7 @@ $counts
 $start_here
 $toc
 $sections
+$method
 $provenance
 <footer class="doc-foot">
 <p>Generated by ADitor &mdash; scan engine $engine_version, report format
@@ -1622,6 +1801,25 @@ main{max-width:none;padding:0}
 .card,.pass-row,.alert,.section{page-break-inside:avoid}
 a{text-decoration:none;color:inherit}
 }
+.why{margin:.2rem 0 .5rem;font-size:1rem}
+.deadline{background:var(--warn-bg);border-left:4px solid var(--warn);
+padding:.35rem .6rem;margin:.4rem 0;font-size:.9rem}
+.progress{margin:.5rem 0 0}
+.badge-risk-logging-only,.badge-risk-low{background:var(--ok-bg);color:var(--ok);
+border-color:var(--ok)}
+.badge-risk-pilot{background:var(--warn-bg);color:var(--warn);border-color:var(--warn)}
+.badge-risk-can-lock-out{background:var(--bad-bg);color:var(--bad);
+border-color:var(--bad)}
+details.more-warnings{margin:.3rem 0}
+details.more-warnings>summary{cursor:pointer;color:var(--muted);font-size:.9rem}
+details.group>summary{cursor:pointer;list-style:none}
+details.group>summary h2{display:inline}
+details.group>summary::before{content:"\\25B8  ";color:var(--muted)}
+details.group[open]>summary::before{content:"\\25BE  "}
+.method{margin-top:2rem}
+details.howto>summary{cursor:pointer;font-weight:600}
+.first-step{margin:.3rem 0}
+
 """
 
 
@@ -1683,6 +1881,17 @@ def render_report(scan_result: Dict[str, Any]) -> str:
     read_errors = [e for e in read_errors if isinstance(e, dict)] if isinstance(
         read_errors, list) else []
 
+    # A caveat on several findings is about how ADitor works, not about any
+    # one setting: say it once in "How ADitor decides" instead of on each card.
+    seen: Dict[str, int] = {}
+    for finding in findings:
+        for caveat in set(finding.get("caveats") or ()):
+            seen[caveat] = seen.get(caveat, 0) + 1
+    shared = [c for c, n in seen.items() if n > 1 and not _is_flagged(c)]
+    findings = [dict(f, caveats=[c for c in (f.get("caveats") or [])
+                                 if c not in shared]) for f in findings]
+    _SCAN_DATE["date"] = str(scan.get("timestamp") or "")[:10]
+
     grouped = group_findings(findings)
 
     unknown_extra = ""
@@ -1719,6 +1928,7 @@ def render_report(scan_result: Dict[str, Any]) -> str:
         start_here=_render_start_here(grouped, read_errors),
         toc=_render_toc(grouped, read_errors),
         sections=sections,
+        method=_render_method(shared),
         engine_version=_esc(scan.get("tool_version") or SCAN_ENGINE_VERSION),
         report_version=_esc(REPORT_FORMAT_VERSION),
         catalog_version=_esc(scan.get("catalog_version")),

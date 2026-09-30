@@ -471,6 +471,14 @@ class TestShippedCatalogInvariants:
     def catalog(self):
         return load_catalog()
 
+    def test_every_control_says_why_it_matters_and_how_risky_the_change_is(
+            self, catalog):
+        """The report's summary orders work by change risk and leads each
+        card with why it matters, so neither may be missing."""
+        for control in catalog.controls:
+            assert (control.why_it_matters or "").strip(), control.id
+            assert control.change_risk, control.id
+
     def test_every_interim_step_says_what_it_does(self, catalog):
         """Step 1 used to be called "audit mode ... without blocking anything"
         for every control, which was false for NTLMv2 level 3 and for LDAP

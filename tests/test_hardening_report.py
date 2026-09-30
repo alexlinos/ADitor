@@ -1632,6 +1632,9 @@ class TestKeyScopedDeleteIsVisibleInTheReport:
 # Start here, and the four reader groups
 # --------------------------------------------------------------------------- #
 
+RISK_BADGES = ("logging-only", "low", "pilot", "can-lock-out")
+
+
 def start_here_of(document):
     return document[document.index('id="start-here"'):
                     document.index('<nav class="toc"')]
@@ -1650,18 +1653,26 @@ class TestStartHere:
             'id="start-here"')
         assert "This scan is incomplete" in start_here_of(document)
 
-    def test_it_leads_with_the_failure_and_its_step_one(self, mixed_scan):
+    def test_it_lists_the_safest_changes_first(self, mixed_scan):
+        """Logging-only and low-risk changes can go in straight away and give
+        the risky ones their evidence, so they lead; severity breaks ties."""
         box = start_here_of(render_report(mixed_scan))
-        first = box[box.index("<li>"):box.index("</li>")]
-        # The only failure in mixed_scan: LmCompatibilityLevel at 1, target 5
-        # with an audit step at 3.
-        assert 'href="#devore-01-ntlm-lmcompatibilitylevel"' in first
-        assert "Next: step 1: set it to 3" in first
-        assert "audit mode" not in first
+        ranks = [list(RISK_BADGES).index(risk)
+                 for risk in re.findall(r'badge-risk-([a-z-]+)', box)]
+        assert ranks and ranks == sorted(ranks)
+        assert "Safest first" in box
 
-    def test_it_warns_about_the_audit_step_when_an_item_has_one(self,
-                                                                mixed_scan):
-        box = start_here_of(render_report(mixed_scan))
+    def test_a_risky_failure_gives_its_step_one(self, catalog):
+        payload = scan_payload([
+            snapshot(GUID_A, "Baseline", entries=[template_entry(LM_KEY, 1)],
+                     links=[GpoLink(target_dn=BASE_DN)])],
+            catalog=catalog, control_ids=[LM_CONTROL])
+        box = start_here_of(render_report(payload))
+
+        assert 'href="#devore-01-ntlm-lmcompatibilitylevel"' in box
+        assert "Next: step 1: set it to 3" in box
+        assert "Can lock people out" in box
+        assert "audit mode" not in box
         assert "some of these need an audit step first" in box
         assert "skip step 1" in box
 
@@ -1729,3 +1740,99 @@ class TestGroups:
         tile = re.search(r'href="#group-check"><span class="tile-n">(\d+)<',
                          summary)
         assert int(tile.group(1)) == len(check)
+
+
+class TestLessToReadUpFront:
+    """Spencer's "information overload": say each thing once, fold what
+    nobody acts on, and keep safety text open."""
+
+    @pytest.fixture
+    def document(self):
+        return render_report(sample_scan("Sample Workstation Baseline GPO"))
+
+    def test_each_card_leads_with_why_it_matters(self, document, catalog):
+        why = catalog.by_id(LM_CONTROL).why_it_matters
+        card = document[document.index('id="devore-01-ntlm-lmcompatibilitylevel"'):]
+        card = card[:card.index("</article>")]
+        assert html.escape(why, quote=True) in card
+        assert card.index(html.escape(why, quote=True)) < card.index('class="glance"')
+
+    def test_a_note_on_several_cards_is_said_once_under_how_aditor_decides(
+            self, document):
+        note = "A pass means nothing the bind account can read matched."
+        method = document[document.index('id="method"'):]
+        assert document.count(note) == 1
+        assert note in method
+
+    def test_labelled_warnings_stay_open_and_the_rest_fold(self, document):
+        card = document[document.index('id="devore-01-ntlm-lmcompatibilitylevel"'):]
+        card = card[:card.index("</article>")]
+        folded = card[card.index("More notes"):] if "More notes" in card else ""
+        assert "IN STAGES:" in card and "IN STAGES:" not in folded
+        assert "TATTOOING:" in card and "TATTOOING:" not in folded
+
+    def test_notes_on_how_a_value_is_judged_fold(self, document):
+        card = document[document.index('id="devore-08-ntlm-audit-incoming"'):]
+        card = card[:card.index("</article>")]
+        folded = card[card.index("More notes"):]
+        for label in ("MINIMUM, NOT EXACT LEVEL:", "INFERRED, NOT CITED:",
+                      "WATCH OUT:"):
+            assert label in folded
+
+    def test_a_logging_only_change_says_it_is_safe(self, document):
+        card = document[document.index('id="devore-08-ntlm-audit-incoming"'):]
+        assert "only turns on logging" in card[:card.index("</article>")]
+
+    def test_nothing_to_do_groups_fold_but_keep_their_counts(self, document):
+        assert '<details class="group group-not-covered"' in document
+        assert '<details class="group group-good"' in document
+        assert '<div class="group group-fix"' in document
+        tiles = document[document.index('id="summary"'):
+                         document.index('id="start-here"')]
+        assert "Not covered yet" in tiles
+
+    def test_the_summary_shows_rollout_progress(self, document):
+        assert re.search(r"Rollout:</strong> \d+ enforced &middot; \d+ at step 1 "
+                         r"&middot; \d+ not started, of \d+", document)
+
+
+class TestMicrosoftDeadlines:
+
+    def card(self, timestamp):
+        payload = sample_scan("Sample Workstation Baseline GPO")
+        payload["scan"]["timestamp"] = timestamp
+        document = render_report(payload)
+        card = document[document.index('id="devore-01-ntlm-lmcompatibilitylevel"'):]
+        return card[:card.index("</article>")]
+
+    def test_a_coming_deadline_says_when(self):
+        card = self.card("2026-09-30T12:00:00+00:00")
+        assert "Microsoft changes this default: October 2026." in card
+        assert "support.microsoft.com" in card
+
+    def test_a_passed_deadline_says_it_already_happened(self):
+        card = self.card("2026-11-02T12:00:00+00:00")
+        assert "Microsoft already changed this default: October 2026." in card
+
+
+class TestUnknownBecauseAGpoWasUnread:
+    """A pass held back by an unreadable GPO must say so, not claim Group
+    Policy can't show the setting."""
+
+    @pytest.fixture
+    def card(self):
+        document = render_report(sample_scan("Sample Workstation Baseline GPO"))
+        card = document[document.index('id="devore-03-ldap-server-signing"'):]
+        return card[:card.index("</article>")]
+
+    def test_it_names_the_real_reason_and_the_real_next_step(self, card):
+        assert "couldn't be read and could set a weaker value" in card
+        assert "Group Policy doesn't show this setting" not in card
+        assert "Next:</strong> fix the read failure above" in card
+
+    def test_an_enforced_setting_drops_the_warnings_about_getting_there(self,
+                                                                         card):
+        opened = card[:card.index("How to fix it")]
+        assert "Before enforcing" not in opened
+        assert "AUDIT FIRST" not in opened
+        assert "catalog doesn't say what to check" not in card
