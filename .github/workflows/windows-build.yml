@@ -164,9 +164,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
-          Get-FileHash ADitor.exe, aditor-cli.exe -Algorithm SHA256 |
-            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
-            Set-Content SHA256SUMS.txt -Encoding ascii
+          # LF line endings, so `sha256sum -c` / `shasum -c` can check it too.
+          $lines = Get-FileHash ADitor.exe, aditor-cli.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" }
+          [IO.File]::WriteAllText("$PWD\SHA256SUMS.txt", ($lines -join "`n") + "`n")
           gh release create $env:GITHUB_REF_NAME ADitor.exe aditor-cli.exe SHA256SUMS.txt `
             -R $env:GITHUB_REPOSITORY --title "ADitor $env:GITHUB_REF_NAME" --generate-notes `
             --notes "Code signing policy: https://github.com/alexlinos/ADitor#code-signing-policy"
