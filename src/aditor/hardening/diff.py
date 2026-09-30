@@ -368,7 +368,7 @@ def evidence_side(finding: Dict[str, Any]) -> Dict[str, Any]:
         "gpos": _gpos(finding),
         "deliveries": _deliveries(finding),
         "conflict": _conflict_kind(finding),
-        "expected": evidence.get("expected"),
+        "expected": _expected_values(evidence.get("expected")),
         "scored": finding.get("scored"),
         # The evaluator's own reason, not re-derived from ``scored``: it
         # distinguishes 'needs_baseline_value' (the source states no expected
@@ -376,6 +376,18 @@ def evidence_side(finding: Dict[str, Any]) -> Dict[str, Any]:
         # the control), and a reader of a change entry wants to know which.
         "unscored_reason": finding.get("unscored_reason"),
     }
+
+
+#: The parts of ``evidence.expected`` a verdict is judged against. The rest
+#: (``value_source``, ``interim_effect``) is explanation: rewording it changes
+#: no verdict, so it must not read as "the expected value changed".
+_EXPECTED_VALUE_KEYS = ("operator", "interim", "final", "os_default")
+
+
+def _expected_values(expected: Any) -> Any:
+    if not isinstance(expected, dict):
+        return expected
+    return {key: expected.get(key) for key in _EXPECTED_VALUE_KEYS}
 
 
 def _dn_list(gpos: Sequence[Dict[str, Any]]) -> List[str]:

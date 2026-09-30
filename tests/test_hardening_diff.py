@@ -1400,3 +1400,31 @@ class TestPayloadShape:
                           SIGNING_CONTROL)
 
         assert entry["remediation"] == "Set LDAPServerIntegrity to 2."
+
+
+class TestRewordedExplanationIsNotAnExpectedValueChange:
+    """0.1.2 reworded every control's value_source and added interim_effect.
+    The diff then told a real user that the expected value of 14 controls had
+    changed, when only one had."""
+
+    PROSE_BEFORE = {"operator": "gte", "interim": 3, "final": 5,
+                    "os_default": None, "value_source": "Old wording."}
+    PROSE_AFTER = {"operator": "gte", "interim": 3, "final": 5,
+                   "os_default": None, "value_source": "New wording.",
+                   "interim_effect": "Machines send only NTLMv2."}
+
+    def test_reworded_text_is_not_a_change(self):
+        from aditor.hardening.diff import evidence_changes
+        before = finding("C-1", expected=self.PROSE_BEFORE)
+        after = finding("C-1", expected=self.PROSE_AFTER)
+
+        assert evidence_changes(before, after) == []
+
+    @pytest.mark.parametrize("field,value", [
+        ("operator", "aes_only"), ("interim", 2), ("final", 4), ("os_default", 1)])
+    def test_a_changed_value_still_is(self, field, value):
+        from aditor.hardening.diff import evidence_changes
+        before = finding("C-1", expected=self.PROSE_BEFORE)
+        after = finding("C-1", expected=dict(self.PROSE_AFTER, **{field: value}))
+
+        assert [c["field"] for c in evidence_changes(before, after)] == ["expected"]
