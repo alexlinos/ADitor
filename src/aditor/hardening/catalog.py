@@ -156,7 +156,12 @@ _CONTROL_FIELDS = frozenset({
     "os_default_source", "presence_rollout_state", "missing_result", "missing_note", "value_source",
     "baseline_gap", "remediation", "caveats", "audit_before_enforce",
     "gpo_deliverable", "directory_check", "directory_targets",
+    "why_it_matters", "change_risk", "microsoft_deadline",
 })
+
+#: How much a change to reach the target can break, safest first. The report
+#: orders "what to do this month" by this, before severity.
+CHANGE_RISKS = ("logging-only", "low", "pilot", "can-lock-out")
 
 _REQUIRED_CONTROL_FIELDS = ("id", "title", "source", "scope", "check_type",
                             "severity", "status", "operator", "remediation")
@@ -203,6 +208,13 @@ class Control:
     gpo_deliverable: bool = True
     directory_check: Optional[str] = None
     directory_targets: Tuple[str, ...] = ()
+    #: One plain sentence: what an attacker gets while this is unfixed.
+    why_it_matters: Optional[str] = None
+    #: One of ``CHANGE_RISKS``.
+    change_risk: Optional[str] = None
+    #: ``{"date": "YYYY-MM[-DD]", "summary": str, "url": str}``: when Microsoft
+    #: changes the default for this setting, cited.
+    microsoft_deadline: Optional[Dict[str, Any]] = None
 
     @property
     def absence_check_command(self) -> Optional[str]:
@@ -250,6 +262,10 @@ class Control:
             "source": dict(self.source),
             "friendly_policy": self.friendly_policy,
             "remediation": self.remediation,
+            "why_it_matters": self.why_it_matters,
+            "change_risk": self.change_risk,
+            "microsoft_deadline": (dict(self.microsoft_deadline)
+                                   if self.microsoft_deadline else None),
         }
 
 
@@ -574,6 +590,18 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
                 f"editor would reasonably read it as a default that is being "
                 f"applied")
 
+    change_risk = raw.get("change_risk")
+    if change_risk is not None and change_risk not in CHANGE_RISKS:
+        raise CatalogError(f"{where}: 'change_risk' must be one of "
+                           f"{', '.join(CHANGE_RISKS)}, not {change_risk!r}")
+    deadline = raw.get("microsoft_deadline")
+    if deadline is not None and not (
+            isinstance(deadline, dict)
+            and all(str(deadline.get(k) or "").strip()
+                    for k in ("date", "summary", "url"))):
+        raise CatalogError(f"{where}: 'microsoft_deadline' needs a 'date', a "
+                           f"'summary' and a source 'url'")
+
     return Control(
         id=control_id.strip(),
         title=raw["title"],
@@ -602,6 +630,9 @@ def _build_control(raw: Any, index: int, source: str) -> Control:
         gpo_deliverable=True if gpo_deliverable is None else gpo_deliverable,
         directory_check=directory_check,
         directory_targets=tuple(directory_targets or ()),
+        why_it_matters=raw.get("why_it_matters"),
+        change_risk=change_risk,
+        microsoft_deadline=dict(deadline) if deadline else None,
     )
 
 

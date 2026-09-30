@@ -16,6 +16,13 @@
     {
       "id": "DEVORE-01-NTLM-LMCOMPATIBILITYLEVEL",
       "title": "Require NTLMv2 (LAN Manager authentication level)",
+      "why_it_matters": "NTLMv1 and LM responses can be cracked or relayed quickly, so anyone who captures one can sign in as that user.",
+      "change_risk": "can-lock-out",
+      "microsoft_deadline": {
+        "date": "2026-10",
+        "summary": "Windows 11 24H2 and Windows Server 2025 switch BlockNtlmv1SSO to enforce by default, blocking NTLMv1 credentials for signed-in users (unless Credential Guard is on).",
+        "url": "https://support.microsoft.com/en-us/topic/upcoming-changes-to-ntlmv1-in-windows-11-version-24h2-and-windows-server-2025-c0554217-cdbc-420f-b47c-e02b2db49b2e"
+      },
       "source": {
         "part": 1,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-1-%E2%80%93-disabling-ntlmv1/3934787"
@@ -47,6 +54,8 @@
     {
       "id": "DEVORE-03-LDAP-SERVER-SIGNING",
       "title": "Domain controller LDAP server signing",
+      "why_it_matters": "Unsigned LDAP binds can be intercepted and relayed to a domain controller, letting an attacker act as the user who signed in.",
+      "change_risk": "can-lock-out",
       "source": {
         "part": 3,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-3-%E2%80%93-enforcing-ldap-signing/4066233"
@@ -76,6 +85,8 @@
     {
       "id": "DEVORE-03-LDAP-CLIENT-SIGNING",
       "title": "LDAP client signing requirement",
+      "why_it_matters": "Makes Windows clients sign their LDAP traffic, so it can't be altered or relayed in transit.",
+      "change_risk": "low",
       "source": {
         "part": 3,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-3-%E2%80%93-enforcing-ldap-signing/4066233"
@@ -107,6 +118,8 @@
     {
       "id": "DEVORE-03-LDAP-DIAG-LOGGING",
       "title": "Turn on LDAP Interface diagnostic logging (to find unsigned binds)",
+      "why_it_matters": "Records which clients still make unsigned LDAP binds, so you know what would break before you require signing.",
+      "change_risk": "logging-only",
       "source": {
         "part": 3,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-3-%E2%80%93-enforcing-ldap-signing/4066233"
@@ -138,6 +151,8 @@
     {
       "id": "DEVORE-04-KERB-CONFIGURE-ENCTYPES",
       "title": "Configure encryption types allowed for Kerberos (disable RC4 on devices)",
+      "why_it_matters": "Kerberos tickets encrypted with RC4 can be cracked offline much faster than AES ones.",
+      "change_risk": "can-lock-out",
       "source": {
         "part": 4,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-4-%E2%80%93-enforcing-aes-for-kerberos/4114965"
@@ -167,6 +182,13 @@
     {
       "id": "DEVORE-04-KDC-DEFAULTDOMAINSUPPORTEDENCTYPES",
       "title": "Disable RC4 at the domain level on domain controllers",
+      "why_it_matters": "While domain controllers still issue RC4 tickets, any account with an SPN is easier to crack offline (Kerberoasting).",
+      "change_risk": "can-lock-out",
+      "microsoft_deadline": {
+        "date": "2026-04-14",
+        "summary": "Domain controllers with the Kerberos updates treat accounts with no encryption-type setting as AES only (0x18). From July 2026 the rollback setting is gone.",
+        "url": "https://support.microsoft.com/en-gb/topic/how-to-manage-kerberos-kdc-usage-of-rc4-for-service-account-ticket-issuance-changes-related-to-cve-2026-20833-1ebcda33-720a-4da8-93c1-b0496e1910dc"
+      },
       "source": {
         "part": 4,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-4-%E2%80%93-enforcing-aes-for-kerberos/4114965"
@@ -208,6 +230,13 @@
       "missing_note": null,
       "id": "DEVORE-04-SPN-ACCOUNTS-AES",
       "title": "Service accounts with an SPN state AES in msDS-SupportedEncryptionTypes",
+      "why_it_matters": "A service account without AES gets RC4 tickets, the easiest kind to crack offline (Kerberoasting).",
+      "change_risk": "pilot",
+      "microsoft_deadline": {
+        "date": "2026-04-14",
+        "summary": "Domain controllers with the Kerberos updates treat accounts with no encryption-type setting as AES only (0x18). From July 2026 the rollback setting is gone.",
+        "url": "https://support.microsoft.com/en-gb/topic/how-to-manage-kerberos-kdc-usage-of-rc4-for-service-account-ticket-issuance-changes-related-to-cve-2026-20833-1ebcda33-720a-4da8-93c1-b0496e1910dc"
+      },
       "source": {
         "part": 4,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-4-%E2%80%93-enforcing-aes-for-kerberos/4114965"
@@ -228,6 +257,8 @@
     {
       "id": "DEVORE-05-LDAP-CHANNEL-BINDING",
       "title": "Domain controller LDAP channel binding",
+      "why_it_matters": "Channel binding stops an attacker relaying someone's LDAPS sign-in to a domain controller.",
+      "change_risk": "can-lock-out",
       "source": {
         "part": 5,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-5-%E2%80%93-enforcing-ldap-channel-binding/4235497"
@@ -258,6 +289,8 @@
     {
       "id": "DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
       "title": "SMB client always requires signing",
+      "why_it_matters": "Without SMB signing, an attacker can relay a captured sign-in to a file server and act as that user.",
+      "change_risk": "pilot",
       "source": {
         "part": 6,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-6-%E2%80%93-enforcing-smb-signing/4272168"
@@ -287,6 +320,8 @@
     {
       "id": "DEVORE-06-SMB-SERVER-SIGNING-ALWAYS",
       "title": "SMB server always requires signing",
+      "why_it_matters": "Without SMB signing, an attacker can relay a captured sign-in to this server and act as that user.",
+      "change_risk": "pilot",
       "source": {
         "part": 6,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-6-%E2%80%93-enforcing-smb-signing/4272168"
@@ -316,6 +351,8 @@
     {
       "id": "DEVORE-06-LLMNR-DISABLE",
       "title": "Turn off LLMNR (multicast name resolution)",
+      "why_it_matters": "On the local network, an attacker can answer LLMNR name lookups (for example with Responder) and collect password hashes.",
+      "change_risk": "low",
       "source": {
         "part": 6,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-6-%E2%80%93-enforcing-smb-signing/4272168"
@@ -343,6 +380,8 @@
     {
       "id": "DEVORE-06-NBTNS-NODETYPE",
       "title": "Disable NetBIOS-over-TCP name resolution (P-node)",
+      "why_it_matters": "NetBIOS broadcast name lookups can be answered by an attacker on the local network, who then collects password hashes.",
+      "change_risk": "low",
       "source": {
         "part": 6,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-6-%E2%80%93-enforcing-smb-signing/4272168"
@@ -382,6 +421,8 @@
       "missing_note": null,
       "id": "DEVORE-07-EMPTY-PRIVILEGED-GROUPS",
       "title": "Built-in privileged groups that should be empty have no members",
+      "why_it_matters": "Members of these groups can take over the domain, so any account sitting in them unused is a standing risk.",
+      "change_risk": "low",
       "source": {
         "part": 7,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-7-%E2%80%93-implementing-least-privilege/4366626"
@@ -424,6 +465,8 @@
       "missing_note": null,
       "id": "DEVORE-07-UNCONSTRAINED-DELEGATION",
       "title": "No accounts other than domain controllers have unconstrained delegation",
+      "why_it_matters": "A computer with unconstrained delegation keeps the tickets of everyone who connects to it, admins included, so taking it over can mean taking over the domain.",
+      "change_risk": "pilot",
       "source": {
         "part": 7,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-7-%E2%80%93-implementing-least-privilege/4366626"
@@ -443,6 +486,8 @@
     {
       "id": "DEVORE-08-NTLM-AUDIT-INCOMING",
       "title": "Audit incoming NTLM traffic",
+      "why_it_matters": "Shows which clients still use NTLM against this system, which you need to know before restricting it.",
+      "change_risk": "logging-only",
       "source": {
         "part": 8,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
@@ -474,6 +519,8 @@
     {
       "id": "DEVORE-08-NTLM-AUDIT-OUTGOING",
       "title": "Audit outgoing NTLM traffic to remote servers",
+      "why_it_matters": "Shows which systems still send NTLM to other servers, which you need to know before restricting it.",
+      "change_risk": "logging-only",
       "source": {
         "part": 8,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
@@ -504,6 +551,8 @@
     {
       "id": "DEVORE-08-NTLM-AUDIT-INDOMAIN",
       "title": "Audit NTLM authentication in this domain (domain controllers)",
+      "why_it_matters": "Shows NTLM use across the domain from the domain controllers, which you need to know before restricting it.",
+      "change_risk": "logging-only",
       "source": {
         "part": 8,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
@@ -535,6 +584,8 @@
     {
       "id": "DEVORE-08-NTLM-BLOCK-INCOMING",
       "title": "Block incoming NTLM traffic (final phase)",
+      "why_it_matters": "NTLM can be relayed and cracked. Blocking it removes those attacks, once nothing depends on it.",
+      "change_risk": "can-lock-out",
       "source": {
         "part": 8,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
@@ -564,6 +615,8 @@
     {
       "id": "DEVORE-08-NTLM-BLOCK-OUTGOING",
       "title": "Block outgoing NTLM traffic to remote servers",
+      "why_it_matters": "NTLM can be relayed and cracked. Blocking it removes those attacks, once nothing depends on it.",
+      "change_risk": "can-lock-out",
       "source": {
         "part": 8,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
@@ -593,6 +646,8 @@
     {
       "id": "DEVORE-08-NTLM-BLOCK-INDOMAIN",
       "title": "Block NTLM authentication in this domain (domain controllers, last step)",
+      "why_it_matters": "NTLM can be relayed and cracked. Blocking it domain-wide removes those attacks, once nothing depends on it.",
+      "change_risk": "can-lock-out",
       "source": {
         "part": 8,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
@@ -622,6 +677,8 @@
     {
       "id": "DEVORE-08-PRINT-RPCNAMEDPIPE",
       "title": "Print Spooler: no NTLM fallback on named pipes",
+      "why_it_matters": "Stops the print spooler's named-pipe listener falling back to weaker NTLM authentication.",
+      "change_risk": "pilot",
       "source": {
         "part": 8,
         "url": "https://techcommunity.microsoft.com/blog/coreinfrastructureandsecurityblog/active-directory-hardening-series---part-8-%E2%80%93-disabling-ntlm/4485782"
