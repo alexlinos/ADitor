@@ -91,6 +91,7 @@ information and every found value records it in ``delivery``:
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -376,6 +377,63 @@ def gpo_reach_problem(control: Control, gpo: GpoSnapshot) -> Optional[str]:
         return (f"it's linked only to {where}, which doesn't contain the "
                 f"domain controllers")
     return None
+
+
+@dataclass(frozen=True)
+class Scope:
+    """Where the domain's computers sit, so a GPO's reach can be worked out.
+
+    Args:
+        containers: Normalised container DN -> (enabled computers, of which
+            domain controllers) directly in it. DCs are found by account type,
+            so one moved out of the Domain Controllers OU still counts.
+        blocked: Normalised DNs of containers with Block Inheritance set.
+    """
+
+    containers: Dict[str, Tuple[int, int]]
+    blocked: frozenset = frozenset()
+
+    def targets(self, control: Control) -> Dict[str, int]:
+        """The machines a control is about, per container."""
+        dcs_only = control.scope == "domain-controllers"
+        out = {dn: (dcs if dcs_only else computers)
+               for dn, (computers, dcs) in self.containers.items()}
+        return {dn: n for dn, n in out.items() if n}
+
+    def reached(self, gpo: GpoSnapshot) -> set:
+        """The containers this GPO's computer settings apply to."""
+        if gpo.flags & GPO_FLAG_COMPUTER_DISABLED:
+            return set()
+        out = set()
+        for container in self.containers:
+            for link in gpo.links:
+                if link.link_enabled and self._applies(link, container):
+                    out.add(container)
+                    break
+        return out
+
+    def _applies(self, link: GpoLink, container: str) -> bool:
+        target = _norm_dn(link.target_dn)
+        if _is_site(target):
+            # ponytail: a site link is assumed to reach every machine; map
+            # computers to sites (their DC's site) if that matters.
+            return True
+        if not (container == target or container.endswith("," + target)):
+            return False
+        if link.enforced:
+            return True
+        # Block Inheritance on any container from the machine's own up to,
+        # but not including, the link target stops a non-enforced link.
+        path = container
+        while path and path != target:
+            if path in self.blocked:
+                return False
+            path = path.split(",", 1)[1] if "," in path else ""
+        return True
+
+
+def _norm_dn(dn: Any) -> str:
+    return ",".join(part.strip() for part in str(dn or "").lower().split(","))
 
 
 def _unreached_notes(control: Control,
@@ -707,7 +765,8 @@ def _as_number(value: Any, role: str) -> int:
 
 def evaluate_control(control: Control,
                      gpos: Iterable[GpoSnapshot],
-                     directory: Optional[Dict[str, Any]] = None
+                     directory: Optional[Dict[str, Any]] = None,
+                     scope: Optional[Scope] = None
                      ) -> Dict[str, Any]:
     """Evaluate one control against every GPO, returning one finding.
 
@@ -735,7 +794,23 @@ def evaluate_control(control: Control,
     if control.check_type == "directory-state":
         return _directory_finding(control, (directory or {}).get(control.id))
 
-    problems = [(gpo, gpo_reach_problem(control, gpo)) for gpo in gpos]
+    targets = scope.targets(control) if scope else {}
+    reach: Dict[str, set] = {}
+    if targets:
+        # Real scoping: a GPO counts where it reaches the control's machines.
+        unit = ("domain controllers" if control.scope == "domain-controllers"
+                else "computers")
+        problems = []
+        for gpo in gpos:
+            reach[gpo.dn] = scope.reached(gpo) & set(targets)
+            problem = gpo_reach_problem(
+                dataclasses.replace(control, scope="all"), gpo)
+            if problem is None and not reach[gpo.dn]:
+                problem = (f"none of its links reach any of the domain's {unit} "
+                           f"(where they sit, or Block Inheritance, stops it)")
+            problems.append((gpo, problem))
+    else:
+        problems = [(gpo, gpo_reach_problem(control, gpo)) for gpo in gpos]
     reaching = [gpo for gpo, problem in problems if problem is None]
     unreached = [(gpo, problem) for gpo, problem in problems if problem]
 
@@ -773,6 +848,31 @@ def evaluate_control(control: Control,
     worst = min(states, key=lambda state: _STATE_RANK[state])
     conflict = _detect_conflict(assessed)
 
+    coverage = None
+    uncovered_unknown = False
+    if targets:
+        covered = set().union(*(reach.get(m["gpo_dn"], set()) for m in matches))
+        total = sum(targets.values())
+        got = sum(targets[c] for c in covered)
+        coverage = {"covered": got, "total": total, "unit": unit}
+        if got < total:
+            rest = total - got
+            if control.os_default is not None:
+                default_state = _state_for(control, control.os_default)
+                worst = min(worst, default_state, key=lambda st: _STATE_RANK[st])
+                outcome = f"run the Windows default ({control.os_default!r})"
+            elif (not control.gpo_deliverable
+                  or control.missing_result in (RESULT_UNKNOWN,
+                                                RESULT_NOT_APPLICABLE)):
+                uncovered_unknown = True
+                outcome = "may be set some other way this scan can't see"
+            else:
+                worst = STATE_NOT_STARTED
+                outcome = "aren't configured"
+            extra_notes.append(
+                f"Group Policy sets this on {got} of {total} {unit}. The "
+                f"other {rest} get no value from it, so they {outcome}.")
+
     if control.operator == "present":
         result = RESULT_PASS
         rollout_state = control.presence_rollout_state or STATE_AUDIT
@@ -782,6 +882,9 @@ def evaluate_control(control: Control,
 
     finding = _finding(control, result, rollout_state, assessed, gpos,
                        notes=extra_notes)
+    finding["evidence"]["coverage"] = coverage
+    if uncovered_unknown and result == RESULT_PASS:
+        finding["result"] = RESULT_UNKNOWN
     finding["conflict"] = conflict
     if conflict:
         finding["evidence"]["notes"].append(conflict["detail"])
@@ -801,7 +904,8 @@ def evaluate_control(control: Control,
 def evaluate_controls(controls: Iterable[Control],
                       gpos: Iterable[GpoSnapshot],
                       include_not_applicable: bool = False,
-                      directory: Optional[Dict[str, Any]] = None
+                      directory: Optional[Dict[str, Any]] = None,
+                      scope: Optional[Scope] = None
                       ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """Evaluate many controls and count the outcomes.
 
@@ -848,7 +952,7 @@ def evaluate_controls(controls: Iterable[Control],
     findings: List[Dict[str, Any]] = []
 
     for control in controls:
-        finding = evaluate_control(control, gpos, directory)
+        finding = evaluate_control(control, gpos, directory, scope)
         counts["total"] += 1
         counts[finding["result"]] += 1
         if finding["scored"]:

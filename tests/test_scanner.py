@@ -802,3 +802,84 @@ class TestKeyScopedDeleteThroughTheScan:
         assert "DELETE a registry KEY" in notes
         assert "Undo Enc Types" in notes
         assert "client-side extensions run" in notes
+
+
+class TestScopingThroughTheScan:
+    """Computers and Block Inheritance read from the directory decide what a
+    GPO reaches; links alone no longer do."""
+
+    LAB = f"OU=Lab,{BASE_DN}"
+    WS = f"OU=Workstations,{BASE_DN}"
+
+    @staticmethod
+    def computer(name, ou, uac=0x1000):
+        return {"dn": f"CN={name},{ou}",
+                "attributes": {"userAccountControl": uac}}
+
+    def wire(self, mock_ldap_manager, link_entries, computers, extra=()):
+        wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LM Policy")],
+                  list(link_entries) + list(extra))
+        base = mock_ldap_manager.search.side_effect
+
+        def search(search_base=None, search_filter=None, **kwargs):
+            if search_filter == "(objectCategory=computer)":
+                return computers
+            if "CN=Sites" in (search_base or "") and "gPLink" in search_filter:
+                return [e for e in link_entries if "CN=Sites" in e["dn"]]
+            if "gPLink" in (search_filter or ""):
+                return [e for e in list(link_entries) + list(extra)
+                        if "CN=Sites" not in e["dn"]]
+            return base(search_base=search_base, search_filter=search_filter,
+                        **kwargs)
+        mock_ldap_manager.search.side_effect = search
+
+    def scan_lm(self, tools, value=5):
+        lines = [r"MACHINE\System\CurrentControlSet\Control\Lsa"
+                 rf"\LmCompatibilityLevel=4,{value}"]
+        return run_scan(tools, {GUID_SIGNING: sysvol_contents(*lines)},
+                        control_ids=["DEVORE-01-NTLM-LMCOMPATIBILITYLEVEL"])
+
+    def fleet(self):
+        return ([self.computer("DC1", DC_OU, uac=0x2000)]
+                + [self.computer(f"WS{i}", self.WS) for i in range(8)]
+                + [self.computer("LAB1", self.LAB)]
+                + [self.computer("OLD", self.WS, uac=0x1002)])  # disabled
+
+    def test_a_lab_only_link_fails_and_says_how_much_it_covers(
+            self, tools, mock_ldap_manager):
+        self.wire(mock_ldap_manager, [link_entry(self.LAB, GUID_SIGNING)],
+                  self.fleet())
+
+        response = self.scan_lm(tools)
+        finding = response["findings"][0]
+
+        assert finding["result"] == "fail"
+        assert finding["evidence"]["coverage"] == {
+            "covered": 1, "total": 10, "unit": "computers"}
+        assert response["scan"]["computers_scoped"] == 10
+
+    def test_block_inheritance_on_an_ou_without_links_is_read(
+            self, tools, mock_ldap_manager):
+        blocked_ou = {"dn": self.WS,
+                      "attributes": {"gPOptions": 1, "distinguishedName": self.WS}}
+        self.wire(mock_ldap_manager, [link_entry(BASE_DN, GUID_SIGNING)],
+                  self.fleet(), extra=[blocked_ou])
+
+        finding = self.scan_lm(tools)["findings"][0]
+
+        assert finding["result"] == "fail"
+        assert finding["evidence"]["coverage"]["covered"] == 2
+
+    def test_a_site_link_to_another_domains_gpo_is_not_credited(
+            self, tools, mock_ldap_manager):
+        site = f"CN=HQ,CN=Sites,CN=Configuration,{BASE_DN}"
+        foreign = {"dn": site, "attributes": {
+            "gPLink": f"[LDAP://cn={{{GUID_SIGNING}}},cn=policies,cn=system,"
+                      f"DC=other,DC=local;0]",
+            "gPOptions": 0, "distinguishedName": site}}
+        self.wire(mock_ldap_manager, [foreign], self.fleet())
+
+        finding = self.scan_lm(tools)["findings"][0]
+
+        assert finding["result"] != "pass"
+        assert finding["evidence"]["found"] == []

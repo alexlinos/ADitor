@@ -2930,3 +2930,112 @@ class TestConflictsReadTheLinks:
                                  (GpoLink(BASE_DN, enforced=True),))
 
         assert "likely overridden" in conflict["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# Real scoping: which computers a GPO actually reaches
+# --------------------------------------------------------------------------- #
+
+from aditor.hardening.evaluator import Scope  # noqa: E402
+
+LAB_OU = f"OU=Lab,{BASE_DN}".lower()
+WS_OU = f"OU=Workstations,{BASE_DN}".lower()
+NESTED_DC_OU = f"OU=Domain Controllers,OU=Lab,{BASE_DN}".lower()
+LM_LINE = "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\LmCompatibilityLevel=4,{}"
+
+
+def domain(blocked=(), moved_dc=False):
+    """2 DCs in the DC OU (or one moved to the Lab OU), 10 workstations,
+    3 lab machines."""
+    containers = {DC_OU.lower(): (1 if moved_dc else 2, 1 if moved_dc else 2),
+                  WS_OU: (10, 0), LAB_OU: (4 if moved_dc else 3, 1 if moved_dc else 0)}
+    return Scope(containers=containers, blocked=frozenset(blocked))
+
+
+def lm(value, *links):
+    return template_gpo(GUID_SIGNING, "LM Policy", LM_LINE.format(value),
+                        links=tuple(links))
+
+
+class TestScopingByWhereComputersSit:
+    """Review round 2: OU text matching and "any enabled link" still passed
+    GPOs that reach none, or few, of the machines a control is about."""
+
+    @pytest.fixture
+    def lm_control(self):
+        return load_catalog().by_id("DEVORE-01-NTLM-LMCOMPATIBILITYLEVEL")
+
+    @pytest.fixture
+    def signing(self):
+        return load_catalog().by_id("DEVORE-03-LDAP-SERVER-SIGNING")
+
+    def test_a_test_ou_link_is_not_domain_wide_enforcement(self, lm_control):
+        finding = evaluate_control(lm_control, [lm(5, GpoLink(LAB_OU))],
+                                   scope=domain())
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["coverage"] == {
+            "covered": 3, "total": 15, "unit": "computers"}
+        assert any("3 of 15 computers" in n for n in finding["evidence"]["notes"])
+
+    def test_a_root_link_covers_every_computer(self, lm_control):
+        finding = evaluate_control(lm_control, [lm(5, GpoLink(BASE_DN))],
+                                   scope=domain())
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["evidence"]["coverage"]["covered"] == 15
+
+    def test_block_inheritance_stops_a_root_link(self, lm_control):
+        finding = evaluate_control(lm_control, [lm(5, GpoLink(BASE_DN))],
+                                   scope=domain(blocked=[WS_OU]))
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["coverage"]["covered"] == 5
+
+    def test_an_enforced_link_passes_through_block_inheritance(self, lm_control):
+        finding = evaluate_control(
+            lm_control, [lm(5, GpoLink(BASE_DN, enforced=True))],
+            scope=domain(blocked=[WS_OU]))
+
+        assert finding["result"] == RESULT_PASS
+
+    def test_a_nested_ou_named_domain_controllers_holds_no_dcs(self, signing):
+        gpo = template_gpo(GUID_SIGNING, "Signing GPO", LDAP_SIGNING_LINE,
+                           links=(GpoLink(NESTED_DC_OU),))
+        scope = domain()
+        scope = Scope(containers=dict(scope.containers, **{NESTED_DC_OU: (0, 0)}))
+
+        finding = evaluate_control(signing, [gpo], scope=scope)
+
+        assert finding["result"] != RESULT_PASS
+        assert finding["evidence"]["found"] == []
+
+    def test_a_dc_moved_out_of_the_dc_ou_is_still_a_dc(self, signing):
+        gpo = template_gpo(GUID_SIGNING, "Signing GPO", LDAP_SIGNING_LINE,
+                           links=(GpoLink(DC_OU),))
+
+        finding = evaluate_control(signing, [gpo], scope=domain(moved_dc=True))
+
+        assert finding["result"] == RESULT_FAIL
+        assert finding["evidence"]["coverage"] == {
+            "covered": 1, "total": 2, "unit": "domain controllers"}
+
+    def test_uncovered_machines_with_a_windows_default_use_the_default(self):
+        client = load_catalog().by_id("DEVORE-03-LDAP-CLIENT-SIGNING")
+        gpo = template_gpo(
+            GUID_SIGNING, "Client Signing",
+            "MACHINE\\System\\CurrentControlSet\\Services\\LDAP\\"
+            "LDAPClientIntegrity=4,2", links=(GpoLink(LAB_OU),))
+
+        finding = evaluate_control(client, [gpo], scope=domain())
+
+        # Lab machines are at 2 (enforced); the rest run the default, 1.
+        assert finding["result"] == RESULT_PASS
+        assert finding["rollout_state"] == "audit"
+
+    def test_no_directory_data_falls_back_to_links(self, lm_control):
+        finding = evaluate_control(lm_control, [lm(5, GpoLink(LAB_OU))],
+                                   scope=Scope(containers={}))
+
+        assert finding["result"] == RESULT_PASS
+        assert finding["evidence"].get("coverage") is None

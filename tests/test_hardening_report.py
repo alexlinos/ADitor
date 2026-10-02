@@ -31,7 +31,8 @@ import re
 
 import pytest
 from aditor.hardening.catalog import build_catalog, load_catalog
-from aditor.hardening.evaluator import GpoLink, GpoSnapshot, evaluate_controls
+from aditor.hardening.evaluator import (GpoLink, GpoSnapshot, Scope,
+                                       evaluate_controls)
 from aditor.hardening.report import (
     GROUPS,
     REPORT_FORMAT_VERSION,
@@ -136,7 +137,7 @@ def provenance(catalog, gpos_scanned=2, gpos_unreadable=0):
 
 def scan_payload(gpos, catalog=None, include_not_applicable=True,
                  read_errors=(), unknown_control_ids=(), control_ids=None,
-                 directory=None):
+                 directory=None, scope=None):
     """Build the payload ``scan_hardening`` would return, using the real engine.
 
     The findings come from the real evaluator over the real shipped catalog, so
@@ -150,10 +151,13 @@ def scan_payload(gpos, catalog=None, include_not_applicable=True,
                      for c in controls if c.check_type == "directory-state"}
     findings, counts = evaluate_controls(
         controls, gpos, include_not_applicable=include_not_applicable,
-        directory=directory)
+        directory=directory, scope=scope)
+    scan = provenance(catalog, gpos_scanned=len(gpos),
+                      gpos_unreadable=len(read_errors))
+    if scope is not None:
+        scan["computers_scoped"] = sum(c for c, _ in scope.containers.values())
     return {
-        "scan": provenance(catalog, gpos_scanned=len(gpos),
-                           gpos_unreadable=len(read_errors)),
+        "scan": scan,
         "counts": counts,
         "findings": findings,
         "unscored_control_ids": [c.id for c in controls if not c.scored],
@@ -1017,7 +1021,12 @@ def sample_scan(first_gpo=HOSTILE_NAME):
         snapshot(GUID_C, "Unreadable Sample GPO",
                  links=[GpoLink(target_dn=BASE_DN)],
                  read_error="SMB read failed: STATUS_ACCESS_DENIED"),
-    ], catalog=catalog, read_errors=read_errors, directory={
+    ], catalog=catalog, read_errors=read_errors, scope=Scope(containers={
+        # A small made-up fleet, so the sample shows "Applies to: N of M".
+        f"ou=domain controllers,{BASE_DN}".lower(): (2, 2),
+        f"ou=workstations,{BASE_DN}".lower(): (40, 0),
+        f"ou=servers,{BASE_DN}".lower(): (8, 0),
+    }), directory={
         # One directory-state failure and two passes, so the sample shows
         # what a directory finding looks like.
         "DEVORE-07-UNCONSTRAINED-DELEGATION": {"objects": [{
@@ -1914,3 +1923,28 @@ class TestCatalogTrustFixes:
         finding = evaluate_control(catalog.by_id("DEVORE-08-PRINT-RPCNAMEDPIPE"), [])
         assert finding["result"] == "unknown"
         assert finding["rollout_state"] is None
+
+
+class TestCoverageIsShown:
+
+    def test_a_card_says_how_many_machines_the_setting_reaches(self):
+        payload = sample_scan("Sample Workstation Baseline GPO")
+        finding = next(f for f in payload["findings"]
+                       if f["control_id"] == LM_CONTROL)
+        finding["evidence"]["coverage"] = {"covered": 12, "total": 1450,
+                                           "unit": "computers"}
+        payload["scan"]["computers_scoped"] = 1450
+        document = render_report(payload)
+
+        assert "Applies to:</strong> 12 of 1450 computers" in document
+        assert "Computers scoped" in document
+
+    def test_without_directory_data_the_report_says_so(self, catalog):
+        payload = scan_payload([snapshot(GUID_A, "Any", links=[GpoLink(BASE_DN)])],
+                               catalog=catalog, control_ids=[LM_CONTROL])
+        assert "none read: GPOs judged by their links alone" in \
+            render_report(payload)
+
+    def test_the_sample_shows_coverage(self):
+        document = render_report(sample_scan("Sample Workstation Baseline GPO"))
+        assert "Applies to:</strong>" in document
