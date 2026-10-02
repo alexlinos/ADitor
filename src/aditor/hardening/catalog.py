@@ -142,7 +142,7 @@ STATUS_NEEDS_BASELINE_VALUE = "needs_baseline_value"
 STATUSES = frozenset({STATUS_ACTIVE, STATUS_NEEDS_BASELINE_VALUE})
 
 # What a control means by "nothing sets this key anywhere".
-MISSING_RESULTS = frozenset({"fail", "not_applicable"})
+MISSING_RESULTS = frozenset({"fail", "not_applicable", "unknown"})
 
 ROLLOUT_STATES = frozenset({"not_started", "audit", "enforced"})
 
