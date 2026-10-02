@@ -246,9 +246,14 @@ def _deadline_line(finding: Dict[str, Any], scan_date: str) -> str:
             when = f"{int(parts[2])} {when}"
     except (IndexError, ValueError):
         when = date
+    this_month = bool(scan_date) and date[:7] == scan_date[:7]
     passed = bool(scan_date) and date[:len(scan_date)] <= scan_date[:len(date)]
-    lead = ("Microsoft already changed this default" if passed
-            else "Microsoft changes this default")
+    if this_month and len(date) == 7:
+        lead = "Microsoft changes this default this month"
+    elif passed:
+        lead = "Microsoft already changed this default"
+    else:
+        lead = "Microsoft changes this default"
     return (f'<p class="deadline"><strong>{lead}: {_esc(when)}.</strong> '
             f'{_esc(deadline.get("summary"))} '
             f'{_link(deadline.get("url"), "Microsoft")}</p>')
@@ -556,12 +561,23 @@ def _render_counts(counts: Dict[str, Any],
     kinds = {"fix": "fail", "check": "unknown", "not-covered": "notjudged",
              "good": "pass"}
     cells = []
+    # Each finding counts once, in the first group that lists it, so the tiles
+    # add up to the controls evaluated. A conflict is listed under its verdict
+    # as well; here it's counted there, and named under "Check by hand".
+    counted: set = set()
     for group_id, heading, _intro, section_ids in GROUPS:
-        total = len(_group_findings(grouped, section_ids))
-        parts = " &middot; ".join(
-            f"{len(grouped.get(section_id, []))} "
-            f"{_esc(_TILE_PARTS[section_id][len(grouped.get(section_id, [])) != 1])}"
-            for section_id in section_ids)
+        members = [f for f in _group_findings(grouped, section_ids)
+                   if id(f) not in counted]
+        counted.update(id(f) for f in members)
+        total = len(members)
+
+        def part(section_id: str) -> str:
+            listed = grouped.get(section_id, [])
+            fresh = [f for f in listed if any(f is m for m in members)]
+            words = _TILE_PARTS[section_id][len(listed) != 1]
+            also = "" if len(fresh) == len(listed) else " (also under Fix)"
+            return f"{len(listed)} {_esc(words)}{also}"
+        parts = " &middot; ".join(part(section_id) for section_id in section_ids)
         cells.append(
             f'<li class="tile tile-{kinds[group_id]}">'
             f'<a href="#group-{group_id}">'
@@ -658,6 +674,45 @@ def _next_step(finding: Dict[str, Any], section_id: str) -> str:
     return f"set it to {_esc_value(final)}"
 
 
+#: LmCompatibilityLevel: domain controllers at 5 refuse NTLMv1, so machines
+#: still below 3 (which send it) fail to sign in to them. The catalog's own
+#: IN STAGES caveat; spotted here from the GPO values and their links.
+_LM_CONTROL = "DEVORE-01-NTLM-LMCOMPATIBILITYLEVEL"
+
+
+def _lockout_now(findings: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """Name the GPOs that put DCs at 5 while other machines are below 3."""
+    for finding in findings:
+        if finding.get("control_id") != _LM_CONTROL:
+            continue
+        found = [m for m in (finding.get("evidence") or {}).get("found") or []
+                 if isinstance(m, dict)]
+
+        def number(match: Dict[str, Any]) -> Optional[int]:
+            try:
+                return int(str(match.get("value")), 0)
+            except (TypeError, ValueError):
+                return None
+
+        def on_dcs(match: Dict[str, Any]) -> bool:
+            return any(str(link.get("target_dn") or "").lower().startswith(
+                "ou=domain controllers,") for link in match.get("links") or ()
+                if link.get("link_enabled", True))
+
+        strict = [m for m in found if on_dcs(m) and (number(m) or 0) >= 5]
+        weak = [m for m in found if not on_dcs(m)
+                and number(m) is not None and number(m) < 3]
+        if strict and weak:
+            names = lambda ms: ", ".join(f"'{m.get('gpo_display_name')}' "
+                                         f"({m.get('value')})" for m in ms)
+            return (f"Domain controllers are set to refuse NTLMv1 by "
+                    f"{names(strict)}, while {names(weak)} lets other "
+                    f"machines send it. Those machines can fail to sign in "
+                    f"to the domain controllers, and repeated failures lock "
+                    f"accounts out. Raise them to 3 first.")
+    return None
+
+
 def _render_start_here(grouped: Dict[str, List[Dict[str, Any]]],
                        read_errors: Sequence[Any]) -> str:
     """Where you stand in one line, then the first few things to do.
@@ -675,6 +730,10 @@ def _render_start_here(grouped: Dict[str, List[Dict[str, Any]]],
             f'{len(read_errors)} GPO(s) couldn\'t be read (see above). Fix '
             'that and scan again before relying on the rest.</p>')
     del totals  # the Results tiles above already give these numbers
+    lockout = _lockout_now(_group_findings(grouped, [s for s, _t, _l in SECTIONS]))
+    if lockout:
+        lines.append('<p class="danger"><strong>Lockout risk right now:</strong> '
+                     f'{_esc(lockout)}</p>')
 
     todo: List[Tuple[Dict[str, Any], str]] = []
     listed = set()
@@ -1077,8 +1136,11 @@ def _render_phasing(finding: Dict[str, Any], shown_open: bool = False) -> str:
     caveats = [c for c in (finding.get("caveats") or []) if str(c or "").strip()]
     state = finding.get("rollout_state")
 
-    step1_done = state in ("audit", "enforced")
-    step2_done = state == "enforced"
+    # A tick needs a verdict: an unknown that found a compliant value in the
+    # GPOs it read hasn't shown the step is done everywhere.
+    judged = finding.get("result") in ("pass", "fail")
+    step1_done = judged and state in ("audit", "enforced")
+    step2_done = judged and state == "enforced"
 
     def done(flag: bool) -> str:
         return ' <span class="done">&#10003; Done.</span>' if flag else ""
@@ -1092,9 +1154,9 @@ def _render_phasing(finding: Dict[str, Any], shown_open: bool = False) -> str:
             f'{done(step1_done)}</p>')
         parts.append(
             '<p class="phase-step"><strong>Step 2: only then set it to '
-            f'{_esc_value(final)}.</strong> Don\'t skip step 1: enforcing before '
-            'every device and service account is ready can cause sign-in '
-            f'failures and account lockouts.{done(step2_done)}</p>')
+            f'{_esc_value(final)}.</strong> '
+            f'{_STEP_TWO_TEXT.get(str(finding.get("change_risk")), _STEP_TWO_TEXT[""])}'
+            f'{done(step2_done)}</p>')
     elif final is not None:
         parts.append(
             f'<p class="phase-step"><strong>Set it to {_esc_value(final)}.'
@@ -1127,9 +1189,23 @@ def _render_phasing(finding: Dict[str, Any], shown_open: bool = False) -> str:
     if interim is None and not audit_before and not caveats:
         parts.append(f'<p class="warn">{_PHASING_GAP_NOTE}</p>')
 
+    if not parts:
+        return ""
     return ('<div class="block phasing"><h5>How to roll it out safely</h5>'
             f'{"".join(parts)}</div>')
 
+
+#: Why step 2 waits for step 1, by change risk.
+_STEP_TWO_TEXT = {
+    "logging-only": "",
+    "low": "Low risk, but check a few machines after step 1 first.",
+    "pilot": "Pilot it on a small OU first; it can break some devices or apps.",
+    "can-lock-out": "Don't skip step 1: enforcing before every device and "
+                    "service account is ready can cause sign-in failures and "
+                    "account lockouts.",
+    "": "Don't skip step 1: enforcing before every device and service account "
+        "is ready can cause sign-in failures and account lockouts.",
+}
 
 #: What a one-step change needs before it goes everywhere, by change risk.
 _ONE_STEP_TEXT = {
@@ -1817,6 +1893,8 @@ details.group>summary h2{display:inline}
 details.group>summary::before{content:"\\25B8  ";color:var(--muted)}
 details.group[open]>summary::before{content:"\\25BE  "}
 .method{margin-top:2rem}
+.danger{background:var(--bad-bg);border-left:4px solid var(--bad);
+padding:.5rem .7rem;margin:.4rem 0}
 details.howto>summary{cursor:pointer;font-weight:600}
 .first-step{margin:.3rem 0}
 

@@ -1559,10 +1559,15 @@ class TestShippedCatalogAgainstSynthesizedGpos:
 
         finding = evaluate_control(control_obj, [])
 
+        assert finding["evidence"]["notes"]
+        if control_obj.missing_result == RESULT_UNKNOWN:
+            # The scan can't see what unset means here: no stage either way.
+            assert finding["result"] == RESULT_UNKNOWN
+            assert finding["rollout_state"] is None
+            return
         assert finding["result"] in (RESULT_FAIL, RESULT_NOT_APPLICABLE)
         assert finding["rollout_state"] == STATE_NOT_STARTED
         assert finding["evidence"]["source"] == EVIDENCE_SOURCE_NOT_CONFIGURED
-        assert finding["evidence"]["notes"]
 
     @pytest.mark.parametrize("control_id", [
         c.id for c in load_catalog().scored_controls if not c.gpo_deliverable])
@@ -2571,6 +2576,7 @@ class TestAbsenceFromGpoIsNotAlwaysEvidence:
     def test_an_unreadable_gpo_is_still_disclosed_on_an_unknown_finding(
             self, control_obj):
         gpos = [GpoSnapshot(dn=gpo_dn(GUID_ENFORCED), display_name="Broken",
+                            links=(GpoLink(DC_OU),),
                             read_error="SYSVOL read failed")]
 
         finding = evaluate_control(control_obj, gpos)
@@ -2633,7 +2639,7 @@ class TestUnknownFindingsInTheCounts:
         assert all(f["result"] in RESULTS for f in findings)
         assert sum(counts[result] for result in RESULTS) == counts["total"]
 
-    def test_the_shipped_catalog_on_an_empty_domain_reports_two_unknowns(self):
+    def test_the_shipped_catalog_on_an_empty_domain_reports_three_unknowns(self):
         """Pins the blast radius of the change against a real catalog."""
         catalog = load_catalog()
 
@@ -2641,7 +2647,8 @@ class TestUnknownFindingsInTheCounts:
                                              directory=clean_directory(catalog),
                                              include_not_applicable=True)
 
-        assert counts[RESULT_UNKNOWN] == 2
+        # The two direct-write DC settings, and the Print Spooler value.
+        assert counts[RESULT_UNKNOWN] == 3
         assert counts[RESULT_ERROR] == 0
         assert counts["total"] == len(catalog.controls)
 

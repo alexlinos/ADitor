@@ -1,5 +1,5 @@
 {
-  "catalog_version": "2026.10.1",
+  "catalog_version": "2026.10.2",
   "spec": "docs/HARDENING_CATALOG.md",
   "baseline": {
     "primary_source": "Jerry Devore, \"Active Directory Hardening Series\", Microsoft Core Infrastructure and Security Blog (series verified Aug 2026).",
@@ -47,7 +47,7 @@
         "IN STAGES: don't set domain controllers to 5 until every device is at 3 or higher. At 5, a DC treats NTLMv1 attempts as bad passwords, which locks accounts out (Devore saw 46 failed logons from one NTLMv1 SMB connection).",
         "Levels 0-3 control what a client sends; levels 4-5 control what a server or DC accepts.",
         "TATTOOING: the value lives outside HKLM\\SOFTWARE\\Policies, so if you later set the policy back to 'Not Defined', the old value stays on each device and has to be cleared there.",
-        "Credential Guard disables NTLMv1 by itself and ignores this setting. No reboot is required."
+        "Credential Guard stops a machine using NTLMv1 with signed-in users' credentials, whatever this setting says. What servers and domain controllers accept is still decided by this setting. Changing it needs no reboot."
       ],
       "audit_before_enforce": "Look for event 4624 with LmPackageName = 'NTLM V1' on member servers and endpoints, ignoring ANONYMOUS LOGON. Event 4776 on DCs doesn't record the NTLM version, so it can't be used for this."
     },
@@ -230,7 +230,7 @@
       "missing_note": null,
       "id": "DEVORE-04-SPN-ACCOUNTS-AES",
       "title": "Service accounts with an SPN state AES in msDS-SupportedEncryptionTypes",
-      "why_it_matters": "A service account without AES gets RC4 tickets, the easiest kind to crack offline (Kerberoasting).",
+      "why_it_matters": "A service account without AES gets RC4 tickets, which crack offline (Kerberoasting) much faster than AES ones. AES slows cracking; a long password or a gMSA is what stops it.",
       "change_risk": "pilot",
       "microsoft_deadline": {
         "date": "2026-04-14",
@@ -282,9 +282,9 @@
       "caveats": [
         "Devore gives the setting names (Never / When supported / Always) but not the numbers. The 0/1/2 mapping is the widely used one from KB4034879; confirm it against a baseline source.",
         "Unset means off. It only affects SASL binds over TLS. Load balancers that terminate or bridge TLS break channel binding, and a load-balanced name (VIP FQDN) must be in the DC certificate's SAN.",
-        "AUDIT FIRST: Server 2019 and later log event 3075; Server 2016 and earlier only log 3039, when a bind is rejected. Both need '16 LDAP Interface Events' at 2 or higher."
+        "AUDIT FIRST: with diagnostic logging ('16 LDAP Interface Events') at 2 or higher, event 3074 records a client whose token would fail validation and 3075 a client that sent no token. Both are logged on Windows Server 2022 from the November 2023 update and Server 2019 from the January 2024 update. Event 3039 records a bind that actually failed. Source: Microsoft KB4520412, https://support.microsoft.com/en-us/topic/2020-2023-and-2024-ldap-channel-binding-and-ldap-signing-requirements-for-windows-kb4520412-ef185fb8-00f7-167d-744c-f299a66fc00a"
       ],
-      "audit_before_enforce": "Event 3075 (2019+) or 3039 (2016 and earlier) in the Directory Service log."
+      "audit_before_enforce": "Events 3074 and 3075 in the Directory Service log (Server 2019 and 2022 with the 2023–24 updates, diagnostic logging at 2 or higher). Event 3039 means a bind already failed."
     },
     {
       "id": "DEVORE-06-SMB-CLIENT-SIGNING-ALWAYS",
@@ -476,7 +476,7 @@
       "value_source": "Devore Part 7: accounts trusted for delegation to any service (userAccountControl TRUSTED_FOR_DELEGATION, 0x80000) should be moved to constrained or resource-based constrained delegation. Writable domain controllers carry this flag by design and are excluded, recognised by their account type (a computer account with SERVER_TRUST_ACCOUNT, 0x2000), not by primary group.",
       "remediation": "For each listed account, switch to constrained delegation or resource-based constrained delegation (RBCD) for only the services it needs, then turn off 'Trust this computer/user for delegation to any service'.",
       "caveats": [
-        "Changing delegation can break the services that depend on it. Find out what each listed account delegates to before changing it, and change one at a time.",
+        "IN STAGES: changing delegation can break the services that depend on it. Find out what each listed account delegates to before changing it, and change one at a time.",
         "Only writable domain controllers are excluded. Read-only domain controllers don't carry this flag by design, so one that has it is listed, as is any user account, whatever its primary group.",
         "Disabled accounts are listed and marked: re-enabling one brings the exposure back.",
         "A pass means nothing the bind account can read matched. AD silently leaves out objects and attributes an account isn't allowed to read, so run the scan with an account that can read the whole domain (an ordinary domain user can by default); a domain whose permissions were tightened can hide findings from a weaker account."
@@ -575,7 +575,7 @@
       "caveats": [
         "MINIMUM, NOT EXACT LEVEL: 1 or higher means some in-domain auditing is on, and 0 fails as auditing turned off. The policy has five options (Disable and four Enable scopes) and Microsoft doesn't publish their numbers, so which one is set is shown in the evidence, not judged. 'Enable all' is the one that records everything.",
         "INFERRED, NOT CITED: Microsoft doesn't publish that 'Disable' is stored as 0 and the four Enable options as 1 or higher. ADitor infers it from Microsoft's statement that the unset policy behaves as 'Disable'. 'Where the value comes from' explains why checking only a minimum is safe on that basis; the exact level is never judged.",
-        "WATCH OUT: this is an audit policy. Microsoft says it doesn't block any traffic; the deny options belong to DEVORE-08-NTLM-BLOCK-INDOMAIN, which isn't checked yet. No value here means NTLM is blocked.",
+        "WATCH OUT: this is an audit policy. Microsoft says it doesn't block any traffic; the deny options belong to DEVORE-08-NTLM-BLOCK-INDOMAIN, which isn't checked yet. No value of this setting blocks NTLM.",
         "Rollout state 'enforced' here means this audit policy's target is met, not that in-domain NTLM is blocked. Blocking is covered by DEVORE-08-NTLM-BLOCK-INDOMAIN.",
         "Logs events 8004, 8005 and 8006."
       ],
@@ -694,8 +694,8 @@
       "interim_expected": null,
       "final_expected": 2,
       "presence_rollout_state": null,
-      "missing_result": "not_applicable",
-      "missing_note": "This value only matters where RPC over named pipes has to stay. The preferred setup is RPC over TCP, where it's correctly left unset, so its absence is reported as not applicable, not as a failure.",
+      "missing_result": "unknown",
+      "missing_note": "No GPO sets this value. That's correct if the print spooler uses RPC over TCP, which this scan can't see, so it's reported as unknown. Check how the spooler's RPC listener is configured; if named pipes are in use, set this value to 2.",
       "value_source": "Devore Part 8 gives 0x2 (2 decimal).",
       "remediation": "Prefer RPC over TCP. Where named pipes have to stay, set 'Configure RPC connection settings' / RpcNamedPipeAuthentication = 2 so the named-pipe listener doesn't fall back to unauthenticated NTLM.",
       "caveats": [

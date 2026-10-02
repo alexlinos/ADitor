@@ -244,7 +244,7 @@ def unreadable_scan(catalog):
     return scan_payload([
         snapshot(GUID_A, "Readable GPO", entries=[template_entry(LM_KEY, 5)],
                  links=[GpoLink(target_dn=BASE_DN)]),
-        snapshot(GUID_C, HOSTILE_NAME,
+        snapshot(GUID_C, HOSTILE_NAME, links=[GpoLink(target_dn=BASE_DN)],
                  read_error="SMB read failed: STATUS_ACCESS_DENIED"),
     ], catalog=catalog, read_errors=read_errors)
 
@@ -906,16 +906,22 @@ class TestProvenance:
             summary = document[document.index('id="summary"'):
                                document.index('id="start-here"')]
             grouped = group_findings(payload["findings"])
+            counted, total = set(), 0
             for group_id, _h, _i, sections in GROUPS:
-                distinct = {id(f) for s in sections for f in grouped[s]}
+                # Each finding counts once, in the first group listing it.
+                distinct = {id(f) for s in sections for f in grouped[s]} - counted
+                counted |= distinct
                 tile = re.search(rf'href="#group-{group_id}"><span '
                                  rf'class="tile-n">(\d+)<', summary)
                 assert tile, group_id
                 assert int(tile.group(1)) == len(distinct), group_id
+                total += int(tile.group(1))
                 cell = summary[tile.start():summary.index("</li>", tile.start())]
                 for section_id in sections:
                     assert f">{len(grouped[section_id])} " in cell.replace(
                         "&middot; ", ">"), section_id
+            # The tiles add up to the findings rendered: an auditor adds them.
+            assert total == len(payload["findings"])
 
     def test_unknown_control_ids_are_reported_not_dropped(self, catalog):
         payload = scan_payload([], catalog=catalog,
@@ -1462,6 +1468,7 @@ class TestUnknownVerdictThatIsNotAReadFailure:
             [snapshot(GUID_A, "Some Unrelated Policy",
                       links=[GpoLink(target_dn=BASE_DN)]),
              snapshot(GUID_C, "Unreadable Policy",
+                      links=[GpoLink(target_dn=BASE_DN)],
                       read_error="STATUS_ACCESS_DENIED")],
             catalog=catalog,
             control_ids=[DIAG_CONTROL, CLIENT_SIGNING_CONTROL])
@@ -1728,18 +1735,21 @@ class TestGroups:
             for section_id in sections:
                 assert starts[index] < positions[section_id] < end, section_id
 
-    def test_a_conflict_is_counted_once_in_its_group(self, mixed_scan):
-        """It is listed under Failures and under Conflicts; the Fix and Check
-        tiles each count it, but neither counts it twice."""
+    def test_a_conflict_is_counted_once_across_the_tiles(self, mixed_scan):
+        """It is listed under Failures and under Conflicts. It counts in the
+        Fix tile only, and the Check tile names it as also under Fix."""
         summary = render_report(mixed_scan)
         summary = summary[summary.index('id="summary"'):
                           summary.index('id="start-here"')]
         grouped = group_findings(mixed_scan["findings"])
+        fix = {id(f) for s in (SECTION_FAIL, SECTION_OPPORTUNITIES)
+               for f in grouped[s]}
         check = {id(f) for s in (SECTION_UNKNOWN, SECTION_CONFLICTS)
-                 for f in grouped[s]}
+                 for f in grouped[s]} - fix
         tile = re.search(r'href="#group-check"><span class="tile-n">(\d+)<',
                          summary)
         assert int(tile.group(1)) == len(check)
+        assert "(also under Fix)" in summary
 
 
 class TestLessToReadUpFront:
@@ -1810,6 +1820,10 @@ class TestMicrosoftDeadlines:
         assert "Microsoft changes this default: October 2026." in card
         assert "support.microsoft.com" in card
 
+    def test_a_deadline_in_the_scan_month_says_this_month(self):
+        card = self.card("2026-10-02T12:00:00+00:00")
+        assert "Microsoft changes this default this month: October 2026." in card
+
     def test_a_passed_deadline_says_it_already_happened(self):
         card = self.card("2026-11-02T12:00:00+00:00")
         assert "Microsoft already changed this default: October 2026." in card
@@ -1836,3 +1850,67 @@ class TestUnknownBecauseAGpoWasUnread:
         assert "Before enforcing" not in opened
         assert "AUDIT FIRST" not in opened
         assert "catalog doesn't say what to check" not in card
+
+
+class TestTrustFixes:
+    """Second review round: things that would make a reader stop trusting it."""
+
+    @pytest.fixture
+    def document(self):
+        return render_report(sample_scan("Sample Workstation Baseline GPO"))
+
+    def card(self, document, control_id):
+        card = document[document.index(f'id="{control_id.lower()}"'):]
+        return card[:card.index("</article>")]
+
+    def test_dcs_refusing_ntlmv1_while_clients_send_it_is_flagged_now(
+            self, document):
+        start = start_here_of(document)
+        assert "Lockout risk right now" in start
+        assert "Sample Override GPO" in start and "Raise them to 3 first" in start
+
+    def test_no_lockout_banner_without_the_split(self, catalog):
+        payload = scan_payload([
+            snapshot(GUID_A, "All at 5", entries=[template_entry(LM_KEY, 5)],
+                     links=[GpoLink(target_dn=BASE_DN)])],
+            catalog=catalog, control_ids=[LM_CONTROL])
+        assert "Lockout risk" not in render_report(payload)
+
+    def test_an_unknown_gets_no_done_ticks(self, document):
+        assert "Done." not in self.card(document, "DEVORE-03-LDAP-SERVER-SIGNING")
+
+    def test_every_interim_step_shows_its_effect(self, document, catalog):
+        effect = catalog.by_id("DEVORE-03-LDAP-CLIENT-SIGNING").interim_effect
+        assert html.escape(effect, quote=True) in self.card(
+            document, "DEVORE-03-LDAP-CLIENT-SIGNING")
+
+    def test_a_low_risk_step_two_does_not_threaten_lockouts(self, document):
+        card = self.card(document, "DEVORE-03-LDAP-CLIENT-SIGNING")
+        assert "account lockouts" not in card
+        assert "Reported as an error" not in card
+
+    def test_delegation_keeps_its_warning_open_and_no_empty_heading(
+            self, document):
+        card = self.card(document, "DEVORE-07-UNCONSTRAINED-DELEGATION")
+        opened = card[:card.index("How to fix it")]
+        assert "IN STAGES: changing delegation can break" in opened
+        assert "How to roll it out safely</h5></div>" not in card
+
+    def test_the_tiles_add_up_to_the_controls_evaluated(self, document):
+        tiles = [int(n) for n in re.findall(r'class="tile-n">(\d+)<', document)]
+        evaluated = int(re.search(r"(\d+) controls evaluated", document).group(1))
+        assert sum(tiles) == evaluated
+
+
+class TestCatalogTrustFixes:
+
+    def test_the_in_domain_audit_caveat_does_not_say_it_blocks(self, catalog):
+        text = " ".join(catalog.by_id("DEVORE-08-NTLM-AUDIT-INDOMAIN").caveats)
+        assert "means NTLM is blocked" not in text
+        assert "No value of this setting blocks NTLM" in text
+
+    def test_an_unset_spooler_value_is_unknown_not_an_assumed_pass(self, catalog):
+        from aditor.hardening.evaluator import evaluate_control
+        finding = evaluate_control(catalog.by_id("DEVORE-08-PRINT-RPCNAMEDPIPE"), [])
+        assert finding["result"] == "unknown"
+        assert finding["rollout_state"] is None

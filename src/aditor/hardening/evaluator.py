@@ -257,8 +257,8 @@ _UNREADABLE_OS_DEFAULT_NOTE = (
     "could not be read at all, so 'nothing sets this key' is unproven. The "
     "documented Windows default ({value!r}) is therefore NOT applied: an "
     "unreadable GPO could set this value to anything, including a value below "
-    "the default. Reported as an error rather than a pass — fix the read failures "
-    "below and re-scan."
+    "the default. Reported as unknown rather than a pass: fix the read failures "
+    "and scan again."
 )
 
 
@@ -758,7 +758,9 @@ def evaluate_control(control: Control,
     if control.operator == "absent":
         return _absent_finding(control, matches, gpos, extra_notes)
     if not matches:
-        return _missing_finding(control, gpos, extra_notes)
+        # Only GPOs that apply can be hiding the key: an unreadable GPO that
+        # is unlinked can't make "nothing sets this" unproven.
+        return _missing_finding(control, reaching, extra_notes)
 
     try:
         assessed = [dict(match, rollout_state=_state_for(control, match["value"]))
@@ -1204,7 +1206,7 @@ def _directory_finding(control: Control,
         finding["error"] = str(error)
         finding["evidence"]["source"] = EVIDENCE_SOURCE_UNKNOWN
         finding["evidence"]["notes"].append(
-            f"Could not evaluate: {error}. Reported as an error rather than a "
+            f"Could not evaluate: {error}. Reported as unknown rather than a "
             f"pass or a fail.")
     elif objects:
         finding["result"] = RESULT_FAIL
@@ -1265,8 +1267,14 @@ def _missing_finding(control: Control, gpos: Sequence[GpoSnapshot],
             return _incomplete_scan_finding(control, gpos, unreadable,
                                             extra_notes)
         return _os_default_finding(control, gpos, note, extra_notes)
-    return _finding(control, control.missing_result or RESULT_FAIL,
-                    STATE_NOT_STARTED, [], gpos,
+    result = control.missing_result or RESULT_FAIL
+    if result == RESULT_UNKNOWN:
+        # The scan can't see what an unset value means here (the missing_note
+        # says why), so no rollout step was reached or missed.
+        return _finding(control, RESULT_UNKNOWN, None, [], gpos,
+                        notes=[note] + list(extra_notes),
+                        evidence_source=EVIDENCE_SOURCE_UNKNOWN)
+    return _finding(control, result, STATE_NOT_STARTED, [], gpos,
                     notes=[note] + list(extra_notes))
 
 
@@ -1506,7 +1514,7 @@ def _error_finding(control: Control, message: str,
     apply, rather than a bare ``None`` that hides what was at stake.
     """
     notes = list(notes or [])
-    notes.append(f"Could not evaluate: {message}. Reported as an error rather "
+    notes.append(f"Could not evaluate: {message}. Reported as unknown rather "
                  f"than a pass or a fail.")
     unreadable = _unreadable_gpos(gpos)
     if unreadable:
@@ -1528,6 +1536,7 @@ def _error_finding(control: Control, message: str,
             "expected": {
                 "operator": control.operator,
                 "interim": control.interim_expected,
+                "interim_effect": control.interim_effect,
                 "final": control.final_expected,
                 "os_default": control.os_default,
                 "value_source": control.value_source,

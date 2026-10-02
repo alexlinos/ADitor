@@ -770,12 +770,15 @@ class TestCitationHonesty:
             assert control.missing_note, control.id
 
     def test_both_missing_result_semantics_are_exercised(self, catalog):
-        """A hardening gap fails; a conditional setting is not_applicable."""
+        """A hardening gap fails; a setting whose unset meaning the scan can't
+        see is unknown. The Print Spooler value used to be not_applicable on the
+        assumption that RPC over TCP is in use, which the scan never checks."""
         semantics = {c.missing_result for c in gpo_controls(catalog)}
 
-        assert semantics == MISSING_RESULTS
+        assert semantics <= MISSING_RESULTS
+        assert {"fail", "unknown"} <= semantics
         assert catalog.by_id("DEVORE-08-PRINT-RPCNAMEDPIPE").missing_result \
-            == "not_applicable"
+            == "unknown"
 
     def test_no_scored_control_accepts_a_value_that_switches_it_off(self, catalog):
         """Acceptance 5: a bare ``present`` passes a setting configured to 0.
