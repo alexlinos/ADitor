@@ -501,6 +501,9 @@ def _render_provenance(scan: Dict[str, Any], counts: Dict[str, Any]) -> str:
         ("Domain", _esc(scan.get("domain"))),
         ("Base DN", f'<code>{_esc(scan.get("base_dn"))}</code>'),
         ("GPOs scanned", _esc(scan.get("gpos_scanned"))),
+        ("Computers scoped",
+         _esc(scan.get("computers_scoped")) if scan.get("computers_scoped")
+         is not None else "none read: GPOs judged by their links alone"),
         ("GPOs unreadable",
          f'<strong class="bad">{_esc(unreadable)}</strong>' if unreadable
          else _esc(scan.get("gpos_unreadable", 0))),
@@ -519,6 +522,9 @@ def _render_provenance(scan: Dict[str, Any], counts: Dict[str, Any]) -> str:
         pairs.append(("Pending value sources",
                       _esc(baseline.get("pending_value_source"))))
 
+    scope_notes = scan.get("scope_notes") or []
+    if scope_notes:
+        pairs.append(("Scoping notes", _esc(" ".join(map(str, scope_notes)))))
     catalog_notes = _notes_list(scan.get("catalog_notes"), "notes small")
     notes_block = (f'<details class="prov-notes"><summary>Catalog notes</summary>'
                    f'{catalog_notes}</details>' if catalog_notes else "")
@@ -1389,11 +1395,19 @@ def _render_glance(finding: Dict[str, Any]) -> str:
         else:
             found_text = _esc(_SOURCE_LABELS.get(str(evidence.get("source")),
                                                  "no value found"))
+    coverage = evidence.get("coverage")
+    reach = ""
+    if isinstance(coverage, dict) and coverage.get("total"):
+        short = coverage.get("covered") != coverage.get("total")
+        reach = (f'<span class="{"bad" if short else ""}"><strong>Applies '
+                 f'to:</strong> {_esc(coverage.get("covered"))} of '
+                 f'{_esc(coverage.get("total"))} {_esc(coverage.get("unit"))}'
+                 '</span>')
     return (
         '<p class="glance">'
         f'<span><strong>Found:</strong> {found_text}</span>'
         f'<span><strong>Target:</strong> {_target_text(evidence.get("expected"))}'
-        '</span></p>')
+        f'</span>{reach}</p>')
 
 
 def _render_evidence(finding: Dict[str, Any], notes_shown: bool) -> str:

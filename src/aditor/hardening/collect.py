@@ -47,7 +47,7 @@ from .catalog import (
     Control,
     load_catalog,
 )
-from .evaluator import GpoLink, GpoSnapshot, evaluate_controls
+from .evaluator import GpoLink, GpoSnapshot, Scope, evaluate_controls
 
 # The GptTmpl.inf section holding registry-backed security options.
 _REGISTRY_VALUES_SECTION = "Registry Values"
@@ -58,6 +58,7 @@ _MACHINE_REGISTRY_POL = r"machine\registry.pol"
 # checks read (Microsoft's documented values).
 _UAC_ACCOUNTDISABLE = 0x2
 _UAC_SERVER_TRUST_ACCOUNT = 0x2000  # a writable domain controller's account
+_UAC_PARTIAL_SECRETS_ACCOUNT = 0x04000000  # a read-only domain controller
 _UAC_TRUSTED_FOR_DELEGATION = 0x80000
 _ETYPE_RC4 = 0x4
 _ETYPE_AES = 0x8 | 0x10  # AES128-CTS-HMAC-SHA1-96 | AES256-CTS-HMAC-SHA1-96
@@ -153,24 +154,31 @@ class Scanner:
                 "operation": operation,
             }
 
+        self.scope_notes: List[str] = []
+        self.blocked_containers: set = set()
         try:
             links_by_guid = self._links_by_gpo_guid()
             snapshots, read_errors = self._read_gpo_snapshots(links_by_guid)
         except Exception as exc:
             raise GpoReadFailure(exc) from exc
+        scope = self._read_scope()
         directory = self._read_directory_state(controls)
 
         findings, counts = evaluate_controls(
             controls, snapshots, include_not_applicable=include_not_applicable,
-            directory=directory)
+            directory=directory, scope=scope)
 
         log_ldap_operation(operation, self.ldap.ad_config.base_dn, True,
                            f"Evaluated {counts['total']} controls against "
                            f"{len(snapshots)} GPOs")
 
+        provenance = self._provenance(catalog, snapshots, read_errors,
+                                      include_not_applicable)
+        provenance["computers_scoped"] = (
+            sum(c for c, _dc in scope.containers.values()) if scope else None)
+        provenance["scope_notes"] = list(self.scope_notes)
         return {
-            "scan": self._provenance(catalog, snapshots, read_errors,
-                                     include_not_applicable),
+            "scan": provenance,
             "counts": counts,
             "findings": findings,
             "unscored_control_ids": [c.id for c in controls if not c.scored],
@@ -216,37 +224,46 @@ class Scanner:
         """
         links: Dict[str, List[GpoLink]] = {}
         base_dn = self.ldap.ad_config.base_dn
+        # gPOptions too: an OU with Block Inheritance and no links of its own
+        # still stops inheritance, and has no gPLink to find it by.
         results = list(self.ldap.search(
             search_base=base_dn,
-            search_filter="(gPLink=*)",
+            search_filter="(|(gPLink=*)(gPOptions=*))",
             attributes=["gPLink", "gPOptions", "distinguishedName"],
             search_scope=ldap3.SUBTREE,
         ) or [])
-        # Site links live in the Configuration partition. Without them a GPO
-        # linked only to a site would look unlinked and its settings uncounted.
-        # ponytail: assumes the scanned domain is the forest root; in a child
-        # domain this search finds nothing and site-linked GPOs stay uncounted.
+        # Site links live in the forest's Configuration partition. Without
+        # them a GPO linked only to a site would look unlinked.
+        forest_root = self._forest_root_dn() or base_dn
         try:
             results += list(self.ldap.search(
-                search_base=f"CN=Sites,CN=Configuration,{base_dn}",
+                search_base=f"CN=Sites,CN=Configuration,{forest_root}",
                 search_filter="(gPLink=*)",
                 attributes=["gPLink", "gPOptions", "distinguishedName"],
                 search_scope=ldap3.SUBTREE,
             ) or [])
-        except Exception:  # noqa: BLE001 - optional; missing sites is not fatal
-            pass
+        except Exception as exc:  # noqa: BLE001 - optional, but say so
+            self.scope_notes.append(
+                f"Links to AD sites couldn't be read ({exc}), so a GPO linked "
+                f"only to a site is reported as unlinked.")
         seen = set()
         for entry in results:
             attributes = entry.get("attributes", {}) or {}
             target_dn = entry.get("dn") or _attr(attributes, "distinguishedName", "")
-            try:
-                block_inheritance = bool(int(_attr(attributes, "gPOptions", 0)) & 1)
-            except (TypeError, ValueError):
-                block_inheritance = False
+            block_inheritance = bool(_as_int(_attr(attributes, "gPOptions", 0)) & 1)
+            if block_inheritance:
+                self.blocked_containers.add(_norm_dn(target_dn))
 
             for link in parse_gp_link(_attr(attributes, "gPLink", "")):
                 guid = (link.get("guid") or "").strip("{}").lower()
                 if not guid or (guid, target_dn.lower()) in seen:
+                    continue
+                # A site can link another domain's GPO. Default Domain Policy
+                # and Default Domain Controllers Policy have the same GUID in
+                # every domain, so keying on GUID alone would credit this
+                # domain's copy with the other domain's link.
+                gpo_dn = str(link.get("path") or "").split("://", 1)[-1]
+                if gpo_dn and not _within(gpo_dn, base_dn):
                     continue
                 seen.add((guid, target_dn.lower()))
                 links.setdefault(guid, []).append(GpoLink(
@@ -256,6 +273,40 @@ class Scanner:
                     block_inheritance=block_inheritance,
                 ))
         return links
+
+    def _read_scope(self) -> Optional[Scope]:
+        """Every enabled computer's container, and which are domain controllers.
+
+        Read once, by account type: a DC is a computer with SERVER_TRUST_ACCOUNT
+        (writable) or PARTIAL_SECRETS_ACCOUNT (read-only), wherever it sits.
+        ``None`` when the read fails or finds nothing, so evaluation falls back
+        to judging GPOs by their links alone.
+        """
+        try:
+            entries = self._search("(objectCategory=computer)",
+                                   ["userAccountControl"])
+        except Exception as exc:  # noqa: BLE001 - fall back, and say so
+            self.scope_notes.append(
+                f"Computer accounts couldn't be read ({exc}), so each GPO is "
+                f"judged by its links, not by the computers it reaches.")
+            return None
+        containers: Dict[str, List[int]] = {}
+        for entry in entries:
+            dn = _norm_dn(entry.get("dn") if isinstance(entry, dict) else "")
+            if "," not in dn:
+                continue
+            uac = _as_int(_attr(entry.get("attributes", {}) or {},
+                                "userAccountControl"))
+            if uac & _UAC_ACCOUNTDISABLE:
+                continue
+            counts = containers.setdefault(dn.split(",", 1)[1], [0, 0])
+            counts[0] += 1
+            if uac & (_UAC_SERVER_TRUST_ACCOUNT | _UAC_PARTIAL_SECRETS_ACCOUNT):
+                counts[1] += 1
+        if not containers:
+            return None
+        return Scope(containers={dn: (c[0], c[1]) for dn, c in containers.items()},
+                     blocked=frozenset(self.blocked_containers))
 
     def _read_gpo_snapshots(self, links_by_guid: Dict[str, List[GpoLink]]
                             ) -> Tuple[List[GpoSnapshot], List[Dict[str, str]]]:
