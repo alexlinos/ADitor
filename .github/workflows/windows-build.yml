@@ -66,6 +66,23 @@ jobs:
             }
           }
 
+      # The NTLMv1 export script can't be run anywhere else: run it on this
+      # machine's own logs with Windows PowerShell 5.1, as an admin would, and
+      # check the built exe reads what it writes.
+      - name: NTLMv1 export script runs and its CSV parses
+        shell: pwsh
+        run: |
+          dist\aditor-cli.exe ntlm-script | Out-File -Encoding ascii export.ps1
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File export.ps1
+          if (-not (Test-Path ntlmv1-evidence.csv)) { throw "the script wrote no CSV" }
+          Get-Content ntlmv1-evidence.csv -TotalCount 8
+          dist\aditor-cli.exe ntlm-check ntlmv1-evidence.csv
+          if ($LASTEXITCODE -eq 2) { throw "ntlm-check could not read the export" }
+          if (-not (Select-String -Path ntlmv1-evidence.csv -Pattern '"log-oldest"' -Quiet)) {
+            throw "the script didn't read this machine's Security log"
+          }
+          $global:LASTEXITCODE = 0
+
       - uses: actions/upload-artifact@v7
         id: upload
         with:
