@@ -736,7 +736,15 @@ def _render_start_here(grouped: Dict[str, List[Dict[str, Any]]],
             f'{len(read_errors)} GPO(s) couldn\'t be read (see above). Fix '
             'that and scan again before relying on the rest.</p>')
     del totals  # the Results tiles above already give these numbers
-    lockout = _lockout_now(_group_findings(grouped, [s for s, _t, _l in SECTIONS]))
+    every = _group_findings(grouped, [s for s, _t, _l in SECTIONS])
+    for finding in every:
+        evidence = finding.get("ntlmv1_evidence")
+        if isinstance(evidence, dict) and evidence.get("verdict") == "blocked":
+            lines.append('<p class="danger"><strong>Still using NTLMv1:</strong> '
+                         f'{_esc(evidence.get("summary"))} See '
+                         '<a href="#devore-01-ntlm-lmcompatibilitylevel">the '
+                         'NTLMv2 card</a>.</p>')
+    lockout = _lockout_now(every)
     if lockout:
         lines.append('<p class="danger"><strong>Lockout risk right now:</strong> '
                      f'{_esc(lockout)}</p>')
@@ -1249,6 +1257,53 @@ def _render_first_step(finding: Dict[str, Any], section_id: str) -> str:
     return f'<div class="block first">{"".join(parts)}</div>'
 
 
+#: How many NTLMv1 sources the card lists before saying how many more.
+_NTLM_SOURCES_SHOWN = 15
+_NTLM_VERDICT_CSS = {"blocked": "danger", "not-yet": "warn", "clear": "ok-banner"}
+
+
+def _render_ntlm_evidence(finding: Dict[str, Any]) -> str:
+    """Who still uses NTLMv1, from an exported event log, on the NTLMv2 card."""
+    if finding.get("control_id") != _LM_CONTROL:
+        return ""
+    evidence = finding.get("ntlmv1_evidence")
+    if not isinstance(evidence, dict):
+        return ('<div class="block ntlm-evidence"><h5>Who still uses NTLMv1?'
+                '</h5><p>This scan reads Group Policy, not event logs. To see '
+                'which machines and accounts would break, run '
+                '<code>aditor-cli ntlm-script &gt; export.ps1</code>, list your '
+                'domain controllers and servers in it, run it (read-only; '
+                'Event Log Readers is enough), then scan again with '
+                '<code>--ntlm-evidence ntlmv1-evidence.csv</code>.</p></div>')
+    sources = [s for s in evidence.get("sources") or [] if isinstance(s, dict)]
+    rows = "".join(
+        f'<tr><td>{_esc(s.get("domain"))}\\{_esc(s.get("account"))}</td>'
+        f'<td>{_esc(s.get("client") or s.get("client_ip"))}</td>'
+        f'<td>{_esc(s.get("server"))}</td><td class="val">{_esc(s.get("count"))}</td>'
+        f'<td>{_esc(friendly_time(s.get("last")) if s.get("last") else None)}</td>'
+        f'<td>{_esc(s.get("via"))}</td></tr>'
+        for s in sources[:_NTLM_SOURCES_SHOWN])
+    more = len(sources) - _NTLM_SOURCES_SHOWN
+    table = (_scrollable(
+        '<table class="grid"><thead><tr><th>Account</th><th>From</th>'
+        '<th>To</th><th>Times</th><th>Last seen</th><th>Seen in</th></tr>'
+        f'</thead><tbody>{rows}</tbody></table>')
+        + (f'<p class="small muted">and {more} more in the export.</p>'
+           if more > 0 else "")) if sources else ""
+    hosts = "".join(
+        f'<li>{_esc(h.get("host"))}: '
+        + ("couldn't be read" if h.get("error") else
+           f'{_esc(h.get("days_covered"), "?")} days of logs, logon auditing '
+           f'{"on" if h.get("logon_auditing") else "<strong>not seen</strong>"}')
+        + '</li>' for h in evidence.get("hosts") or [] if isinstance(h, dict))
+    css = _NTLM_VERDICT_CSS.get(str(evidence.get("verdict")), "warn")
+    return ('<div class="block ntlm-evidence"><h5>Who still uses NTLMv1?</h5>'
+            f'<p class="{css}">{_esc(evidence.get("summary"))}</p>{table}'
+            f'<details class="more-warnings"><summary>Hosts in the export '
+            f'({len(evidence.get("hosts") or [])})</summary><ul class="notes">'
+            f'{hosts}</ul></details></div>')
+
+
 def _render_source(finding: Dict[str, Any]) -> str:
     source = finding.get("source")
     if not isinstance(source, dict):
@@ -1478,6 +1533,7 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
         body.append(_render_unknown_reason(finding))
         notes_shown = True
     body.append(_render_conflict(finding))
+    body.append(_render_ntlm_evidence(finding))
     if section_id in (SECTION_FAIL, SECTION_UNKNOWN, SECTION_OPPORTUNITIES):
         body.append(_render_first_step(finding, section_id))
         body.append('<details class="block howto"><summary>How to fix it, '
@@ -1982,6 +2038,11 @@ def render_report(scan_result: Dict[str, Any]) -> str:
     shared = [c for c, n in seen.items() if n > 1 and not _is_flagged(c)]
     findings = [dict(f, caveats=[c for c in (f.get("caveats") or [])
                                  if c not in shared]) for f in findings]
+    evidence = scan_result.get("ntlmv1_evidence")
+    if isinstance(evidence, dict):
+        findings = [dict(f, ntlmv1_evidence=evidence)
+                    if f.get("control_id") == _LM_CONTROL else f
+                    for f in findings]
     _SCAN_DATE["date"] = str(scan.get("timestamp") or "")[:10]
 
     grouped = group_findings(findings)

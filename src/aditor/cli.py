@@ -2,12 +2,16 @@
 
 ::
 
-    aditor scan [--config PATH] [--out DIR]
+    aditor scan [--config PATH] [--out DIR] [--ntlm-evidence CSV ...]
     aditor diff OLD NEW
+    aditor ntlm-script
+    aditor ntlm-check CSV [CSV ...]
 
 ``scan`` writes one dated snapshot folder (``scan.json`` + ``report.html``)
 under ``--out``. ``diff`` compares two scans, given as ``scan.json`` files or
-snapshot folders.
+snapshot folders. ``ntlm-script`` prints a read-only PowerShell script that
+exports NTLMv1 evidence from event logs; ``ntlm-check`` reads that export and
+says who still uses NTLMv1, and ``scan --ntlm-evidence`` puts it in the report.
 
 Exit codes, so the command can run unattended (cron, an RMM agent):
 
@@ -66,6 +70,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
               f"in clear text; anyone on the network path can read it. Use "
               f"ldaps://<host>:636 instead.", file=sys.stderr)
     print(f"Scanning {ad.domain} via {ad.server} (read-only)...", file=sys.stderr)
+    evidence = None
+    if args.ntlm_evidence:
+        from .hardening.ntlm_evidence import EvidenceError, read_evidence, verdict
+        try:
+            evidence = verdict(read_evidence(args.ntlm_evidence))
+        except EvidenceError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
     try:
         manager = LDAPManager(ad, config.security, config.performance)
         payload = Scanner(manager).scan(operation="aditor scan")
@@ -82,6 +94,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if payload.get("success") is False:
         print(f"error: {payload['error']}", file=sys.stderr)
         return EXIT_ERROR
+    if evidence is not None:
+        payload["ntlmv1_evidence"] = evidence
 
     try:
         snapshot = write_snapshot(payload, args.out)
@@ -156,6 +170,36 @@ def cmd_diff(args: argparse.Namespace) -> int:
     return EXIT_ATTENTION if totals["regressions"] else EXIT_OK
 
 
+def cmd_ntlm_script(_args: argparse.Namespace) -> int:
+    from .hardening.ntlm_evidence import EXPORT_SCRIPT
+    sys.stdout.write(EXPORT_SCRIPT)
+    return EXIT_OK
+
+
+def cmd_ntlm_check(args: argparse.Namespace) -> int:
+    from .hardening.ntlm_evidence import (VERDICT_CLEAR, EvidenceError,
+                                          read_evidence, verdict)
+    try:
+        result = verdict(read_evidence(args.files))
+    except EvidenceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    print(result["summary"])
+    for source in result["sources"]:
+        print(f"  {source['count']:>5}  {source['domain']}\\{source['account']} "
+              f"from {source['client'] or source['client_ip'] or '?'} "
+              f"to {source['server']} ({source['via']})")
+    print("\nHosts:")
+    for host in result["hosts"]:
+        days = host["days_covered"]
+        print(f"  {host['host']}: {'?' if days is None else days} days of "
+              f"Security log; logon auditing "
+              f"{'on' if host['logon_auditing'] else 'NOT seen'}; NTLM log "
+              f"{'present' if host['ntlm_log'] else 'not present'}"
+              + (f"; error: {host['error']}" if host["error"] else ""))
+    return EXIT_OK if result["verdict"] == VERDICT_CLEAR else EXIT_ATTENTION
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="aditor",
@@ -167,12 +211,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     scan.add_argument("--out", default="scans",
                       help="directory to create the snapshot folder in "
                            "(default: ./scans)")
+    scan.add_argument("--ntlm-evidence", nargs="+", metavar="CSV",
+                      help="NTLMv1 evidence exported with 'ntlm-script', shown "
+                           "on the NTLMv2 card")
     scan.set_defaults(func=cmd_scan)
 
     diff = sub.add_parser("diff", help="compare two scans")
     diff.add_argument("old", help="earlier scan.json or snapshot folder")
     diff.add_argument("new", help="later scan.json or snapshot folder")
     diff.set_defaults(func=cmd_diff)
+
+    script = sub.add_parser("ntlm-script",
+                            help="print a read-only PowerShell script that "
+                                 "exports NTLMv1 evidence from event logs")
+    script.set_defaults(func=cmd_ntlm_script)
+
+    check = sub.add_parser("ntlm-check",
+                           help="read an NTLMv1 evidence export and say who "
+                                "still uses NTLMv1")
+    check.add_argument("files", nargs="+", metavar="CSV")
+    check.set_defaults(func=cmd_ntlm_check)
 
     args = parser.parse_args(argv)
     return args.func(args)

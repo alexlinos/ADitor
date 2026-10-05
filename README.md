@@ -185,6 +185,30 @@ rendered from synthetic data.
 **Both files contain directory content** — GPO display names, registry values
 and DNs. Treat them accordingly when sharing.
 
+### Who still uses NTLMv1?
+
+The scan reads Group Policy, not event logs, so it can't see which machines
+and accounts still use NTLMv1. A read-only PowerShell script collects that:
+
+```bash
+aditor ntlm-script > export.ps1   # list your DCs and servers in it, then run it
+aditor ntlm-check ntlmv1-evidence.csv
+aditor scan --config ad-config/config.json --ntlm-evidence ntlmv1-evidence.csv
+```
+
+The script reads two sources:
+
+- **Security event 4624:** NTLMv1 logons, on every Windows version.
+- **The NTLM operational log:** events 4020–4023 and 4030–4033, on Windows 11
+  24H2 and Server 2025.
+
+It writes one CSV, which holds account and machine names. Run it as a member of
+Event Log Readers on each host; it doesn't need Domain Admin.
+
+NTLMv1 is logged on the server being signed in to, so include every server, not
+just the domain controllers. ADitor only calls it clear when every host's logs
+cover 14 days with logon auditing on. An empty list on its own proves nothing.
+
 ### `aditor diff OLD NEW`
 
 Compares two scans, given as `scan.json` files or snapshot folders. It reads two
