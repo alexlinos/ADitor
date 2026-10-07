@@ -30,4 +30,4 @@ so a diff of two stored scans can say whether the engine or the baseline moved
 underneath it.
 """
 
-SCAN_ENGINE_VERSION = "1.6.0"
+SCAN_ENGINE_VERSION = "1.6.1"

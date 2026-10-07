@@ -2974,8 +2974,10 @@ class TestScopingByWhereComputersSit:
                                    scope=domain())
 
         assert finding["result"] == RESULT_FAIL
-        assert finding["evidence"]["coverage"] == {
-            "covered": 3, "total": 15, "unit": "computers"}
+        coverage = finding["evidence"]["coverage"]
+        assert (coverage["covered"], coverage["total"], coverage["unit"]) == (
+            3, 15, "computers")
+        assert [m["count"] for m in coverage["not_reached"]] == [10, 2]
         assert any("3 of 15 computers" in n for n in finding["evidence"]["notes"])
 
     def test_a_root_link_covers_every_computer(self, lm_control):
@@ -3017,8 +3019,10 @@ class TestScopingByWhereComputersSit:
         finding = evaluate_control(signing, [gpo], scope=domain(moved_dc=True))
 
         assert finding["result"] == RESULT_FAIL
-        assert finding["evidence"]["coverage"] == {
-            "covered": 1, "total": 2, "unit": "domain controllers"}
+        coverage = finding["evidence"]["coverage"]
+        assert (coverage["covered"], coverage["total"], coverage["unit"]) == (
+            1, 2, "domain controllers")
+        assert coverage["not_reached"] == [{"container": LAB_OU, "count": 1}]
 
     def test_uncovered_machines_with_a_windows_default_use_the_default(self):
         client = load_catalog().by_id("DEVORE-03-LDAP-CLIENT-SIGNING")
