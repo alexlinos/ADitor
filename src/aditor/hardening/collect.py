@@ -284,29 +284,48 @@ class Scanner:
         """
         try:
             entries = self._search("(objectCategory=computer)",
-                                   ["userAccountControl"])
+                                   ["userAccountControl", "operatingSystem"])
         except Exception as exc:  # noqa: BLE001 - fall back, and say so
             self.scope_notes.append(
                 f"Computer accounts couldn't be read ({exc}), so each GPO is "
                 f"judged by its links, not by the computers it reaches.")
             return None
         containers: Dict[str, List[int]] = {}
+        labels: Dict[str, str] = {}
+        not_windows = 0
         for entry in entries:
-            dn = _norm_dn(entry.get("dn") if isinstance(entry, dict) else "")
+            raw = str(entry.get("dn") or "") if isinstance(entry, dict) else ""
+            dn = _norm_dn(raw)
             if "," not in dn:
                 continue
-            uac = _as_int(_attr(entry.get("attributes", {}) or {},
-                                "userAccountControl"))
+            attributes = entry.get("attributes", {}) or {}
+            uac = _as_int(_attr(attributes, "userAccountControl"))
             if uac & _UAC_ACCOUNTDISABLE:
                 continue
-            counts = containers.setdefault(dn.split(",", 1)[1], [0, 0])
+            # Only Windows machines apply Group Policy. A computer account with
+            # no Windows operating system (an appliance, a cluster or listener
+            # name, AZUREADSSOACC) never does, so it isn't a machine a GPO
+            # failed to reach.
+            if not _text(_attr(attributes, "operatingSystem", "")).lower() \
+                    .startswith("windows"):
+                not_windows += 1
+                continue
+            container = dn.split(",", 1)[1]
+            labels.setdefault(container, raw.split(",", 1)[1].strip())
+            counts = containers.setdefault(container, [0, 0])
             counts[0] += 1
             if uac & (_UAC_SERVER_TRUST_ACCOUNT | _UAC_PARTIAL_SECRETS_ACCOUNT):
                 counts[1] += 1
+        if not_windows:
+            self.scope_notes.append(
+                f"{not_windows} enabled computer account(s) have no Windows "
+                f"operating system (appliances, cluster or listener names, "
+                f"AZUREADSSOACC and the like) and aren't counted: they don't "
+                f"apply Group Policy.")
         if not containers:
             return None
         return Scope(containers={dn: (c[0], c[1]) for dn, c in containers.items()},
-                     blocked=frozenset(self.blocked_containers))
+                     blocked=frozenset(self.blocked_containers), labels=labels)
 
     def _read_gpo_snapshots(self, links_by_guid: Dict[str, List[GpoLink]]
                             ) -> Tuple[List[GpoSnapshot], List[Dict[str, str]]]:

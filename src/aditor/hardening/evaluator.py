@@ -392,6 +392,8 @@ class Scope:
 
     containers: Dict[str, Tuple[int, int]]
     blocked: frozenset = frozenset()
+    #: Normalised container DN -> the DN as the directory spells it, for display.
+    labels: Dict[str, str] = field(default_factory=dict)
 
     def targets(self, control: Control) -> Dict[str, int]:
         """The machines a control is about, per container."""
@@ -854,7 +856,15 @@ def evaluate_control(control: Control,
         covered = set().union(*(reach.get(m["gpo_dn"], set()) for m in matches))
         total = sum(targets.values())
         got = sum(targets[c] for c in covered)
-        coverage = {"covered": got, "total": total, "unit": unit}
+        missed = sorted(((c, n) for c, n in targets.items() if c not in covered),
+                        key=lambda item: (-item[1], item[0]))
+        hit = sorted(((c, targets[c]) for c in covered),
+                     key=lambda item: (-item[1], item[0]))
+        coverage = {"covered": got, "total": total, "unit": unit,
+                    "reached": [{"container": scope.labels.get(c, c),
+                                 "count": n} for c, n in hit[:8]],
+                    "not_reached": [{"container": scope.labels.get(c, c),
+                                     "count": n} for c, n in missed[:8]]}
         if got < total:
             rest = total - got
             if control.os_default is not None:
@@ -869,9 +879,14 @@ def evaluate_control(control: Control,
             else:
                 worst = STATE_NOT_STARTED
                 outcome = "aren't configured"
+            where = ", ".join(f"{scope.labels.get(c, c)} ({n})"
+                              for c, n in missed[:8])
             extra_notes.append(
                 f"Group Policy sets this on {got} of {total} {unit}. The "
-                f"other {rest} get no value from it, so they {outcome}.")
+                f"other {rest} get no value from it, so they {outcome}. "
+                f"Not reached: {where}"
+                + (f" and {len(missed) - 8} more places." if len(missed) > 8
+                   else "."))
 
     if control.operator == "present":
         result = RESULT_PASS

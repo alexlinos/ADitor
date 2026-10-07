@@ -57,6 +57,7 @@ BASE_DN = "DC=test,DC=local"
 GUID_A = "11111111-1111-1111-1111-111111111111"
 GUID_B = "22222222-2222-2222-2222-222222222222"
 GUID_C = "33333333-3333-3333-3333-333333333333"
+GUID_D = "44444444-4444-4444-4444-444444444444"
 
 # A GPO display name an attacker who can rename a GPO would choose. Directory
 # content is untrusted input to this renderer.
@@ -1021,12 +1022,23 @@ def sample_scan(first_gpo=HOSTILE_NAME):
         snapshot(GUID_C, "Unreadable Sample GPO",
                  links=[GpoLink(target_dn=BASE_DN)],
                  read_error="SMB read failed: STATUS_ACCESS_DENIED"),
+        # LLMNR off on the workstations only, so the sample shows partial
+        # coverage: done here, not on the servers.
+        snapshot(GUID_D, "Sample Workstation LLMNR GPO",
+                 links=[GpoLink(target_dn=f"OU=Workstations,{BASE_DN}")],
+                 pol_entries=[{"key": r"Software\Policies\Microsoft\Windows NT"
+                                      r"\DNSClient",
+                               "value": "EnableMulticast", "type": "REG_DWORD",
+                               "data": 0}]),
     ], catalog=catalog, read_errors=read_errors, scope=Scope(containers={
         # A small made-up fleet, so the sample shows "Applies to: N of M".
         f"ou=domain controllers,{BASE_DN}".lower(): (2, 2),
         f"ou=workstations,{BASE_DN}".lower(): (40, 0),
         f"ou=servers,{BASE_DN}".lower(): (8, 0),
-    }), directory={
+    }, labels={f"ou={ou},{BASE_DN}".lower(): f"OU={OU},{BASE_DN}"
+               for ou, OU in (("domain controllers", "Domain Controllers"),
+                              ("workstations", "Workstations"),
+                              ("servers", "Servers"))}), directory={
         # One directory-state failure and two passes, so the sample shows
         # what a directory finding looks like.
         "DEVORE-07-UNCONSTRAINED-DELEGATION": {"objects": [{
@@ -1948,3 +1960,47 @@ class TestCoverageIsShown:
     def test_the_sample_shows_coverage(self):
         document = render_report(sample_scan("Sample Workstation Baseline GPO"))
         assert "Applies to:</strong>" in document
+
+
+class TestPartialCoverageReadsAsProgressThenGap:
+    """Done here, not there, and what that means there."""
+
+    def document(self, covered):
+        payload = sample_scan("Sample Workstation Baseline GPO")
+        finding = next(f for f in payload["findings"]
+                       if f["control_id"] == "DEVORE-06-LLMNR-DISABLE")
+        finding["evidence"]["coverage"] = {
+            "covered": covered, "total": 150, "unit": "computers",
+            "reached": [{"container": "OU=Workstations,DC=example,DC=com",
+                         "count": covered}] if covered else [],
+            "not_reached": [{"container": "OU=Servers,DC=example,DC=com",
+                             "count": 150 - covered}]}
+        document = render_report(payload)
+        card = document[document.index('id="devore-06-llmnr-disable"'):]
+        return card[:card.index("</article>")]
+
+    def test_it_credits_what_is_done_then_names_the_gap_and_its_risk(self):
+        card = self.document(130)
+        assert "Done on 130 of 150 computers:</strong> " \
+               "OU=Workstations,DC=example,DC=com (130)" in card
+        assert "Not yet on 20:</strong> OU=Servers,DC=example,DC=com (20)" in card
+        assert "What that leaves open: On the local network, an attacker" in card
+        assert card.index("Done on") < card.index("Not yet on")
+
+    def test_nothing_done_says_only_the_gap(self):
+        card = self.document(0)
+        assert "Done on" not in card
+        assert "Not yet on 150" in card
+
+
+class TestPartialCoverageNextStep:
+
+    def test_a_setting_done_where_it_applies_says_to_extend_it(self):
+        document = render_report(sample_scan("Sample Workstation Baseline GPO"))
+        card = document[document.index('id="devore-06-llmnr-disable"'):]
+        card = card[:card.index("</article>")]
+        assert "Next:</strong> apply the same setting to the 10 computers it " \
+               "doesn&#x27;t reach yet" in card or \
+               "apply the same setting to the 10 computers it doesn't reach yet" in card
+        assert card.count("collect password hashes") == 1
+        assert "OU=Servers,DC=test,DC=local (8)" in card

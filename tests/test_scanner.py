@@ -812,9 +812,10 @@ class TestScopingThroughTheScan:
     WS = f"OU=Workstations,{BASE_DN}"
 
     @staticmethod
-    def computer(name, ou, uac=0x1000):
+    def computer(name, ou, uac=0x1000, os="Windows 11 Pro"):
         return {"dn": f"CN={name},{ou}",
-                "attributes": {"userAccountControl": uac}}
+                "attributes": {"userAccountControl": uac,
+                               "operatingSystem": os}}
 
     def wire(self, mock_ldap_manager, link_entries, computers, extra=()):
         wire_ldap(mock_ldap_manager, [gpo_entry(GUID_SIGNING, "LM Policy")],
@@ -854,8 +855,9 @@ class TestScopingThroughTheScan:
         finding = response["findings"][0]
 
         assert finding["result"] == "fail"
-        assert finding["evidence"]["coverage"] == {
-            "covered": 1, "total": 10, "unit": "computers"}
+        coverage = finding["evidence"]["coverage"]
+        assert (coverage["covered"], coverage["total"]) == (1, 10)
+        assert coverage["not_reached"][0] == {"container": self.WS, "count": 8}
         assert response["scan"]["computers_scoped"] == 10
 
     def test_block_inheritance_on_an_ou_without_links_is_read(
@@ -883,3 +885,20 @@ class TestScopingThroughTheScan:
 
         assert finding["result"] != "pass"
         assert finding["evidence"]["found"] == []
+
+    def test_computer_accounts_without_windows_are_not_counted(
+            self, tools, mock_ldap_manager):
+        """Appliances, cluster names and AZUREADSSOACC never apply Group
+        Policy, so a GPO not reaching them isn't a gap."""
+        fleet = ([self.computer("WS1", self.WS)]
+                 + [self.computer("NAS1", self.WS, os=""),
+                    self.computer("AZUREADSSOACC", f"CN=Computers,{BASE_DN}",
+                                  os="")])
+        self.wire(mock_ldap_manager, [link_entry(self.WS, GUID_SIGNING)], fleet)
+
+        response = self.scan_lm(tools)
+
+        assert response["findings"][0]["result"] == "pass"
+        assert response["scan"]["computers_scoped"] == 1
+        assert any("2 enabled computer account(s) have no Windows" in note
+                   for note in response["scan"]["scope_notes"])

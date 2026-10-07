@@ -667,6 +667,15 @@ def _next_step(finding: Dict[str, Any], section_id: str) -> str:
     if _is_directory(finding):
         count = len((finding.get("evidence") or {}).get("found") or [])
         return f"fix the {count} listed on the card"
+    coverage = (finding.get("evidence") or {}).get("coverage")
+    if isinstance(coverage, dict) and coverage.get("covered") and \
+            coverage.get("covered") != coverage.get("total") and all(
+                m.get("rollout_state") == "enforced" for m in
+                (finding.get("evidence") or {}).get("found") or []
+                if isinstance(m, dict)):
+        missing = coverage["total"] - coverage["covered"]
+        return (f"apply the same setting to the {missing} "
+                f"{_esc(coverage.get('unit'))} it doesn't reach yet")
     expected = (finding.get("evidence") or {}).get("expected") or {}
     if not isinstance(expected, dict) or expected.get("operator") in (
             "present", "absent"):
@@ -1262,6 +1271,37 @@ _NTLM_SOURCES_SHOWN = 15
 _NTLM_VERDICT_CSS = {"blocked": "danger", "not-yet": "warn", "clear": "ok-banner"}
 
 
+def _places(entries: Any) -> str:
+    return ", ".join(f'{_esc(m.get("container"))} ({_esc(m.get("count"))})'
+                     for m in entries or [] if isinstance(m, dict))
+
+
+def _render_partial(finding: Dict[str, Any]) -> str:
+    """Done here, not there, and what that leaves open there.
+
+    A setting applied to some machines is progress, and the card should say
+    so before saying where it's missing and what the gap means.
+    """
+    coverage = (finding.get("evidence") or {}).get("coverage")
+    if not isinstance(coverage, dict) or not coverage.get("total") \
+            or coverage.get("covered") == coverage.get("total"):
+        return ""
+    covered, total = coverage.get("covered") or 0, coverage.get("total")
+    unit = _esc(coverage.get("unit"))
+    lines = []
+    if covered:
+        lines.append(f'<p class="done-here">&#10003; <strong>Done on {covered} '
+                     f'of {total} {unit}:</strong> '
+                     f'{_places(coverage.get("reached"))}.</p>')
+    risk = finding.get("why_it_matters")
+    lines.append(f'<p class="not-here">&#10007; <strong>Not yet on '
+                 f'{total - covered}:</strong> '
+                 f'{_places(coverage.get("not_reached"))}.'
+                 + (f' What that leaves open: {_esc(risk)}' if risk else "")
+                 + ' Link the GPO there too, or to a container above them.</p>')
+    return f'<div class="block partial">{"".join(lines)}</div>'
+
+
 def _render_ntlm_evidence(finding: Dict[str, Any]) -> str:
     """Who still uses NTLMv1, from an exported event log, on the NTLMv2 card."""
     if finding.get("control_id") != _LM_CONTROL:
@@ -1517,7 +1557,8 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
     anchor = control_id.lower().replace(" ", "-")
 
     body: List[str] = []
-    if finding.get("why_it_matters"):
+    # With partial coverage the risk is said once, where the gap is.
+    if finding.get("why_it_matters") and not _render_partial(finding):
         body.append(f'<p class="why">{_esc(finding.get("why_it_matters"))}</p>')
     body.append(_deadline_line(finding, _SCAN_DATE.get("date", "")))
     body.append(_render_glance(finding))
@@ -1533,6 +1574,7 @@ def _render_card(finding: Dict[str, Any], section_id: str) -> str:
         body.append(_render_unknown_reason(finding))
         notes_shown = True
     body.append(_render_conflict(finding))
+    body.append(_render_partial(finding))
     body.append(_render_ntlm_evidence(finding))
     if section_id in (SECTION_FAIL, SECTION_UNKNOWN, SECTION_OPPORTUNITIES):
         body.append(_render_first_step(finding, section_id))
@@ -1963,6 +2005,8 @@ details.group>summary h2{display:inline}
 details.group>summary::before{content:"\\25B8  ";color:var(--muted)}
 details.group[open]>summary::before{content:"\\25BE  "}
 .method{margin-top:2rem}
+.partial .done-here{color:var(--ok)}
+.partial .not-here{color:var(--bad)}
 .danger{background:var(--bad-bg);border-left:4px solid var(--bad);
 padding:.5rem .7rem;margin:.4rem 0}
 details.howto>summary{cursor:pointer;font-weight:600}
